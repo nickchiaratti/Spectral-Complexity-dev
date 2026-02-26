@@ -5,7 +5,7 @@ import warnings
 '''
 methods pulled from MaxD_Gram.py with minor updates
 '''
-def maximumDistance(data, num_endmembers, mnf_data=0, gram='general',normalization=None):
+def maximumDistance(data, num_endmembers, mnf_data=0, gram=None,normalization=None):
     '''
     Args:
         data (np.ndarray): 2D data [npixels, nbands]

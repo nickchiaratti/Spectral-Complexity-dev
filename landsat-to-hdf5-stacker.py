@@ -330,7 +330,7 @@ def process_landsat_stack(root_dir, output_path):
                         
                         if np.any(valid_mask):
                              scaled = (temp_uint[valid_mask].astype(np.float32) * REFLECTANCE_MULT_BAND_SR) + REFLECTANCE_ADD_BAND_SR
-                             dest_float[valid_mask] = np.maximum(scaled, 0.0)
+                             dest_float[valid_mask] = np.clip(scaled, 0.0, 1.0)
 
                         dset_sr[t, b_idx, :, :] = dest_float
                 except Exception as e: print(f"Band error frame {t}: {e}")
@@ -360,5 +360,5 @@ def process_landsat_stack(root_dir, output_path):
 if __name__ == '__main__':
     in_dir = "C:/satelliteImagery/LANDSAT/SourceData"
     if in_dir:
-        out_file = os.path.join(in_dir, f"{Location}_HDFEOS.h5")
+        out_file = f"C:/satelliteImagery/LANDSAT/{Location}/LANDSAT_Stack_{Location}_HDFEOS.h5"
         process_landsat_stack(in_dir, out_file)
