@@ -5,22 +5,32 @@ import warnings
 '''
 methods pulled from MaxD_Gram.py with minor updates
 '''
-def maximumDistance(data, num_endmembers, mnf_data=0, gram='general',normalization=None):
+def calcGramLocal(endmembers, mean_vector):
+    """
+    Calculates the Local Gram matrix.
+    1. Subtracts the mean vector from all other endmembers (centering the simplex on x).
+    2. Calculates the Gram matrix of these centered vectors.
+    """
+    # Reduce to current number of endmembers
+    # Shape: (Bands, N)
+    localized_vectors = endmembers - mean_vector[:, np.newaxis]
+
+    # Calculate Gram Matrix
+    # G = V^T * V
+    gram = np.matmul(localized_vectors.T, localized_vectors)
+    return gram
+
+def maximumDistance(data, num_endmembers):
     '''
     Args:
         data (np.ndarray): 2D data [npixels, nbands]
         num_endmembers (int): number of endmembers to be calculated (choose more than expected to find)
-        mnf_data (np.ndarray): MNF data [npixels, nbands]
-        gram (str): type of gram matrix to be calculated ('general' or 'local', or 'corrected')
-        normalization (str): type of normalization to be applied ('magnitude', 'band_count', or None)
     Returns:
         endmembers [bands, num_endmembers]
         endmembers_index [1, num_endmembers]
-        volume [num_endmembers]
     '''
     # data = 2D data [npixels, nbands]
     # num_endmembers = number of endmembers to be calculated (choose more than expected to find)
-    # if MNF data is not available, code will assign img as mnf_data
     #print('---> In MaxD extracting endmembers and Grammian ...')
        
     # Ensure data is 2D [npixels, nbands]
@@ -31,6 +41,7 @@ def maximumDistance(data, num_endmembers, mnf_data=0, gram='general',normalizati
         image2D = data
     if np.min(data) < -1:
         warnings.warn('Data contains negative values')
+        data = np.clip(data, 0, 2)
     if np.max(data) > 1:
         warnings.warn('Data contains values greater than 1')
         data = np.clip(data, 0, 1)
@@ -43,7 +54,7 @@ def maximumDistance(data, num_endmembers, mnf_data=0, gram='general',normalizati
     if np.sum(valid_mask) < num_endmembers:
         print(f"Not enough valid pixels (no NaNs) to find {num_endmembers} endmembers. Found {np.sum(valid_mask)} valid pixels.")
         # Return empty/zero arrays with correct shape [bands, num]
-        return np.zeros([image2D.shape[1], num_endmembers]), np.zeros([1, num_endmembers]), np.zeros([num_endmembers])
+        return np.full((data.shape[1],num_endmembers),np.nan), np.full((1,num_endmembers),np.nan)
 
     # Filter data to keep only valid pixels
     valid_data = image2D[valid_mask]
@@ -51,42 +62,23 @@ def maximumDistance(data, num_endmembers, mnf_data=0, gram='general',normalizati
     # Store original indices to map back later
     # valid_indices[i] contains the index in the original flattened image2D corresponding to the i-th row in valid_data
     valid_indices = np.where(valid_mask)[0]
-    
-    if mnf_data == 0:
-        mnf_data = valid_data
-    else:
-        # If mnf_data was provided, we must reshape and filter it exactly the same way
-        mnf_2D = np.reshape(mnf_data, (mnf_data.shape[0] * mnf_data.shape[1], mnf_data.shape[2]), order="F")
-        mnf_data = mnf_2D[valid_mask]
 
     data = np.transpose(valid_data)
-    data2 = np.transpose(mnf_data)
     if np.min(data) < -1:
         raise ValueError('Data contains negative values')
-
-    # Calculate the mean vector of the entire dataset axis=1 averages across pixels, resulting in a vector of size [bands]
-    mean_vector = np.mean(data, axis=1) 
 
     # find data size
     num_bands = data.shape[0]
     num_pix = data.shape[1]
 
     # calculate magnitude of all vectors to find min and max
-    magnitude = np.sum(np.square(data), axis=0)
+    magnitude = np.linalg.norm(data, axis=0)
     idx1 = np.argmax(magnitude)
     idx2 = np.argmin(magnitude)
 
     # create empty output arrays for endmembers
     endmembers = np.zeros([num_bands, num_endmembers])
-    endmembers_index = np.zeros([1, num_endmembers])
-
-    if normalization == 'magnitude':
-        # normalize pixel vectors
-        vec_norms = np.linalg.norm(data, axis=0)
-        vec_norms[vec_norms == 0] = 1
-        data = data / vec_norms
-        data2 = data2 / vec_norms
-    
+    endmembers_index = np.zeros([1, num_endmembers])   
 
     # assign largest and smallest vector as first and second endmembers
     endmembers[:, 0] = np.transpose(data[:, idx1])
@@ -96,16 +88,8 @@ def maximumDistance(data, num_endmembers, mnf_data=0, gram='general',normalizati
     endmembers_index[0, 0] = valid_indices[idx1]
     endmembers_index[0, 1] = valid_indices[idx2]
 
-    data_proj = np.matrix(data2)
+    data_proj = np.matrix(data)
     identity_matrix = np.identity(num_bands)
-
-    # create array for volume of determinant of Gram matrix
-    volume = np.zeros([num_endmembers])
-    if gram == 'general':
-        # calculate general gram matrix
-        gen_gram = calcGramGeneral(endmembers[:, 0:1])
-        volume[1] = np.sqrt(np.abs(np.linalg.det(gen_gram)))
-
 
     loop = np.arange(3, num_endmembers + 1)
     for i in loop:
@@ -121,7 +105,6 @@ def maximumDistance(data, num_endmembers, mnf_data=0, gram='general',normalizati
         # Optimize: avoid creating (bands x num_pix) matrix of ones
         # np.matmul(data_proj[:, idx2], np.ones([1, num_pix])) creates a huge matrix repeating the vector
         # We can just use broadcasting: data_proj[:, idx2] is (bands, 1), data_proj is (bands, num_pix)
-        
         vec = data_proj[:, idx2] # Shape (bands, 1)
         # Ensure it's a column vector
         if vec.ndim == 1:
@@ -139,156 +122,7 @@ def maximumDistance(data, num_endmembers, mnf_data=0, gram='general',normalizati
         # Map back to original index
         endmembers_index[0, i - 1] = valid_indices[idx2]
 
-        if gram == 'local':
-            # calculate local gram matrix
-            loc_gram = calcGramLocal(endmembers, i)
-            volume[i - 1] = np.sqrt(np.abs(np.linalg.det(loc_gram)))
-
-        elif gram == 'corrected':
-            # calculate corrected gram matrix
-            corr_gram = calcGramCorrected(endmembers, i, mean_vector)
-            volume[i - 1] = np.sqrt(np.abs(np.linalg.det(corr_gram)))
-            if normalization == 'dimensionality':
-                volume[i - 1] = np.power(volume[i - 1], 1/(i-1))
-
-        elif gram == 'general':
-            # calculate general gram matrix
-            gen_gram = calcGramGeneral(endmembers[:, 0:i])
-            volume[i - 1] = np.sqrt(np.abs(np.linalg.det(gen_gram)))
-            if normalization == 'dimensionality':
-                volume[i - 1] = np.power(volume[i - 1], 1/(i))
-
-    if normalization == 'band_count':
-        volume = volume / num_bands
-    return endmembers, endmembers_index, volume
-
-def calcGramCorrected(data_endmembers, num_endmembers, mean_vector):
-    """
-    Calculates the Local Gram matrix.
-    
-    1. Finds the endmember 'x' closest to the dataset mean.
-    2. Subtracts 'x' from all other endmembers (centering the simplex on x).
-    3. Calculates the Gram matrix of these centered vectors.
-    """
-    # Edge Case: If only 1 endmember, volume is 0.
-    if num_endmembers < 2:
-        return np.zeros((1, 1))
-
-    # Reduce to current number of endmembers
-    # Shape: (Bands, N)
-    current_endmembers = data_endmembers[:, 0:num_endmembers]
-
-    # 1. Find endmember closest to the dataset mean
-    # mean_vector shape: (Bands,)
-    
-    # Determine difference between endmembers and dataset mean: (Bands, N) - (Bands, 1)
-    diff_from_mean = current_endmembers - mean_vector[:, np.newaxis]
-    dist_from_mean = np.linalg.norm(diff_from_mean, axis=0)
-    
-    # Index of the endmember closest to the dataset mean
-    center_idx = np.argmin(dist_from_mean)
-    
-    # The endmember closest to the dataset mean
-    vector_x = current_endmembers[:, center_idx] # Shape: (Bands,)
-
-    # 2. Extract remaining vectors (exclude x)
-    # Create a boolean mask of indices to keep
-    mask = np.arange(num_endmembers) != center_idx
-    remaining_vectors = current_endmembers[:, mask] # Shape: (Bands, N-1)
-
-    # 3. Localize: Subtract x from remaining vectors
-    # (Bands, N-1) - (Bands, 1)
-    centered_vectors = vector_x[:, np.newaxis] - remaining_vectors
-    # 4. Calculate Gram Matrix
-    # G = V^T * V
-    gram = np.matmul(centered_vectors.T, centered_vectors)
-
-    return gram
-
-def calcGramCorrected_zeros(data_endmembers, num_endmembers, mean_vector):
-    """
-    Calculates the Local Gram matrix.
-    
-    1. Finds the endmember 'x' closest to the dataset mean.
-    2. Subtracts 'x' from all other endmembers (centering the simplex on x).
-    3. Calculates the Gram matrix of these centered vectors.
-    """
-    # Edge Case: If only 1 endmember, volume is 0.
-    if num_endmembers < 2:
-        return np.zeros((1, 1))
-
-    # Reduce to current number of endmembers
-    # Shape: (Bands, N)
-    current_endmembers = data_endmembers[:, 0:num_endmembers]
-
-    # 1. Find endmember closest to the dataset mean
-    # mean_vector shape: (Bands,)
-    
-    # Determine difference between endmembers and dataset mean: (Bands, N) - (Bands, 1)
-    diff_from_mean = current_endmembers - mean_vector[:, np.newaxis]
-    dist_from_mean = np.linalg.norm(diff_from_mean, axis=0)
-    
-    # Index of the endmember closest to the dataset mean
-    center_idx = np.argmin(dist_from_mean)
-    
-    # The endmember closest to the dataset mean
-    vector_x = current_endmembers[:, center_idx] # Shape: (Bands,)
-
-    ## 2. Extract remaining vectors (exclude x)
-    ## Create a boolean mask of indices to keep
-    #mask = np.arange(num_endmembers) != center_idx
-    #remaining_vectors = current_endmembers[:, mask] # Shape: (Bands, N-1)
-#
-    # 3. Localize: Subtract x from remaining vectors
-    # (Bands, N-1) - (Bands, 1)
-    centered_vectors = vector_x[:, np.newaxis] - current_endmembers
-
-    # 4. Calculate Gram Matrix
-    # G = V^T * V
-    gram = np.matmul(centered_vectors.T, centered_vectors)
-
-    return gram
-
-
-def calcGramGeneral(data_endmembers):
-    # calculate gram matrix = V^T * V
-    gram = np.matmul(np.transpose(data_endmembers), data_endmembers)
-
-    return gram
-
-
-def calcGramLocal(data_endmembers, iteration):
-    # use only endmembers already calculated
-    data_endmembers = data_endmembers[:, 0:iteration]
-
-    # calculate the Gram matrix based on local information (points nearest to mean)
-    # num_bands = data_endmembers.shape[0]
-    num_pix = data_endmembers.shape[1]
-
-    # create mean vector
-    mean_spec = np.mean(data_endmembers, axis=1)
-
-    # calculate normalized difference between mean vector and endmembers and find closest vector to mean vector
-    diffdist = np.linalg.norm(np.transpose(np.matlib.repmat(mean_spec, num_pix, 1)) - data_endmembers, axis=0)
-    min_idx = np.argmin(diffdist)
-
-    # create index of rows to keep
-    index = np.ones([num_pix])
-    # keep all but min distance one
-    index[min_idx] = 0
-    # find index of all nonzero entires
-    keep_idx = np.squeeze(np.where(index == 1))
-    nearpix = data_endmembers[:, keep_idx]
-
-    # calculate local Gram
-    num_neighbors = nearpix.shape[1]
-    # gram = np.zeros([num_neighbors, num_neighbors])
-    diff_matrix = nearpix - np.transpose(np.matlib.repmat(mean_spec, num_neighbors, 1))
-
-    gram = np.matmul(np.transpose(diff_matrix), diff_matrix)
-    #print('<--- done')
-
-    return gram
+    return endmembers, endmembers_index
 
 
 def plot_endmember_locations(image_cube, rgb_indices, endmember_indices, endmembers):
@@ -392,9 +226,24 @@ def process_volume_frame(frame_data, num_endmembers, gram_type='general', valid_
         print("Not enough pixels to find endmembers")
         return np.zeros([bands, num_endmembers]), np.zeros([1, num_endmembers]), np.zeros([num_endmembers])
 
-    # Calculate using NSC toolbox
-    endmembers, endmember_indices, volume = maximumDistance(image2D, num_endmembers, 0, gram_type, norm_type)
-    
+    endmembers, endmember_indices = maximumDistance(image2D, num_endmembers)
+    volume = np.zeros(num_endmembers)
+    if gram_type == 'datasetMean':
+        print("Localizing Gram to dataset mean")
+        meanVector = image2D.mean(axis=0)
+        for i in range(1, num_endmembers):
+            if norm_type == 'bandCount':
+                volume[i] = np.sqrt(np.abs(np.linalg.det(calcGramLocal(endmembers[:, 0:i]/np.sqrt(bands),meanVector/np.sqrt(bands)))))
+            elif norm_type == None:
+                volume[i] = np.sqrt(np.abs(np.linalg.det(calcGramLocal(endmembers[:, 0:i],meanVector))))
+    else:
+        print("Localizing Gram to 0")
+        for i in range(1, num_endmembers):
+            if norm_type == 'bandCount':
+                volume[i] = np.sqrt(np.abs(np.linalg.det(calcGramLocal(endmembers[:, 0:i]/np.sqrt(bands),np.zeros(bands)))))
+            elif norm_type == None:
+                volume[i] = np.sqrt(np.abs(np.linalg.det(calcGramLocal(endmembers[:, 0:i],np.zeros(bands)))))
+
     # Return full volume array (curve) instead of just the maximum
     return endmembers, endmember_indices, volume
 
@@ -426,12 +275,19 @@ def process_volume_tiles(frame_data, tile_size, num_endmembers, gram_type='gener
             chunk_2d = np.reshape(chunk, (-1, bands))
             
             if chunk_2d.shape[0] >= num_endmembers:
-                _, _, volume = maximumDistance(chunk_2d, num_endmembers, 0, gram_type, norm_type)
-                if norm_type == 'simplex':
-                    max_simplex = np.argmax(volume[2:])+2
-                    output_map[y:y_end, x:x_end] = np.max(volume[2:])/(max_simplex-1)
-                else:
-                    output_map[y:y_end, x:x_end] = np.max(volume[2:])
+                meanVector = chunk_2d.mean(axis=0)
+                volume = np.zeros(num_endmembers)
+                endmembers, _ = maximumDistance(chunk_2d, num_endmembers)
+                if norm_type == 'bandCount':
+                    endmembers = endmembers / np.sqrt(bands)
+                    meanVector = meanVector / np.sqrt(bands)
+                for i in range(2, num_endmembers):
+                    if gram_type == 'datasetMean':
+                        volume[i] = np.sqrt(np.abs(np.linalg.det(calcGramLocal(endmembers[:, 0:i],meanVector))))
+                    else:
+                        volume[i] = np.sqrt(np.abs(np.linalg.det(calcGramLocal(endmembers[:, 0:i],np.zeros(bands)))))
+
+                output_map[y:y_end, x:x_end] = np.max(volume[2:])
     
     # Explicitly enforce spatial mask on final output
     output_map[valid_mask == 0] = np.nan
@@ -467,15 +323,19 @@ def process_volume_sliding_tile(frame_data, tile_size, stride, num_endmembers, g
             tile_2d = np.reshape(tile_cube, (-1, bands))
             
             if tile_2d.shape[0] >= num_endmembers:
-                _, _, volume = maximumDistance(tile_2d, num_endmembers, 0, gram_type, norm_type)
-                if norm_type == 'dimensionality':
-                    max_dimensionality = np.argmax(volume[2:])+2
-                    vol_val = volume[max_dimensionality]/max_dimensionality
-                if norm_type == 'simplex':
-                    max_simplex = np.argmax(volume[2:])+2
-                    vol_val = np.max(volume[2:])/(max_simplex-1)
-                else:
-                    vol_val = np.max(volume[2:])
+                meanVector = tile_2d.mean(axis=0)
+                endmembers, _ = maximumDistance(tile_2d, num_endmembers)
+                if norm_type == 'bandCount':
+                    endmembers = endmembers / np.sqrt(bands)
+                    meanVector = meanVector / np.sqrt(bands)
+                volume = np.zeros(num_endmembers)
+                for i in range(2, num_endmembers):
+                    if gram_type == 'datasetMean':
+                        volume[i] = np.sqrt(np.abs(np.linalg.det(calcGramLocal(endmembers[:, 0:i],meanVector))))
+                    else:
+                        volume[i] = np.sqrt(np.abs(np.linalg.det(calcGramLocal(endmembers[:, 0:i],np.zeros(bands)))))
+                vol_val = np.max(volume[2:])
+
                 sum_map[y_start:y_end, x_start:x_end] += vol_val
                 count_map[y_start:y_end, x_start:x_end] += 1
             

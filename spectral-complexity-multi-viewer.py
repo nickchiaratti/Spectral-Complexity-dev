@@ -467,11 +467,11 @@ if __name__ == "__main__":
     root = tk.Tk(); root.withdraw()
     print("Select LANDSAT HDF5...")
     #l_path = filedialog.askopenfilename(title="Select Landsat HDF5", filetypes=[("HDF5", "*.h5")])
-    l_path = "C:/satelliteImagery/LANDSAT/Tait/LANDSAT_Stack_Tait_HDFEOS_SC_EM-7_Gram-corrected_Norm-None_QA-Strict.h5"
+    l_path = "C:/satelliteImagery/LANDSAT/Tait/LANDSAT_Stack_Tait_HDFEOS_SC_EM-7_Gram-datasetMean_Norm-None_QA-Strict.h5"
 
     print("Select TANAGER HDF5...")
     #t_path = filedialog.askopenfilename(title="Select Tanager HDF5", filetypes=[("HDF5", "*.h5")])
-    t_path = "C:/satelliteImagery/Tanager/Tait/Tanager_Stack_Tait_HDFEOS_SC_EM-7_Gram-corrected_Norm-None_QA-Loose.h5"
+    t_path = "C:/satelliteImagery/Tanager/Tait/Tanager_Stack_Tait_HDFEOS_SC_EM-7_Gram-datasetMean_Norm-None_QA-Strict.h5"
     
     if l_path and t_path:
         viewer = MultiComplexityViewer([l_path, t_path])

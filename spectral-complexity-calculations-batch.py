@@ -1,17 +1,13 @@
 from spectral_complexity_calculations import process_file
 
 SC_Param_list = [ 
-    'band_count',
-    'dimensionality',
-    #'simplex',
-    #None, 
-    #'magnitude'
+    'bandCount',
+    None, 
 ]
 
 Gram_param_list = [
-    #'general',
-    'corrected',
-    #'local'
+    'datasetMean',
+    'general',
 ]
 
 Stacked_file_list = [

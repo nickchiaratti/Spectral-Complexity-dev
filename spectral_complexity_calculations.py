@@ -15,8 +15,8 @@ SLIDING_STRIDE = 1      # Stride for sliding window (1 = every pixel, higher = f
 # --- Parameters for Maximum-Distance ---
 num_endmembers = 7
 MAX_DIST_P2 = 0
-#gram_type = 'corrected'
-#SC_Param_Norm = None #'magnitude' 'band_count' None 'dimensionality' 'simplex'
+#gram_type = 'meanDataset'
+#SC_Param_Norm = None #'bandCount' None 
 
 def process_file(filepath, norm_param=None, gram_type='general'):
     print(f"Processing: {filepath}")
@@ -106,7 +106,7 @@ def overwrite_dset(h5, base_fields_path, name, shape, dtype='float32'):
     if name in h5[base_fields_path]: del h5[path]
     return h5[base_fields_path].create_dataset(name, shape=shape, dtype=dtype, compression="gzip")
 
-def process_image_stack(h5,sourceName, norm_param=None, gram_type='general'):
+def process_image_stack(h5,sourceName, norm_param, gram_type):
 
     grid_name = sourceName
     base_fields_path = f"/HDFEOS/GRIDS/{grid_name}/Data Fields"
@@ -135,8 +135,8 @@ def process_image_stack(h5,sourceName, norm_param=None, gram_type='general'):
 
     for t in range(num_frames):
         print(f"\n--- Frame {t+1}/{num_frames} ---")
+        frame_sr = ds_surfRef[t, ...]
         if sourceName == "LANDSAT":
-            frame_sr = ds_surfRef[t, ...]
             # Discovered 
             # Note: If strict exclusion was applied, this mask will be all True
             valid_spatial_mask = (ds_quality[t, ...] & QA_BAD_MASK) == 0
