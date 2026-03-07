@@ -13,29 +13,30 @@ from datetime import datetime
 from tqdm import tqdm
 import warnings
 
-# Suppress common Rasterio warnings for HDF5 root files
-warnings.filter_packages = ["rasterio"]
-warnings.filterwarnings("ignore", category=UserWarning, module="rasterio")
-
 # --- Configuration & ROI Definitions ---
-Location = "Tait"
 TIME_THRESHOLD_SECONDS = 60  # Group frames taken within 1 minute
 TARGET_RESOLUTION = 30.0     # Meters (Standard Tanager Product Spec)
-
-# Main directory
-SOURCE_DIR = "C:/satelliteImagery/Tanager/SourceData"
-OUTPUT_FILE = os.path.join(SOURCE_DIR, f"Tanager_Stack_{Location}_HDFEOS.h5")
-
 # Bounding Box (Longitude/Latitude)
+Location = "Tait"
 if Location == "Rochester":
     ROI_LON_MIN = -77.72; ROI_LON_MAX = -77.50
     ROI_LAT_MIN = 43.08; ROI_LAT_MAX = 43.28
 elif Location == "Tait":
     ROI_LON_MIN = -77.516127; ROI_LON_MAX = -77.461968
     ROI_LAT_MIN = 43.127698; ROI_LAT_MAX = 43.159168
-elif Location == "Tait-Tight":
-    ROI_LON_MIN = -77.510594; ROI_LON_MAX = -77.497333
-    ROI_LAT_MIN = 43.137844; ROI_LAT_MAX = 43.148929
+elif Location == "RIT":
+    ROI_LON_MIN = -77.688990; ROI_LON_MAX = -77.660365
+    ROI_LAT_MIN = 43.072486; ROI_LAT_MAX = 43.093298
+elif Location == "Tait-I-490":
+    ROI_LON_MIN = -77.516127; ROI_LON_MAX = -77.4450
+    ROI_LAT_MIN = 43.0450; ROI_LAT_MAX = 43.159168
+
+# Main directory
+SOURCE_DIR = "C:/satelliteImagery/Tanager/SourceData"
+OUTPUT_DIR = f"C:/satelliteImagery/Tanager/{Location}"
+if not os.path.exists(OUTPUT_DIR):
+    os.makedirs(OUTPUT_DIR)
+OUTPUT_FILE = os.path.join(OUTPUT_DIR, f"Tanager_Stack_{Location}_HDFEOS.h5")
 
 def calculate_target_grid(lon_min, lon_max, lat_min, lat_max, resolution):
     """
@@ -222,7 +223,7 @@ def process_tanager_stack():
         src_grp = f["HDFEOS/GRIDS/HYP/Data Fields"]
         for name in src_grp.keys():
             dset = src_grp[name]
-            dataset_info_list.append({'name': name, 'h5_path': f"HDFEOS/GRIDS/HYP/Data Fields/{name}", 'dtype': dset.dtype, 'shape': dset.shape, 'fill': dset.attrs.get("_FillValue", 0)})
+            dataset_info_list.append({'name': name, 'h5_path': f"HDFEOS/GRIDS/HYP/Data Fields/{name}", 'dtype': dset.dtype, 'shape': dset.shape, 'fill': dset.attrs.get("_FillValue")})
             if name == "surface_reflectance": band_count = dset.shape[0]
 
     datasets_created_info = []
@@ -257,37 +258,29 @@ def process_tanager_stack():
                 
                 for scene in group:
                     fpath = scene["h5_file"].replace("\\", "/")
-                    src_tf, src_crs_info = extract_georeferencing_from_h5(scene["h5_file"])
-                    
-                    if src_tf is None:
-                        continue
+                    src_tf, src_crs_info = extract_georeferencing_from_h5(fpath)
 
-                    conn_options = [
-                        f'HDF5:"{fpath}"://{d_info["h5_path"].replace(" ", "_")}',
-                        f'HDF5:"{fpath}":/{d_info["h5_path"].replace(" ", "_")}',
-                        f'HDF5:"{fpath}"://{d_info["h5_path"]}',
-                        f'HDF5:"{fpath}":/{d_info["h5_path"]}'
-                    ]
+                    #conn_options = [
+                    #    f'HDF5:"{fpath}"://{d_info["h5_path"].replace(" ", "_")}',
+                    #    f'HDF5:"{fpath}":/{d_info["h5_path"].replace(" ", "_")}',
+                    #    f'HDF5:"{fpath}"://{d_info["h5_path"]}',
+                    #    f'HDF5:"{fpath}":/{d_info["h5_path"]}'
+                    #]
                     
-                    handle = None
-                    for conn in conn_options:
-                        try: handle = rasterio.open(conn); break
-                        except: continue
-                            
+                    #handle = None
+                    #for conn in conn_options:
+                    #    try: handle = rasterio.open(conn_options); break
+                    #    except: continue
+                    handle = rasterio.open(f'HDF5:"{fpath}"://{d_info["h5_path"].replace(" ", "_")}')
                     if handle:
                         try:
                             incoming = np.full(out_shape[1:], d_info['fill'], dtype=d_info['dtype'])
                             reproject(rasterio.band(handle, list(range(1, handle.count + 1))), incoming, 
                                       src_transform=src_tf, src_crs=src_crs_info, dst_transform=tf_target, dst_crs=dst_crs,
-                                      resampling=Resampling.nearest if ("mask" in name.lower() or "nodata" in name.lower() or "time" in name.lower()) else Resampling.bilinear,
+                                      resampling=Resampling.nearest if (d_info['dtype'].name == 'uint8') else Resampling.cubic_spline,
                                       src_nodata=d_info['fill'], dst_nodata=d_info['fill'])
                             
-                            # Mosaicking Logic:
-                            if "mask" in name.lower() or "nodata" in name.lower():
-                                mask = (incoming == 0) if (d_info['fill'] != 0) else (incoming != d_info['fill'])
-                            else:
-                                mask = (incoming != d_info['fill'])
-                                
+                            mask = (incoming != d_info['fill'])
                             pass_canvas[mask] = incoming[mask]
                         finally: handle.close()
                     else:
@@ -303,7 +296,7 @@ def process_tanager_stack():
                 
                 # Compute sr_invalid mask if processing reflectance
                 if name == "surface_reflectance" and ds_invalid is not None:
-                    invalid_mask = np.any(pass_canvas < 0, axis=0).astype(np.uint8)
+                    invalid_mask = np.logical_or(np.any(pass_canvas < 0, axis=0), np.any(pass_canvas > 1, axis=0)).astype(np.uint8)
                     ds_invalid[t_idx, ...] = invalid_mask
                 
                 if name == "surface_reflectance":
@@ -333,7 +326,6 @@ def process_tanager_stack():
         for t_idx, group in enumerate(grouped_scenes):
             pass_vis = np.zeros((4, height, width), dtype='uint8')
             for scene in group:
-                if not scene['vis_file']: continue
                 with rasterio.open(scene['vis_file']) as src:
                     incoming = np.zeros((4, height, width), dtype='uint8')
                     reproject(rasterio.band(src, [1, 2, 3, 4]), incoming, src_transform=src.transform, 

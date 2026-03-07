@@ -32,20 +32,18 @@ import tarfile
 # --- CONFIGURATION ---
 
 Location = "Tait"
-
-# Bounding Box (Longitude/Latitude)
 if Location == "Rochester":
     ROI_LON_MIN = -77.72; ROI_LON_MAX = -77.50
     ROI_LAT_MIN = 43.08; ROI_LAT_MAX = 43.28
 elif Location == "Tait":
     ROI_LON_MIN = -77.516127; ROI_LON_MAX = -77.461968
     ROI_LAT_MIN = 43.127698; ROI_LAT_MAX = 43.159168
-elif Location == "Tait-Tight":
-    ROI_LON_MIN = -77.510594; ROI_LON_MAX = -77.497333
-    ROI_LAT_MIN = 43.137844; ROI_LAT_MAX = 43.148929
 elif Location == "RIT":
     ROI_LON_MIN = -77.688990; ROI_LON_MAX = -77.660365
     ROI_LAT_MIN = 43.072486; ROI_LAT_MAX = 43.093298
+elif Location == "Tait-I-490":
+    ROI_LON_MIN = -77.516127; ROI_LON_MAX = -77.4450
+    ROI_LAT_MIN = 43.0450; ROI_LAT_MAX = 43.159168
 
 LANDSAT_WAVELENGTHS = [0.443, 0.482, 0.561, 0.655, 0.865, 1.609, 2.201]
 LANDSAT_BAND_NAMES = ["Coastal Aerosol", "Blue", "Green", "Red", "NIR", "SWIR 1", "SWIR 2"]
@@ -70,7 +68,9 @@ def parse_mtl_xml_content(xml_content_str):
     meta['cloud_cover'] = float(img_attrs.find('CLOUD_COVER').text)
     meta['sun_azimuth'] = float(img_attrs.find('SUN_AZIMUTH').text)
     meta['sun_elevation'] = float(img_attrs.find('SUN_ELEVATION').text)
-    meta['utm_zone'] = proj_attrs.find('UTM_ZONE').text
+    meta['wrs_path'] = int(img_attrs.find('WRS_PATH').text)
+    meta['wrs_row'] = int(img_attrs.find('WRS_ROW').text)
+    meta['utm_zone'] = int(proj_attrs.find('UTM_ZONE').text)
     
     band_filenames = {}
     for b in TARGET_BANDS_LIST:
@@ -78,12 +78,9 @@ def parse_mtl_xml_content(xml_content_str):
         filename = contents.find(tag_name).text
         band_filenames[b] = filename
     
-    qa_filename = contents.find('FILE_NAME_QUALITY_L1_PIXEL')
-    if qa_filename is None:
-         for child in contents:
-             if child.text and child.text.endswith('QA_PIXEL.TIF'):
-                 qa_filename = child; break
-    meta['qa_filename'] = qa_filename.text if qa_filename is not None else None
+    meta['qa_pixel_filename'] = contents.find('FILE_NAME_QUALITY_L1_PIXEL').text
+    meta['qa_aerosol_filename'] = contents.find('FILE_NAME_QUALITY_L2_AEROSOL').text
+    meta['qa_radsat_filename'] = contents.find('FILE_NAME_QUALITY_L1_RADIOMETRIC_SATURATION').text
     meta['band_filenames'] = band_filenames
     return meta
 
@@ -100,11 +97,8 @@ def calculate_target_grid(roi_bounds, force_utm_zone=None):
     lon_min, lat_min, lon_max, lat_max = roi_bounds
     
     # Determine UTM Zone
-    if force_utm_zone is not None:
-        zone = force_utm_zone
-    else:
-        center_lon = (lon_min + lon_max) / 2
-        zone = calculate_utm_zone(center_lon)
+    center_lon = (lon_min + lon_max) / 2
+    zone = calculate_utm_zone(center_lon)
     
     # Construct Destination CRS (WGS84 UTM)
     # Assumes Northern Hemisphere for now based on context (NY state)
@@ -131,11 +125,8 @@ def calculate_target_grid(roi_bounds, force_utm_zone=None):
     return dst_crs, transform_30, width_30, height_30, (dst_min_x, dst_max_y), (dst_max_x, dst_min_y), zone
 
 def get_raster_handle(source_type, source_path, filename_inside=None):
-    if source_type == 'dir':
-        return rasterio.open(os.path.join(source_path, filename_inside))
-    elif source_type == 'tar':
-        return rasterio.open(f"/vsitar/{source_path.replace('\\', '/')}/{filename_inside}")
-    return None
+
+    return rasterio.open(f"/vsitar/{source_path.replace('\\', '/')}/{filename_inside}")
 
 def generate_struct_metadata(grid_name, x_dim, y_dim, ul_coords, lr_coords, zone_code, num_bands, num_frames):
     """
@@ -209,8 +200,8 @@ def process_landsat_stack(root_dir, output_path):
     scenes = []
     for root, _, files in os.walk(root_dir):
         for f in files:
-            if f.endswith("MTL.xml"): scenes.append({'type': 'dir', 'path': root, 'mtl_file': f})
-            elif f.endswith(".tar") and "LC0" in f: scenes.append({'type': 'tar', 'path': os.path.join(root, f)})
+            if f.endswith(".tar") and "LC0" in f: 
+                scenes.append({'type': 'tar', 'path': os.path.join(root, f)})
 
     if not scenes: print("No scenes found."); return
 
@@ -218,12 +209,11 @@ def process_landsat_stack(root_dir, output_path):
     scenes_data = []
     for scene in tqdm(scenes, desc="Parsing Metadata"):
         try:
-            if scene['type'] == 'dir':
-                with open(os.path.join(scene['path'], scene['mtl_file']), 'r') as f: content = f.read()
-            else:
-                with tarfile.open(scene['path'], 'r') as tar:
-                    mtl = next(m for m in tar.getmembers() if m.name.endswith("MTL.xml"))
-                    content = tar.extractfile(mtl).read().decode('utf-8')
+            with tarfile.open(scene['path'], 'r') as tar:
+                for m in tar.getmembers():
+                    if m.name.endswith("MTL.xml"):
+                        content = tar.extractfile(m).read().decode('utf-8')
+                        break
             
             meta = parse_mtl_xml_content(content)
             meta['source_type'] = scene['type']
@@ -249,6 +239,7 @@ def process_landsat_stack(root_dir, output_path):
     # 4. Initialize HDF-EOS5 File
     print(f"\nInitializing HDF-EOS5: {output_path}")
     
+    
     with h5py.File(output_path, 'w') as f:
         # HDFEOS Information
         info_grp = f.create_group("HDFEOS INFORMATION")
@@ -271,9 +262,19 @@ def process_landsat_stack(root_dir, output_path):
                                 dtype='float32', compression='gzip', fillvalue=np.nan)
         
         # QA Pixel Dataset
-        dset_qa = data_grp.create_dataset('QUALITY_L1_PIXEL',
+        dset_pixel_qa = data_grp.create_dataset('QUALITY_L1_PIXEL',
                                 shape=(len(scenes_data), h_30, w_30),
-                                dtype='uint16', compression='gzip', fillvalue=0)
+                                dtype='uint16', compression='gzip', fillvalue=1)
+
+        # QA Aerosol Dataset
+        dset_aerosol_qa = data_grp.create_dataset('QUALITY_L2_AEROSOL',
+                                shape=(len(scenes_data), h_30, w_30),
+                                dtype='uint8', compression='gzip', fillvalue=1)
+
+        # Radiometric Saturation Dataset
+        dset_radsat = data_grp.create_dataset('RADIOMETRIC_SATURATION',
+                                shape=(len(scenes_data), h_30, w_30),
+                                dtype='uint16', compression='gzip', fillvalue=np.nan)
 
         # Attach attributes to dataset
         dset_sr.attrs['units'] = "Reflectance"
@@ -285,6 +286,9 @@ def process_landsat_stack(root_dir, output_path):
         spacecraft_ids = []
         sun_azimuths = []
         sun_elevations = []
+        wrs_paths = []
+        wrs_rows = []
+        cloud_covers = []
 
         # 6. Process Data
         for t, scene in enumerate(tqdm(scenes_data, desc="Writing Data")):
@@ -314,6 +318,9 @@ def process_landsat_stack(root_dir, output_path):
             spacecraft_ids.append(scene['spacecraft_id'])
             sun_azimuths.append(scene['sun_azimuth'])
             sun_elevations.append(scene['sun_elevation'])
+            wrs_paths.append(scene['wrs_path'])
+            wrs_rows.append(scene['wrs_row'])
+            cloud_covers.append(scene['cloud_cover'])
             
             # Multispectral
             for b_idx, band_num in enumerate(TARGET_BANDS_LIST):
@@ -322,7 +329,9 @@ def process_landsat_stack(root_dir, output_path):
                         # Temporary UINT16 array for warping
                         temp_uint = np.zeros((h_30, w_30), dtype='uint16')
                         reproject(rasterio.band(src, 1), temp_uint, src_transform=src.transform, src_crs=src.crs,
-                                  dst_transform=tf_30, dst_crs=dst_crs, resampling=Resampling.cubic)
+                                  dst_transform=tf_30, dst_crs=dst_crs, 
+                                  resampling=Resampling.cubic_spline, 
+                                  src_nodata=0, dst_nodata=0,)
                         
                         # Apply scaling and convert to float
                         dest_float = np.full((h_30, w_30), np.nan, dtype='float32')
@@ -336,15 +345,43 @@ def process_landsat_stack(root_dir, output_path):
                 except Exception as e: print(f"Band error frame {t}: {e}")
 
             # QA Pixel
-            if scene.get('qa_filename'):
+            if scene.get('qa_pixel_filename'):
                 try:
-                    with get_raster_handle(scene['source_type'], scene['source_path'], scene['qa_filename']) as src:
+                    with get_raster_handle(scene['source_type'], scene['source_path'], scene['qa_pixel_filename']) as src:
                         # Initialize with 0 (Background)
                         qa_uint = np.zeros((h_30, w_30), dtype='uint16')
                         # Important: Nearest neighbor for bitmask
                         reproject(rasterio.band(src, 1), qa_uint, src_transform=src.transform, src_crs=src.crs,
-                                  dst_transform=tf_30, dst_crs=dst_crs, resampling=Resampling.nearest)
-                        dset_qa[t, :, :] = qa_uint
+                                  dst_transform=tf_30, dst_crs=dst_crs, 
+                                  resampling=Resampling.nearest,
+                                  src_nodata=1, dst_nodata=1,)
+                        dset_pixel_qa[t, :, :] = qa_uint
+                except Exception as e: print(f"QA write error frame {t}: {e}")
+
+            # QA Aerosol
+            if scene.get('qa_aerosol_filename'):
+                try:
+                    with get_raster_handle(scene['source_type'], scene['source_path'], scene['qa_aerosol_filename']) as src:
+                        # Initialize with 0 (Background)
+                        qa_uint = np.zeros((h_30, w_30), dtype='uint8')
+                        # Important: Nearest neighbor for bitmask
+                        reproject(rasterio.band(src, 1), qa_uint, src_transform=src.transform, src_crs=src.crs,
+                                  dst_transform=tf_30, dst_crs=dst_crs, 
+                                  resampling=Resampling.nearest,
+                                  src_nodata=1, dst_nodata=1,)
+                        dset_aerosol_qa[t, :, :] = qa_uint
+                except Exception as e: print(f"QA write error frame {t}: {e}")
+
+            if scene.get('qa_radsat_filename'):
+                try:
+                    with get_raster_handle(scene['source_type'], scene['source_path'], scene['qa_radsat_filename']) as src:
+                        # Initialize with 0 (Background)
+                        qa_uint = np.zeros((h_30, w_30), dtype='uint16')
+                        # Important: Nearest neighbor for bitmask
+                        reproject(rasterio.band(src, 1), qa_uint, src_transform=src.transform, src_crs=src.crs,
+                                  dst_transform=tf_30, dst_crs=dst_crs, 
+                                  resampling=Resampling.nearest)
+                        dset_radsat[t, :, :] = qa_uint
                 except Exception as e: print(f"QA write error frame {t}: {e}")
 
             # Panchromatic logic removed
@@ -354,11 +391,18 @@ def process_landsat_stack(root_dir, output_path):
         dset_sr.attrs['spacecraft_id'] = np.array(spacecraft_ids, dtype='S20')
         dset_sr.attrs['sun_azimuth'] = np.array(sun_azimuths, dtype='float32')
         dset_sr.attrs['sun_elevation'] = np.array(sun_elevations, dtype='float32')
+        dset_sr.attrs['wrs_path'] = np.array(wrs_paths, dtype='int8')
+        dset_sr.attrs['wrs_row'] = np.array(wrs_rows, dtype='int8')
+        dset_sr.attrs['cloud_cover'] = np.array(cloud_covers, dtype='float32')
 
     print("\nProcessing Complete.")
 
 if __name__ == '__main__':
     in_dir = "C:/satelliteImagery/LANDSAT/SourceData"
     if in_dir:
-        out_file = f"C:/satelliteImagery/LANDSAT/{Location}/LANDSAT_Stack_{Location}_HDFEOS.h5"
+        out_dir = f"C:/satelliteImagery/LANDSAT/{Location}"
+        if not os.path.exists(out_dir):
+            os.makedirs(out_dir)
+        out_file = f"{out_dir}/LANDSAT_Stack_{Location}_HDFEOS.h5"
+        
         process_landsat_stack(in_dir, out_file)

@@ -1,3 +1,8 @@
+'''
+todo: implement LANDSAT radsat exclusion
+
+'''
+
 import shutil
 import h5py
 import numpy as np
@@ -5,32 +10,37 @@ import tkinter as tk
 from tkinter import filedialog
 import SpecComplex as sc
 
-
 # --- Configuration ---
 
-LANDSAT_Strict_QA_Exclusion = True
+QA_REJECT_MASK = 0b111111
+SUN_ELEVATION_THRESHOLD = 40
+QA_AEROSOL_ACCEPT_VALUES = [2, 4, 32, 66, 68, 96, 100]
+AEROSOL_ACCEPT_LEVEL = 'low' #'low' 'medium' 'high'
+AEROSOL_ACCEPT_VALUES = [2, 4, 32, 66, 68, 96, 100]
+
+# Flattened list creation to prevent h5py attribute assignment errors
+if AEROSOL_ACCEPT_LEVEL == 'medium':
+    AEROSOL_ACCEPT_VALUES.extend([130, 132, 160, 164])
+elif AEROSOL_ACCEPT_LEVEL == 'high':
+    AEROSOL_ACCEPT_VALUES.extend([130, 132, 160, 164, 192, 194, 196, 224, 228])
+
+
 TILE_SIZE = 3          # Size of the window (NxN pixels) for volume calc
 SLIDING_STRIDE = 1      # Stride for sliding window (1 = every pixel, higher = faster)
+
 
 # --- Parameters for Maximum-Distance ---
 num_endmembers = 7
 MAX_DIST_P2 = 0
-#gram_type = 'meanDataset'
-#SC_Param_Norm = None #'bandCount' None 
+#gram_type = 'datasetMean' # 'general
+#SC_Param_Norm = 'bandCount' #'bandCount' None 
 
-def process_file(filepath, norm_param=None, gram_type='general'):
+def process_file(filepath, norm_param='bandCount', gram_type='datasetMean'):
     print(f"Processing: {filepath}")
     
-    # Check if we need to apply strict QA filtering (affects filename and processing)
-    is_landsat_strict = LANDSAT_Strict_QA_Exclusion
-
     # Construct Output Filename
-    suffix = f"_SC_EM-{num_endmembers}_Gram-{gram_type}_Norm-{norm_param}_QA-"
-    if is_landsat_strict:
-        suffix += "Strict"
-    else:
-        suffix += "Cloudy"
-    out_path = filepath.replace(".h5", f"{suffix}.h5")
+    suffix = f"_SC_EM-{num_endmembers}_Gram-{gram_type}_Norm-{norm_param}_Aerosol-{AEROSOL_ACCEPT_LEVEL}_QA-AllFrames"
+    out_path = filepath.replace(".h5", f"{suffix}_sunElMin-{SUN_ELEVATION_THRESHOLD}.h5")
     
     print(f"Output Path: {out_path}")
     shutil.copy2(filepath, out_path)
@@ -42,59 +52,6 @@ def process_file(filepath, norm_param=None, gram_type='general'):
             print(f"Error: Unknown grid name: {grid_name}")
             return
             
-        # --- Strict QA Filtering Logic (In-Place on Output File) ---
-        if is_landsat_strict and grid_name == "LANDSAT":
-            print("Applying Strict QA Exclusion...")
-            base_fields_path = f"/HDFEOS/GRIDS/{grid_name}/Data Fields"
-            qa_ds_path = f"{base_fields_path}/QUALITY_L1_PIXEL"
-            
-            if qa_ds_path in h5:
-                qa_ds = h5[qa_ds_path]
-                total_frames = qa_ds.shape[0]
-                
-                # Bit 0: Fill, 1: Dilated Cloud, 2: Cirrus, 3: Cloud, 4: Cloud Shadow, 5: Snow
-                QA_BAD_MASK = (1 << 0) | (1 << 1) | (1 << 2) | (1 << 3) | (1 << 4) | (1 << 5)
-                
-                valid_indices = []
-                for t in range(total_frames):
-                    qa_frame = qa_ds[t, ...]
-                    # If ANY pixel matches mask, the frame is "bad"
-                    if not np.any(qa_frame & QA_BAD_MASK):
-                        valid_indices.append(t)
-                
-                valid_indices = np.array(valid_indices)
-                kept_count = len(valid_indices)
-                
-                print(f"QA Filtering: Keeping {kept_count}/{total_frames} frames (100% valid pixels).")
-                
-                if kept_count == 0:
-                    print("Error: No valid frames remaining after Strict QA.")
-                    return
-                elif kept_count < total_frames:
-                    # Helper to slice dataset and its time-dependent attributes
-                    def filter_dataset(ds_name):
-                        path = f"{base_fields_path}/{ds_name}"
-                        if path not in h5: return
-                        
-                        dset = h5[path]
-                        data = dset[valid_indices, ...] # Load only valid frames
-                        attrs = dict(dset.attrs) # Copy attributes
-                        
-                        del h5[path] # Delete old
-                        new_dset = h5[base_fields_path].create_dataset(
-                            ds_name, data=data, compression="gzip"
-                        )
-                        
-                        # Restore attributes, slicing those that match original frame count
-                        for k, v in attrs.items():
-                            if isinstance(v, np.ndarray) and v.shape[0] == total_frames and k != 'wavelengths':
-                                new_dset.attrs[k] = v[valid_indices]
-                            else:
-                                new_dset.attrs[k] = v
-                    
-                    filter_dataset("surface_reflectance")
-                    filter_dataset("QUALITY_L1_PIXEL")
-
         # Start Processing
         process_image_stack(h5, grid_name, norm_param, gram_type)
 
@@ -106,7 +63,7 @@ def overwrite_dset(h5, base_fields_path, name, shape, dtype='float32'):
     if name in h5[base_fields_path]: del h5[path]
     return h5[base_fields_path].create_dataset(name, shape=shape, dtype=dtype, compression="gzip")
 
-def process_image_stack(h5,sourceName, norm_param, gram_type):
+def process_image_stack(h5, sourceName, norm_param, gram_type):
 
     grid_name = sourceName
     base_fields_path = f"/HDFEOS/GRIDS/{grid_name}/Data Fields"
@@ -114,16 +71,17 @@ def process_image_stack(h5,sourceName, norm_param, gram_type):
     num_frames, num_bands, height, width = ds_surfRef.shape
 
     if sourceName == "LANDSAT":
-        # --- QA Bitmasks (Landsat Collection 2) ---
-        # Bit 0: Fill, 1: Dilated Cloud, 2: Cirrus, 3: Cloud, 4: Cloud Shadow, 5: Snow
-        QA_BAD_MASK = (1 << 0) | (1 << 1) | (1 << 2) | (1 << 3) | (1 << 4) | (1 << 5)
+        # Apply the exact same mask here to handle pixel-level exclusions if Strict QA is False
         ds_quality = h5[f"{base_fields_path}/QUALITY_L1_PIXEL"]
+        ds_aerosol = h5[f"{base_fields_path}/QUALITY_L2_AEROSOL"]
+        ds_radsat = h5[f"{base_fields_path}/RADIOMETRIC_SATURATION"]
     elif sourceName == "TANAGER":
         gw_mask = ds_surfRef.attrs.get("all_good_wavelengths").astype(bool)
         invalid_mask = h5[f"{base_fields_path}/sr_invalid"]
         cloud_mask = h5[f"{base_fields_path}/beta_cloud_mask"]
         cirrus_mask = h5[f"{base_fields_path}/beta_cirrus_mask"]
         nodata_mask = h5[f"{base_fields_path}/nodata_pixels"]
+        sun_zenith_ds = h5[f"{base_fields_path}/sun_zenith"]
         
 
     # Initialize Results
@@ -137,13 +95,21 @@ def process_image_stack(h5,sourceName, norm_param, gram_type):
         print(f"\n--- Frame {t+1}/{num_frames} ---")
         frame_sr = ds_surfRef[t, ...]
         if sourceName == "LANDSAT":
-            # Discovered 
-            # Note: If strict exclusion was applied, this mask will be all True
-            valid_spatial_mask = (ds_quality[t, ...] & QA_BAD_MASK) == 0
+            # Note: If strict exclusion was applied, this mask will evaluate to all True
+            qa_valid = (ds_quality[t, ...] & QA_REJECT_MASK) == 0
+            aerosol_valid = np.isin(ds_aerosol[t, ...], AEROSOL_ACCEPT_VALUES)
+            valid_spatial_mask = qa_valid & aerosol_valid
         elif sourceName == "TANAGER":
-            #frame_sr = ds_surfRef[t,gw_mask[t]==1, ...] #todo check if the mask removes bad wavelengths
             frame_sr = np.delete(frame_sr, np.where(~gw_mask[t]), axis=0)
-            valid_spatial_mask = (invalid_mask[t, ...] == 1) & (cloud_mask[t, ...] == 0) & (cirrus_mask[t, ...] == 0) & (nodata_mask[t, ...] == 0)
+            
+            # Convert sun zenith to sun elevation (90 - zenith) and enforce threshold
+            sun_elevation_mask = (90.0 - sun_zenith_ds[t, ...]) >= SUN_ELEVATION_THRESHOLD
+            
+            valid_spatial_mask = (invalid_mask[t, ...] == 1) & \
+                                 (cloud_mask[t, ...] == 0) & \
+                                 (cirrus_mask[t, ...] == 0) & \
+                                 (nodata_mask[t, ...] == 0) & \
+                                 sun_elevation_mask
 
         print(f"Calculating full frame Volume for frame {t+1}/{num_frames}")
         endmembers, endmember_idx, vol_curve = sc.process_volume_frame(frame_sr, num_endmembers, gram_type, valid_spatial_mask, norm_param)
@@ -158,9 +124,9 @@ def process_image_stack(h5,sourceName, norm_param, gram_type):
         ds_endmember_indices[t, ...] = endmember_idx
         ds_vol_curve[t, ...] = vol_curve
         print(f"Calculating Tile Volume for frame {t+1}/{num_frames}")
-        ds_tile[t, ...] = sc.process_volume_tiles(frame_sr, TILE_SIZE, num_endmembers, gram_type, valid_spatial_mask, norm_param)
+        ds_tile[t, ...] = sc.process_volume_tiles(frame_sr, TILE_SIZE, num_endmembers, gram_type, None, norm_param)
         print(f"Calculating Sliding Tile Volume for frame {t+1}/{num_frames}")
-        ds_slide[t, ...] = sc.process_volume_sliding_tile(frame_sr, TILE_SIZE, SLIDING_STRIDE, num_endmembers, gram_type, valid_spatial_mask, norm_param)
+        ds_slide[t, ...] = sc.process_volume_sliding_tile(frame_sr, TILE_SIZE, SLIDING_STRIDE, num_endmembers, gram_type, None, norm_param)
             
     ds_vol_curve.attrs['description'] = "Full volume curve (Volume vs Endmember Count) for entire frame"
     ds_vol_curve.attrs['gram_type'] = gram_type
@@ -168,6 +134,13 @@ def process_image_stack(h5,sourceName, norm_param, gram_type):
     ds_endmember_indices.attrs['description'] = "Endmember indices for each pixel"
     ds_endmembers.attrs['description'] = "Endmembers for each pixel"
     ds_endmembers.attrs['num_endmembers'] = num_endmembers
+    
+    # Store configuration attributes on datasets resulting from process_volume_frame
+    for ds in [ds_endmembers, ds_endmember_indices, ds_vol_curve]:
+        ds.attrs['SUN_ELEVATION_THRESHOLD'] = SUN_ELEVATION_THRESHOLD
+        ds.attrs['QA_REJECT_MASK'] = QA_REJECT_MASK
+        ds.attrs['AEROSOL_ACCEPT_VALUES'] = AEROSOL_ACCEPT_VALUES
+
     if norm_param:
         ds_endmembers.attrs['Normalization'] = norm_param
         ds_vol_curve.attrs['Normalization'] = norm_param

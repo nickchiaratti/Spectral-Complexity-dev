@@ -2,17 +2,19 @@ from spectral_complexity_calculations import process_file
 
 SC_Param_list = [ 
     'bandCount',
-    None, 
+    #None, 
 ]
 
 Gram_param_list = [
     'datasetMean',
-    'general',
+    #'general',
 ]
 
 Stacked_file_list = [
     "C:/satelliteImagery/Tanager/Tait/Tanager_Stack_Tait_HDFEOS.h5",
-    "C:/satelliteImagery/LANDSAT/Tait/LANDSAT_Stack_Tait_HDFEOS.h5"
+    "C:/satelliteImagery/LANDSAT/Tait/LANDSAT_Stack_Tait_HDFEOS.h5",
+    "C:/satelliteImagery/Tanager/Tait-I-490/Tanager_Stack_Tait-I-490_HDFEOS.h5",
+    "C:/satelliteImagery/LANDSAT/Tait-I-490/LANDSAT_Stack_Tait-I-490_HDFEOS.h5"
 ]
 
 for file in Stacked_file_list:

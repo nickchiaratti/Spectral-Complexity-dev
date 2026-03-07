@@ -39,12 +39,12 @@ def maximumDistance(data, num_endmembers):
         image2D = np.reshape(data, (data.shape[0] * data.shape[1], data.shape[2]), order="F")
     else:
         image2D = data
-    if np.min(data) < -1:
+    if np.min(image2D) < -1:
         warnings.warn('Data contains negative values')
-        data = np.clip(data, 0, 2)
-    if np.max(data) > 1:
+        image2D = np.clip(image2D, 0, 2)
+    if np.max(image2D) > 1:
         warnings.warn('Data contains values greater than 1')
-        data = np.clip(data, 0, 1)
+        image2D = np.clip(image2D, 0, 1)
 
     # --- NaN Handling ---
     # Identify valid pixels (rows) that do not contain any NaN values
@@ -64,8 +64,6 @@ def maximumDistance(data, num_endmembers):
     valid_indices = np.where(valid_mask)[0]
 
     data = np.transpose(valid_data)
-    if np.min(data) < -1:
-        raise ValueError('Data contains negative values')
 
     # find data size
     num_bands = data.shape[0]
@@ -205,7 +203,7 @@ def plot_spectral_profiles(endmembers, band_count):
     plt.grid(True, linestyle='--', alpha=0.7)
     plt.xticks(x_axis) # Ensure every band has a tick
 
-def process_volume_frame(frame_data, num_endmembers, gram_type='general', valid_mask=None, norm_type=None):
+def process_volume_frame(frame_data, num_endmembers, gram_type, valid_mask, norm_type):
     """
     Process the image to identify endmembers for the entire frame.
     Pixel Filtering: Only valid pixels are extracted into the 2D matrix.
@@ -214,6 +212,15 @@ def process_volume_frame(frame_data, num_endmembers, gram_type='general', valid_
     bands, height, width = frame_data.shape
     img = np.transpose(frame_data, (1, 2, 0))
     image2D = np.reshape(img, (height * width, bands))
+    if gram_type == 'datasetMean':
+        print("Localizing Gram to dataset mean")
+    else:
+        print("Localizing Gram to origin")
+
+    if norm_type == 'bandCount':
+        print(f"Normalizing Endmembers by √{bands}")
+    else:
+        print("No Endmember Normalization Applied")
 
     if valid_mask is not None:
         # Flatten mask and extract only valid spectral signatures
@@ -229,7 +236,6 @@ def process_volume_frame(frame_data, num_endmembers, gram_type='general', valid_
     endmembers, endmember_indices = maximumDistance(image2D, num_endmembers)
     volume = np.zeros(num_endmembers)
     if gram_type == 'datasetMean':
-        print("Localizing Gram to dataset mean")
         meanVector = image2D.mean(axis=0)
         for i in range(1, num_endmembers):
             if norm_type == 'bandCount':
@@ -247,7 +253,7 @@ def process_volume_frame(frame_data, num_endmembers, gram_type='general', valid_
     # Return full volume array (curve) instead of just the maximum
     return endmembers, endmember_indices, volume
 
-def process_volume_tiles(frame_data, tile_size, num_endmembers, gram_type='general', valid_mask=None, norm_type=None):
+def process_volume_tiles(frame_data, tile_size, num_endmembers, gram_type, valid_mask, norm_type):
     """
     Grid-based processing (Non-overlapping tiles).
     Strict Validity: Window is only processed if ALL pixels are valid.
@@ -256,6 +262,15 @@ def process_volume_tiles(frame_data, tile_size, num_endmembers, gram_type='gener
     bands, height, width = frame_data.shape
     img = np.transpose(frame_data, (1, 2, 0))
     output_map = np.full((height, width), np.nan, dtype=np.float32)
+    if gram_type == 'datasetMean':
+        print("Localizing Gram to dataset mean")
+    else:
+        print("Localizing Gram to origin")
+
+    if norm_type == 'bandCount':
+        print(f"Normalizing Endmembers by √{bands}")
+    else:
+        print("No Endmember Normalization Applied")
     if valid_mask is None:
         print("No valid mask provided, assuming all pixels in tiles are valid.")
         valid_mask = np.ones((height, width), dtype=bool)
@@ -293,7 +308,7 @@ def process_volume_tiles(frame_data, tile_size, num_endmembers, gram_type='gener
     output_map[valid_mask == 0] = np.nan
     return output_map
 
-def process_volume_sliding_tile(frame_data, tile_size, stride, num_endmembers, gram_type='general', valid_mask=None, norm_type=None):
+def process_volume_sliding_tile(frame_data, tile_size, stride, num_endmembers, gram_type, valid_mask, norm_type):
     """
     Sliding window processing.
     Strict Validity: Window is only processed if ALL pixels are valid.
@@ -304,6 +319,15 @@ def process_volume_sliding_tile(frame_data, tile_size, stride, num_endmembers, g
     
     sum_map = np.zeros((height, width), dtype=np.float32)
     count_map = np.zeros((height, width), dtype=np.int8)
+    if gram_type == 'datasetMean':
+        print("Localizing Gram to dataset mean")
+    else:
+        print("Localizing Gram to origin")
+
+    if norm_type == 'bandCount':
+        print(f"Normalizing Endmembers by √{bands}")
+    else:
+        print("No Endmember Normalization Applied")
 
     if valid_mask is None:
         print("No valid mask provided, assuming all pixels in tiles are valid.")
@@ -341,7 +365,8 @@ def process_volume_sliding_tile(frame_data, tile_size, stride, num_endmembers, g
             
     # Finalize normalization
     output_map = np.full((height, width), np.nan, dtype=np.float32)
-    valid_pixels = (count_map > 0)
+    #valid_pixels = (count_map > 0)
+    valid_pixels = (count_map == 9) # additional buffer from invalid pixels
     output_map[valid_pixels] = sum_map[valid_pixels] / count_map[valid_pixels]
     
     # Explicitly enforce spatial mask on final output
