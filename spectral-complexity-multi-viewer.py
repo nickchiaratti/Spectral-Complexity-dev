@@ -20,17 +20,17 @@ HULL_BANDS_LANDSAT = (6, 4, 2)
 HULL_BANDS_TANAGER = (100, 50, 20) # Example hyperspectral indices
 
 # Combined Pixel Mask Configuration
-SUN_ELEVATION_THRESHOLD = 40
-CLOUD_DILATION = 5
+SUN_ELEVATION_THRESHOLD = 30
+CLOUD_DILATION = 2
 
 # Tanager Pixel Mask Configuration
-TANAGER_AEROSOL_DEPTH_THRESHOLD = 0.3
-TANAGER_SR_UNCERTAINTY_THRESHOLD = 0.05
+TANAGER_AEROSOL_DEPTH_THRESHOLD = 0.25
+TANAGER_SR_UNCERTAINTY_THRESHOLD = 0.02
 
 # LANDSAT Pixel Mask Configuration
 QA_REJECT_MASK = 0b111111
 RADSAT_ACCEPT_VALUE = 0
-AEROSOL_ACCEPT_LEVEL = 'low' #'low' 'medium' 'high'
+AEROSOL_ACCEPT_LEVEL = 'medium' #'low' 'medium' 'high'
 
 # Mapped levels for UI Dropdown
 AEROSOL_DICT = {
@@ -39,21 +39,36 @@ AEROSOL_DICT = {
     'high': [2, 4, 32, 66, 68, 96, 100, 130, 132, 160, 164, 192, 194, 196, 224, 228]
 }
 
-# Time Series Locations (y, x)
+# Time Series Locations (y, x) for just Tait
 TS_LOCATIONS = [
     {'yx': (56, 127),  'label': "Golf Course",                    'color': 'tab:green'},
     {'yx': (87, 128), 'label': "Artificial turf football field",     'color': 'tab:blue'},
-    {'yx': (82, 123), 'label': "Recently added artificial turf field",'color': 'tab:cyan'},
-    {'yx': (67, 28),  'label': "Tait Parking Lot",          'color': 'tab:red'}
+    {'yx': (80, 122), 'label': "Recently added artificial turf field",'color': 'tab:cyan'},
+    {'yx': (66, 28),  'label': "Tait Parking Lot",          'color': 'tab:red'}
 ]
 
-LANDSAT_STRICT_QA = True
+# Time Series Locations (y, x) for Tait and I-490
+#TS_LOCATIONS = [
+#    {'yx': (55, 136),   'label': "Golf Course",                          'color': 'tab:green'},
+#    {'yx': (242, 22),   'label': "Pittsford Farms Dairy",                  'color': 'tab:olive'},
+#    {'yx': (87, 138),   'label': "Artificial turf football field",        'color': 'tab:blue'},
+#    {'yx': (80, 131),   'label': "Recently added artificial turf field",  'color': 'tab:cyan'},
+#    {'yx': (66, 38),    'label': "Tait Parking Lot",                      'color': 'tab:red'},
+#    {'yx': (352, 121),  'label': "I-490 Bridge over the Erie Canal",     'color': 'tab:orange'},
+#    {'yx': (362, 123),  'label': "I-490 Bridge over Kreag Road",         'color': 'tab:purple'},
+#    {'yx': (381, 120),  'label': "Bushnell’s Basin Park & Ride",         'color': 'tab:brown'}
+#]
+l_path = "C:/satelliteImagery/LANDSAT/Tait/LANDSAT_Stack_Tait_HDFEOS_SC_EM-7_Gram-minEndmember_Norm-bandCount_Aerosol-low_QA-AllFrames_sunElMin-40.h5"
+t_path = "C:/satelliteImagery/Tanager/Tait/Tanager_Stack_Tait_HDFEOS_SC_EM-7_Gram-minEndmember_Norm-bandCount_Aerosol-low_QA-AllFrames_sunElMin-40.h5"
+
+SAVE_DIR = "C:/satelliteImagery/MultiSensor_Tait_Gram-minEndmember_Norm-bandCount_"
 DISPLAY_NORMALIZATION = False
 DISPLAY_REDUNDANT_FIGURE = True  # Toggle for the 2-subplot spatial/complexity redundant figure
 
-SAVE_DIR = "C:/satelliteImagery/MultiSensor_Analysis"
-if LANDSAT_STRICT_QA:
-    SAVE_DIR += "_Strict_QA"
+
+    
+
+
 
 class MultiComplexityViewer:
     def __init__(self, file_paths):
@@ -123,68 +138,6 @@ class MultiComplexityViewer:
         self.num_total_frames = len(self.all_frames)
         self.current_idx = 0
 
-        # 2b. Pre-load Time Series for Multiple Pixels
-        self.ts_data = {
-            # Cache QA values for dynamic filtering of time series
-            'LANDSAT': {loc['label']: {'t': [], 'v': [], 'qa': [], 'radsat': [], 'aerosol': [], 'sun_elev': []} for loc in TS_LOCATIONS},
-            'TANAGER': {loc['label']: {'t': [], 'v': [], 'aod': [], 'unc': [], 'sun_elev': [], 'invalid': [], 'nodata': [], 'cloud': [], 'cirrus': []} for loc in TS_LOCATIONS}
-        }
-        
-        print(f"Extracting time series for {len(TS_LOCATIONS)} locations...")
-        for frame in self.all_frames:
-            file_info = self.files[frame['file_idx']]
-            dgrp = file_info['data_grp']
-            if 'sliding_volume_map' in dgrp:
-                try:
-                    dset = dgrp['sliding_volume_map']
-                    src = frame['source']
-                    key = 'LANDSAT' if 'LANDSAT' in src.upper() else 'TANAGER'
-                    dt = datetime.fromtimestamp(frame['timestamp'], tz=timezone.utc)
-                    
-                    for loc in TS_LOCATIONS:
-                        y, x = loc['yx']
-                        if dset.shape[1] > y and dset.shape[2] > x:
-                            val = dset[frame['frame_idx'], y, x]
-                            if not np.isnan(val):
-                                self.ts_data[key][loc['label']]['t'].append(dt)
-                                self.ts_data[key][loc['label']]['v'].append(val)
-                                
-                                f_idx = frame['frame_idx']
-                                if key == 'LANDSAT':
-                                    qa = dgrp['QUALITY_L1_PIXEL'][f_idx, y, x]
-                                    radsat = dgrp['RADIOMETRIC_SATURATION'][f_idx, y, x]
-                                    aerosol = dgrp['QUALITY_L2_AEROSOL'][f_idx, y, x]
-                                    sun_elev_arr = dgrp['surface_reflectance'].attrs.get('sun_elevation')
-                                    sun_elev = sun_elev_arr[f_idx]
-                                    
-                                    self.ts_data[key][loc['label']]['qa'].append(qa)
-                                    self.ts_data[key][loc['label']]['radsat'].append(radsat)
-                                    self.ts_data[key][loc['label']]['aerosol'].append(aerosol)
-                                    self.ts_data[key][loc['label']]['sun_elev'].append(sun_elev)
-                                elif key == 'TANAGER':
-                                    aod = dgrp['aerosol_optical_depth'][f_idx, y, x]
-                                    unc_ds = dgrp['surface_reflectance_uncertainty']
-                                    gw_mask = dgrp['surface_reflectance'].attrs.get('all_good_wavelengths')
-                                    valid_bands = gw_mask[f_idx].astype(bool)
-                                    unc = np.nanmax(unc_ds[f_idx, valid_bands, y, x])
-                                    zenith = dgrp['sun_zenith'][f_idx, y, x] 
-                                    sun_elev = 90.0 - zenith
-                                    invalid = dgrp['sr_invalid'][f_idx, y, x]==1
-                                    nodata = dgrp['nodata_pixels'][f_idx, y, x]==1
-                                    cloud = dgrp['beta_cloud_mask'][f_idx, y, x]==1
-                                    cirrus = dgrp['beta_cirrus_mask'][f_idx, y, x]==1
-                                    
-                                    self.ts_data[key][loc['label']]['aod'].append(aod)
-                                    self.ts_data[key][loc['label']]['unc'].append(unc)
-                                    self.ts_data[key][loc['label']]['sun_elev'].append(sun_elev)
-                                    self.ts_data[key][loc['label']]['invalid'].append(invalid)
-                                    self.ts_data[key][loc['label']]['nodata'].append(nodata)
-                                    self.ts_data[key][loc['label']]['cloud'].append(cloud)
-                                    self.ts_data[key][loc['label']]['cirrus'].append(cirrus)
-
-                except Exception as e:
-                    print(f"TS Extraction Error frame {frame['frame_idx']}: {e}")
-
         self.save_dir = SAVE_DIR
 
         # Persistent Plotting objects
@@ -195,6 +148,9 @@ class MultiComplexityViewer:
         self.im_slide_redundant = None
         self.cbar_slide_redundant = None
 
+        # Process Time Series with initial thresholds
+        self._recompute_time_series()
+
         # 3. Initialize UI
         self._init_control_ui()
         self._init_combined_ui()
@@ -204,75 +160,128 @@ class MultiComplexityViewer:
         
         self.update_display()
 
+    def _recompute_time_series(self):
+        """
+        Loops through all frames and fully re-evaluates the 2D spatial masks 
+        to ensure the 1D time series data is perfectly synchronized with the UI maps.
+        """
+        print(f"Applying spatial masks to time series data... (This may take a moment)")
+        
+        # Reset data dictionaries
+        self.ts_data = {
+            'LANDSAT': {loc['label']: {'t': [], 'v': []} for loc in TS_LOCATIONS},
+            'TANAGER': {loc['label']: {'t': [], 'v': []} for loc in TS_LOCATIONS}
+        }
+
+        for frame in self.all_frames:
+            file_info = self.files[frame['file_idx']]
+            dgrp = file_info['data_grp']
+            if 'sliding_volume_map' not in dgrp:
+                continue
+
+            try:
+                dset = dgrp['sliding_volume_map']
+                src = frame['source']
+                key = 'LANDSAT' if 'LANDSAT' in src.upper() else 'TANAGER'
+                dt = datetime.fromtimestamp(frame['timestamp'], tz=timezone.utc)
+                f_idx = frame['frame_idx']
+                
+                # Retrieve the full 2D spatial mask exactly as the image views do
+                shape = dset[f_idx].shape
+                if key == 'LANDSAT':
+                    mask = self._get_landsat_mask(dgrp, f_idx, shape)
+                else:
+                    mask = self._get_tanager_mask(dgrp, f_idx, shape)
+                
+                # Check specific subset locations against the generated mask
+                for loc in TS_LOCATIONS:
+                    y, x = loc['yx']
+                    if dset.shape[1] > y and dset.shape[2] > x:
+                        # Only accept if the spatial mask permits this pixel
+                        if mask[y, x]:
+                            val = dset[f_idx, y, x]
+                            if not np.isnan(val):
+                                self.ts_data[key][loc['label']]['t'].append(dt)
+                                self.ts_data[key][loc['label']]['v'].append(val)
+
+            except Exception as e:
+                print(f"TS Extraction Error frame {frame['frame_idx']}: {e}")
+                
+        print("Time series processing complete.")
+
     def _init_control_ui(self):
         # Expanded figure size to accommodate new scatter and mask controls
-        self.fig_controls = plt.figure(figsize=(6, 9.0))
+        self.fig_controls = plt.figure(figsize=(6, 10.0))
         self.fig_controls.canvas.manager.set_window_title("Timeline Navigation")
         self.ax_meta = self.fig_controls.add_axes([0, 0, 1, 1]); self.ax_meta.axis('off')
-        self.ctrl_text = self.ax_meta.text(0.5, 0.93, "", ha='center', va='center', 
+        self.ctrl_text = self.ax_meta.text(0.5, 0.94, "", ha='center', va='center', 
                                          fontsize=10, family='monospace',
                                          bbox=dict(facecolor='white', alpha=0.8, edgecolor='gray'))
         
         # Navigation Row
-        ax_prev = self.fig_controls.add_axes([0.1, 0.84, 0.25, 0.04])
-        ax_next = self.fig_controls.add_axes([0.65, 0.84, 0.25, 0.04])
-        ax_input = self.fig_controls.add_axes([0.45, 0.84, 0.1, 0.04])
+        ax_prev = self.fig_controls.add_axes([0.1, 0.85, 0.25, 0.04])
+        ax_next = self.fig_controls.add_axes([0.65, 0.85, 0.25, 0.04])
+        ax_input = self.fig_controls.add_axes([0.45, 0.85, 0.1, 0.04])
         
         self.btn_prev = Button(ax_prev, '<< Prev')
         self.btn_next = Button(ax_next, 'Next >>')
         self.txt_input = TextBox(ax_input, 'Go: ', initial='0')
         
         # Single Save Row
-        ax_save = self.fig_controls.add_axes([0.3, 0.77, 0.4, 0.04])
+        ax_save = self.fig_controls.add_axes([0.3, 0.79, 0.4, 0.04])
         self.btn_save = Button(ax_save, 'Save Current', color='lightgreen')
 
         # Auto Save Row
-        self.ax_meta.text(0.5, 0.73, "--- Batch Processing ---", ha='center', va='center', fontsize=9)
+        self.ax_meta.text(0.5, 0.75, "--- Batch Processing ---", ha='center', va='center', fontsize=9)
         
-        ax_start = self.fig_controls.add_axes([0.2, 0.67, 0.15, 0.04])
-        ax_end = self.fig_controls.add_axes([0.5, 0.67, 0.15, 0.04])
-        ax_auto = self.fig_controls.add_axes([0.3, 0.60, 0.4, 0.04])
+        ax_start = self.fig_controls.add_axes([0.2, 0.69, 0.15, 0.04])
+        ax_end = self.fig_controls.add_axes([0.5, 0.69, 0.15, 0.04])
+        ax_auto = self.fig_controls.add_axes([0.3, 0.62, 0.4, 0.04])
 
         self.txt_start = TextBox(ax_start, 'Start: ', initial='0')
         self.txt_end = TextBox(ax_end, 'End: ', initial=str(self.num_total_frames-1))
         self.btn_auto = Button(ax_auto, 'Auto Save Range', color='lightblue')
         
         # Scatter Plot Controls
-        self.ax_meta.text(0.5, 0.55, "--- Sliding Volume Scatter ---", ha='center', va='center', fontsize=9)
+        self.ax_meta.text(0.5, 0.57, "--- Sliding Volume Scatter ---", ha='center', va='center', fontsize=9)
         
-        ax_l_frame = self.fig_controls.add_axes([0.2, 0.49, 0.15, 0.04])
-        ax_t_frame = self.fig_controls.add_axes([0.5, 0.49, 0.15, 0.04])
-        ax_scatter_btn = self.fig_controls.add_axes([0.3, 0.42, 0.4, 0.04])
+        ax_l_frame = self.fig_controls.add_axes([0.2, 0.51, 0.15, 0.04])
+        ax_t_frame = self.fig_controls.add_axes([0.5, 0.51, 0.15, 0.04])
+        ax_scatter_btn = self.fig_controls.add_axes([0.3, 0.44, 0.4, 0.04])
 
         self.txt_l_frame = TextBox(ax_l_frame, 'L Idx: ', initial='80')
         self.txt_t_frame = TextBox(ax_t_frame, 'T Idx: ', initial='3')
         self.btn_scatter = Button(ax_scatter_btn, 'Update Scatter', color='lightyellow')
         
         # --- Pixel Filters Controls ---
-        self.ax_meta.text(0.5, 0.36, "--- Pixel Filters ---", ha='center', va='center', fontsize=9)
+        self.ax_meta.text(0.5, 0.39, "--- Pixel Filters ---", ha='center', va='center', fontsize=9)
         
         # Checkboxes for QA and RADSAT (Landsat)
-        ax_chk = self.fig_controls.add_axes([0.1, 0.24, 0.4, 0.10])
+        ax_chk = self.fig_controls.add_axes([0.1, 0.28, 0.4, 0.09])
         self.chk_masks = CheckButtons(ax_chk, ['L: QA Rej', 'L: RADSAT Acpt'], [self.mask_qa_enabled, self.mask_radsat_enabled])
         
         # Radio for Aerosol (Landsat)
-        ax_rad = self.fig_controls.add_axes([0.55, 0.24, 0.35, 0.10])
+        ax_rad = self.fig_controls.add_axes([0.55, 0.28, 0.35, 0.09])
         ax_rad.set_title("L: Aerosol", fontsize=8)
         active_idx = ['low', 'medium', 'high'].index(self.aerosol_level)
         self.rad_aerosol = RadioButtons(ax_rad, ('low', 'medium', 'high'), active=active_idx)
         
         # TextBoxes for numeric thresholds
-        ax_sun = self.fig_controls.add_axes([0.3, 0.18, 0.4, 0.04])
+        ax_sun = self.fig_controls.add_axes([0.3, 0.22, 0.4, 0.04])
         self.txt_sun = TextBox(ax_sun, 'Sun Elev > ', initial=str(self.sun_elev_thresh))
 
-        ax_cdil = self.fig_controls.add_axes([0.3, 0.13, 0.4, 0.04])
+        ax_cdil = self.fig_controls.add_axes([0.3, 0.17, 0.4, 0.04])
         self.txt_cdil = TextBox(ax_cdil, 'Cloud Dil: ', initial=str(self.cloud_dilation))
 
-        ax_t_aod = self.fig_controls.add_axes([0.3, 0.08, 0.4, 0.04])
+        ax_t_aod = self.fig_controls.add_axes([0.3, 0.12, 0.4, 0.04])
         self.txt_t_aod = TextBox(ax_t_aod, 'T-AOD < ', initial=str(self.t_aerosol_thresh))
 
-        ax_t_unc = self.fig_controls.add_axes([0.3, 0.03, 0.4, 0.04])
+        ax_t_unc = self.fig_controls.add_axes([0.3, 0.07, 0.4, 0.04])
         self.txt_t_unc = TextBox(ax_t_unc, 'T-Unc < ', initial=str(self.t_uncertainty_thresh))
+
+        # Update Masks Execution Button
+        ax_update_mask = self.fig_controls.add_axes([0.3, 0.015, 0.4, 0.04])
+        self.btn_update_mask = Button(ax_update_mask, 'Update Masks', color='lightcoral')
 
         # Connect events
         self.btn_prev.on_clicked(self._on_prev)
@@ -281,12 +290,8 @@ class MultiComplexityViewer:
         self.btn_save.on_clicked(self._on_save_images)
         self.btn_auto.on_clicked(self._on_auto_save)
         self.btn_scatter.on_clicked(self._on_update_scatter)
-        self.chk_masks.on_clicked(self._on_mask_toggle)
-        self.rad_aerosol.on_clicked(self._on_aerosol_change)
-        self.txt_sun.on_submit(self._on_sun_submit)
-        self.txt_cdil.on_submit(self._on_cdil_submit)
-        self.txt_t_aod.on_submit(self._on_t_aod_submit)
-        self.txt_t_unc.on_submit(self._on_t_unc_submit)
+        self.btn_update_mask.on_clicked(self._on_update_mask)
+        # Note: Event listeners for mask components removed. Use 'Update Masks' to process.
 
     def _init_combined_ui(self):
         self.fig_combined = plt.figure(figsize=(18, 10))
@@ -328,28 +333,36 @@ class MultiComplexityViewer:
         
         # Sun Elevation Check
         sun_elev_arr = data_grp['surface_reflectance'].attrs.get('sun_elevation')
-        if sun_elev_arr is not None and f_idx < len(sun_elev_arr):
+        if f_idx < len(sun_elev_arr):
             if sun_elev_arr[f_idx] < self.sun_elev_thresh:
                 return np.zeros(shape, dtype=bool)
 
         # QA Reject Mask
-        if self.mask_qa_enabled and 'QUALITY_L1_PIXEL' in data_grp:
+        if self.mask_qa_enabled:
             qa_pixel = data_grp['QUALITY_L1_PIXEL'][f_idx, ...]
+            # True represents BAD pixels (Clouds/Shadows)
+            bad_qa_mask = (qa_pixel & QA_REJECT_MASK) != 0
             if self.cloud_dilation > 0:
-                kernel = np.ones((self.cloud_dilation, self.cloud_dilation), dtype=bool)
-                qa_pixel = ndimage.binary_dilation(qa_pixel, structure=kernel, iterations=1)
-            valid_mask &= ((qa_pixel & QA_REJECT_MASK) == 0)
+                kernel = np.ones((3, 3), dtype=bool)
+                bad_qa_mask = ndimage.binary_dilation(bad_qa_mask, structure=kernel, iterations=self.cloud_dilation)
+            # Valid pixels are where bad_qa_mask is False
+            valid_mask &= ~bad_qa_mask
 
         # RADSAT Accept Value
-        if self.mask_radsat_enabled and 'RADIOMETRIC_SATURATION_PIXEL' in data_grp:
-            radsat = data_grp['RADIOMETRIC_SATURATION_PIXEL'][f_idx, ...]
-            valid_mask &= (radsat == RADSAT_ACCEPT_VALUE)
+        if self.mask_radsat_enabled:
+            bad_radsat = data_grp['RADIOMETRIC_SATURATION'][f_idx, ...] != RADSAT_ACCEPT_VALUE
+            if self.cloud_dilation > 0:
+                kernel = np.ones((3, 3), dtype=bool)
+                bad_radsat = ndimage.binary_dilation(bad_radsat, structure=kernel, iterations=self.cloud_dilation)
+            valid_mask &= ~bad_radsat
 
         # Aerosol Accept Values
-        if 'QUALITY_L2_AEROSOL' in data_grp:
-            aerosol = data_grp['QUALITY_L2_AEROSOL'][f_idx, ...]
-            valid_aerosol = np.isin(aerosol, AEROSOL_DICT[self.aerosol_level])
-            valid_mask &= valid_aerosol
+        aerosol = data_grp['QUALITY_L2_AEROSOL'][f_idx, ...]
+        invalid_aerosol = ~np.isin(aerosol, AEROSOL_DICT[self.aerosol_level])
+        if self.cloud_dilation > 0:
+            kernel = np.ones((3, 3), dtype=bool)
+            invalid_aerosol = ndimage.binary_dilation(invalid_aerosol, structure=kernel, iterations=self.cloud_dilation)
+        valid_mask &= ~invalid_aerosol
 
         return valid_mask
 
@@ -373,9 +386,9 @@ class MultiComplexityViewer:
             cirrus_mask = (data_grp['beta_cirrus_mask'][f_idx, ...]==1)
             combined_cloud = cloud_mask | cirrus_mask
             if self.cloud_dilation > 0:
-                kernel = np.ones((self.cloud_dilation, self.cloud_dilation), dtype=bool)
-                combined_cloud = ndimage.binary_dilation(combined_cloud, structure=kernel, iterations=1)
-            valid_mask &= (combined_cloud == 0)
+                kernel = np.ones((3, 3), dtype=bool)
+                combined_cloud = ndimage.binary_dilation(combined_cloud, structure=kernel, iterations=self.cloud_dilation)
+            valid_mask &= ~combined_cloud
         
         # Sun Elevation Check (Derived from Sun Zenith)
         if 'sun_zenith' in data_grp:
@@ -384,15 +397,21 @@ class MultiComplexityViewer:
             
         # Aerosol Optical Depth Check
         if 'aerosol_optical_depth' in data_grp:
-            aod = data_grp['aerosol_optical_depth'][f_idx, ...]
-            valid_mask &= (aod <= self.t_aerosol_thresh)
+            bad_aod_mask = data_grp['aerosol_optical_depth'][f_idx, ...] >= self.t_aerosol_thresh
+            if self.t_aerosol_thresh > 0:
+                kernel = np.ones((3, 3), dtype=bool)
+                bad_aod_mask = ndimage.binary_dilation(bad_aod_mask, structure=kernel, iterations=self.cloud_dilation)
+            valid_mask &= ~bad_aod_mask
             
         # Surface Reflectance Uncertainty Check
         if 'surface_reflectance_uncertainty' in data_grp:
             gw_mask = data_grp['surface_reflectance'].attrs.get('all_good_wavelengths')
             valid_bands = gw_mask[f_idx].astype(bool)
-            unc = np.nanmax(data_grp['surface_reflectance_uncertainty'][f_idx, valid_bands, ...], axis=0)
-            valid_mask &= (unc <= self.t_uncertainty_thresh)
+            unc_mask = np.nanmax(data_grp['surface_reflectance_uncertainty'][f_idx, valid_bands, ...], axis=0)>= self.t_uncertainty_thresh
+            if self.t_uncertainty_thresh > 0:
+                kernel = np.ones((3, 3), dtype=bool)
+                unc_mask = ndimage.binary_dilation(unc_mask, structure=kernel, iterations=self.cloud_dilation)
+            valid_mask &= ~unc_mask
             
         return valid_mask
 
@@ -527,50 +546,51 @@ class MultiComplexityViewer:
         
         self.ax_ts_main.clear()
         
-        # Plot LANDSAT Time Series with Dynamic Filters
-        valid_aerosol_set = AEROSOL_DICT[self.aerosol_level]
+        # Plot LANDSAT Time Series
         for loc in TS_LOCATIONS:
             label = loc['label']
             data = self.ts_data['LANDSAT'][label]
             if data['t']:
-                filt_t, filt_v = [], []
-                for i in range(len(data['t'])):
-                    if data['sun_elev'][i] < self.sun_elev_thresh: continue
-                    if self.mask_qa_enabled and (data['qa'][i] & QA_REJECT_MASK) != 0: continue
-                    if self.mask_radsat_enabled and data['radsat'][i] != RADSAT_ACCEPT_VALUE: continue
-                    if data['aerosol'][i] not in valid_aerosol_set: continue
-                    
-                    filt_t.append(data['t'][i])
-                    filt_v.append(data['v'][i])
-
-                if filt_t:
-                    self.ax_ts_main.plot(filt_t, filt_v, marker='^', color=loc['color'], label=f"L: {label}",
-                                          markersize=4, linestyle='--', linewidth=1, alpha=0.6)
+                self.ax_ts_main.plot(data['t'], data['v'], marker='^', color=loc['color'], label=f"L: {label}",
+                                      markersize=4, linestyle='--', linewidth=1, alpha=0.6)
         
-        # Plot TANAGER Time Series with Dynamic Filters
+        # Plot TANAGER Time Series
         for loc in TS_LOCATIONS:
             label = loc['label']
             data = self.ts_data['TANAGER'][label]
             if data['t']:
-                filt_t, filt_v = [], []
-                for i in range(len(data['t'])):
-                    if data['sun_elev'][i] < self.sun_elev_thresh: continue
-                    if data['aod'][i] > self.t_aerosol_thresh: continue
-                    if data['unc'][i] > self.t_uncertainty_thresh: continue
-                    
-                    #if data['invalid'][i]: continue
-                    if data['nodata'][i]: continue
-                    if data['cloud'][i] or data['cirrus'][i]: continue
-                    
-                    filt_t.append(data['t'][i])
-                    filt_v.append(data['v'][i])
-                    
-                if filt_t:
-                    self.ax_ts_main.plot(filt_t, filt_v, marker='s', color=loc['color'], label=f"T: {label}",
-                                          markersize=5, linestyle='-', linewidth=1.5, alpha=0.9)
+                self.ax_ts_main.plot(data['t'], data['v'], marker='s', color=loc['color'], label=f"T: {label}",
+                                      markersize=5, linestyle='-', linewidth=1.5, alpha=0.9)
 
-        self.ax_ts_main.set_title("Equated Time Series (Shared Log Scale)")
-        #self.ax_ts_main.set_yscale('log')
+        if self.all_frames and len(self.ax_ts_main.lines) > 0:
+            xlims = self.ax_ts_main.get_xlim() # Capture limits generated by the data
+            
+            min_ts = min(f['timestamp'] for f in self.all_frames)
+            max_ts = max(f['timestamp'] for f in self.all_frames)
+            min_dt = datetime.fromtimestamp(min_ts, tz=timezone.utc)
+            max_dt = datetime.fromtimestamp(max_ts, tz=timezone.utc)
+            
+            for yr in range(min_dt.year - 1, max_dt.year + 2):
+                # Winter (Dec 1 prev year - Mar 1 curr year) -> light gray
+                self.ax_ts_main.axvspan(datetime(yr - 1, 12, 1, tzinfo=timezone.utc), 
+                                        datetime(yr, 3, 1, tzinfo=timezone.utc), 
+                                        color='lightgray', alpha=0.3, zorder=0, lw=0)
+                # Spring (Mar 1 - Jun 1) -> light green
+                self.ax_ts_main.axvspan(datetime(yr, 3, 1, tzinfo=timezone.utc), 
+                                        datetime(yr, 6, 1, tzinfo=timezone.utc), 
+                                        color='lightgreen', alpha=0.2, zorder=0, lw=0)
+                # Summer (Jun 1 - Sep 1) -> light yellow
+                self.ax_ts_main.axvspan(datetime(yr, 6, 1, tzinfo=timezone.utc), 
+                                        datetime(yr, 9, 1, tzinfo=timezone.utc), 
+                                        color='lightyellow', alpha=0.3, zorder=0, lw=0)
+                # Fall (Sep 1 - Dec 1) -> light orange
+                self.ax_ts_main.axvspan(datetime(yr, 9, 1, tzinfo=timezone.utc), 
+                                        datetime(yr, 12, 1, tzinfo=timezone.utc), 
+                                        color='orange', alpha=0.15, zorder=0, lw=0)
+            
+            self.ax_ts_main.set_xlim(xlims) # Restore limits so it doesn't zoom out to empty seasons
+
+        self.ax_ts_main.set_title("Equated Time Series")
         
         self.ax_ts_main.set_ylabel("Volume", fontweight='bold')
         self.ax_ts_main.grid(True, alpha=0.3, which="both", ls="--")
@@ -619,60 +639,51 @@ class MultiComplexityViewer:
         if self.fig_scatter is not None and plt.fignum_exists(self.fig_scatter.number):
             self._on_update_scatter(None)
 
-    def _on_mask_toggle(self, label):
-        if 'QA Rej' in label:
-            self.mask_qa_enabled = not self.mask_qa_enabled
-        elif 'RADSAT' in label:
-            self.mask_radsat_enabled = not self.mask_radsat_enabled
-        self.update_display()
-        self._refresh_if_scatter_open()
+    def _on_update_mask(self, event):
+        """Applies all selected filter values and triggers the full recomputation."""
+        # 1. Read Checkboxes
+        chk_status = self.chk_masks.get_status()
+        self.mask_qa_enabled = chk_status[0]
+        self.mask_radsat_enabled = chk_status[1]
 
-    def _on_aerosol_change(self, label):
-        self.aerosol_level = label
-        self.update_display()
-        self._refresh_if_scatter_open()
+        # 2. Read Radio Buttons
+        self.aerosol_level = self.rad_aerosol.value_selected
 
-    def _on_sun_submit(self, text):
+        # 3. Read TextBoxes (with validation fallback)
         try:
-            val = float(text)
+            val = float(self.txt_sun.text)
             if 0 <= val <= 90:
                 self.sun_elev_thresh = val
-                self.update_display()
-                self._refresh_if_scatter_open()
             else:
                 self.txt_sun.set_val(str(self.sun_elev_thresh))
         except ValueError:
             self.txt_sun.set_val(str(self.sun_elev_thresh))
 
-    def _on_cdil_submit(self, text):
         try:
-            val = int(text)
+            val = int(self.txt_cdil.text)
             if val >= 0:
                 self.cloud_dilation = val
-                self.update_display()
-                self._refresh_if_scatter_open()
             else:
                 self.txt_cdil.set_val(str(self.cloud_dilation))
         except ValueError:
             self.txt_cdil.set_val(str(self.cloud_dilation))
 
-    def _on_t_aod_submit(self, text):
         try:
-            val = float(text)
+            val = float(self.txt_t_aod.text)
             self.t_aerosol_thresh = val
-            self.update_display()
-            self._refresh_if_scatter_open()
         except ValueError:
             self.txt_t_aod.set_val(str(self.t_aerosol_thresh))
 
-    def _on_t_unc_submit(self, text):
         try:
-            val = float(text)
+            val = float(self.txt_t_unc.text)
             self.t_uncertainty_thresh = val
-            self.update_display()
-            self._refresh_if_scatter_open()
         except ValueError:
             self.txt_t_unc.set_val(str(self.t_uncertainty_thresh))
+
+        # 4. Trigger full recomputation
+        self._recompute_time_series()
+        self.update_display()
+        self._refresh_if_scatter_open()
 
     def _on_prev(self, event):
         if self.current_idx > 0:
@@ -875,6 +886,7 @@ class MultiComplexityViewer:
         
         # Determine output directory based on attributes or default
         save_path = self.save_dir
+        save_path = save_path + f"_sunElMin-{self.sun_elev_thresh}_Aerosol-{self.aerosol_level}_T-AOD-{self.t_aerosol_thresh}_L-QA-{QA_REJECT_MASK}_Dilate-{self.cloud_dilation}"
         if 'frame_endmember_volumes' in data_grp:
             try:
                 vol_dset = data_grp['frame_endmember_volumes']
@@ -885,16 +897,13 @@ class MultiComplexityViewer:
                 if hasattr(norm, 'decode'): norm = norm.decode('utf-8')
                 if norm is None: norm = "None"
                 
-                new_dir = f"{SAVE_DIR}_EM-{num_em}_Gram-{gram}_Norm-{norm}/"
-                os.makedirs(new_dir, exist_ok=True)
-                save_path = new_dir
+                os.makedirs(save_path, exist_ok=True)
+                save_path = save_path
             except Exception as e:
                 print(f"Error constructing dynamic path, using default: {e}")
 
         time_str = datetime.fromtimestamp(info['timestamp'], tz=timezone.utc).strftime('%Y%m%d_%H%M%S')
         prefix = f"{time_str}_{info['source']}_{self.current_idx:02d}"
-        if LANDSAT_STRICT_QA:
-            prefix += "_Strict_QA"
         
         figs_to_save = [(self.fig_combined, "CombinedAnalysis")]
         if DISPLAY_REDUNDANT_FIGURE:
@@ -902,7 +911,7 @@ class MultiComplexityViewer:
             
         for fig, name in figs_to_save:
             path = os.path.join(save_path, f"{prefix}_{name}.png")
-            fig.savefig(path, dpi=300)
+            fig.savefig(path, dpi=400)
             print(f"Saved: {path}")
 
     def run(self): plt.show()
@@ -917,11 +926,6 @@ if __name__ == "__main__":
     root = tk.Tk(); root.withdraw()
     print("Select LANDSAT HDF5...")
     #l_path = filedialog.askopenfilename(title="Select Landsat HDF5", filetypes=[("HDF5", "*.h5")])
-    l_path = "C:/satelliteImagery/LANDSAT/Tait/LANDSAT_Stack_Tait_HDFEOS_SC_EM-7_Gram-datasetMean_Norm-bandCount_Aerosol-low_QA-AllFrames_sunElMin-40.h5"
-
-    print("Select TANAGER HDF5...")
-    #t_path = filedialog.askopenfilename(title="Select Tanager HDF5", filetypes=[("HDF5", "*.h5")])
-    t_path = "C:/satelliteImagery/Tanager/Tait/Tanager_Stack_Tait_HDFEOS_SC_EM-7_Gram-datasetMean_Norm-bandCount_Aerosol-low_QA-AllFrames_sunElMin-40.h5"
     
     if l_path and t_path:
         viewer = MultiComplexityViewer([l_path, t_path])

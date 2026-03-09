@@ -94,25 +94,11 @@ def process_image_stack(h5, sourceName, norm_param, gram_type):
     for t in range(num_frames):
         print(f"\n--- Frame {t+1}/{num_frames} ---")
         frame_sr = ds_surfRef[t, ...]
-        if sourceName == "LANDSAT":
-            # Note: If strict exclusion was applied, this mask will evaluate to all True
-            qa_valid = (ds_quality[t, ...] & QA_REJECT_MASK) == 0
-            aerosol_valid = np.isin(ds_aerosol[t, ...], AEROSOL_ACCEPT_VALUES)
-            valid_spatial_mask = qa_valid & aerosol_valid
-        elif sourceName == "TANAGER":
+        if sourceName == "TANAGER":
             frame_sr = np.delete(frame_sr, np.where(~gw_mask[t]), axis=0)
-            
-            # Convert sun zenith to sun elevation (90 - zenith) and enforce threshold
-            sun_elevation_mask = (90.0 - sun_zenith_ds[t, ...]) >= SUN_ELEVATION_THRESHOLD
-            
-            valid_spatial_mask = (invalid_mask[t, ...] == 1) & \
-                                 (cloud_mask[t, ...] == 0) & \
-                                 (cirrus_mask[t, ...] == 0) & \
-                                 (nodata_mask[t, ...] == 0) & \
-                                 sun_elevation_mask
 
         print(f"Calculating full frame Volume for frame {t+1}/{num_frames}")
-        endmembers, endmember_idx, vol_curve = sc.process_volume_frame(frame_sr, num_endmembers, gram_type, valid_spatial_mask, norm_param)
+        endmembers, endmember_idx, vol_curve = sc.process_volume_frame(frame_sr, num_endmembers, gram_type, norm_param)
 
         if sourceName == "TANAGER":
             em_full = np.full((num_bands, num_endmembers), np.nan, dtype=np.float32)
@@ -124,9 +110,9 @@ def process_image_stack(h5, sourceName, norm_param, gram_type):
         ds_endmember_indices[t, ...] = endmember_idx
         ds_vol_curve[t, ...] = vol_curve
         print(f"Calculating Tile Volume for frame {t+1}/{num_frames}")
-        ds_tile[t, ...] = sc.process_volume_tiles(frame_sr, TILE_SIZE, num_endmembers, gram_type, None, norm_param)
+        ds_tile[t, ...] = sc.process_volume_tiles(frame_sr, TILE_SIZE, num_endmembers, gram_type, norm_param)
         print(f"Calculating Sliding Tile Volume for frame {t+1}/{num_frames}")
-        ds_slide[t, ...] = sc.process_volume_sliding_tile(frame_sr, TILE_SIZE, SLIDING_STRIDE, num_endmembers, gram_type, None, norm_param)
+        ds_slide[t, ...] = sc.process_volume_sliding_tile(frame_sr, TILE_SIZE, SLIDING_STRIDE, num_endmembers, gram_type, norm_param)
             
     ds_vol_curve.attrs['description'] = "Full volume curve (Volume vs Endmember Count) for entire frame"
     ds_vol_curve.attrs['gram_type'] = gram_type
