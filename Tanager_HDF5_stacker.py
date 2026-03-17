@@ -17,10 +17,10 @@ import warnings
 TIME_THRESHOLD_SECONDS = 60  # Group frames taken within 1 minute
 TARGET_RESOLUTION = 30.0     # Meters (Standard Tanager Product Spec)
 # Bounding Box (Longitude/Latitude)
-Location = "Tait"
+Location = "Rochester"
 if Location == "Rochester":
-    ROI_LON_MIN = -77.72; ROI_LON_MAX = -77.50
-    ROI_LAT_MIN = 43.08; ROI_LAT_MAX = 43.28
+    ROI_LON_MIN = -77.72; ROI_LON_MAX = -77.4450
+    ROI_LAT_MIN = 43.0450; ROI_LAT_MAX = 43.28
 elif Location == "Tait":
     ROI_LON_MIN = -77.516127; ROI_LON_MAX = -77.461968
     ROI_LAT_MIN = 43.127698; ROI_LAT_MAX = 43.159168
@@ -260,17 +260,6 @@ def process_tanager_stack():
                     fpath = scene["h5_file"].replace("\\", "/")
                     src_tf, src_crs_info = extract_georeferencing_from_h5(fpath)
 
-                    #conn_options = [
-                    #    f'HDF5:"{fpath}"://{d_info["h5_path"].replace(" ", "_")}',
-                    #    f'HDF5:"{fpath}":/{d_info["h5_path"].replace(" ", "_")}',
-                    #    f'HDF5:"{fpath}"://{d_info["h5_path"]}',
-                    #    f'HDF5:"{fpath}":/{d_info["h5_path"]}'
-                    #]
-                    
-                    #handle = None
-                    #for conn in conn_options:
-                    #    try: handle = rasterio.open(conn_options); break
-                    #    except: continue
                     handle = rasterio.open(f'HDF5:"{fpath}"://{d_info["h5_path"].replace(" ", "_")}')
                     if handle:
                         try:
@@ -315,6 +304,16 @@ def process_tanager_stack():
                     gw_to_plot = gw_array
                     out_dset.attrs["good_wavelengths"] = np.logical_and.reduce(gw_array, axis=0).astype(np.int32)
 
+                # --- Standardized Spatial Metadata ---
+                out_dset.attrs['spatial_ref'] = dst_crs.to_wkt()
+                gdal_transform = [tf_target.c, tf_target.a, tf_target.b, tf_target.f, tf_target.d, tf_target.e]
+                out_dset.attrs['GeoTransform'] = np.array(gdal_transform, dtype='float64')
+
+            # Also apply to the invalid mask if it was generated alongside surface_reflectance
+            if name == "surface_reflectance" and ds_invalid is not None:
+                ds_invalid.attrs['spatial_ref'] = dst_crs.to_wkt()
+                ds_invalid.attrs['GeoTransform'] = np.array(gdal_transform, dtype='float64')
+
         # After processing all datasets, add acquisition_time to surface_reflectance
         if "surface_reflectance" in grp_tanager:
             grp_tanager["surface_reflectance"].attrs["acquisition_time"] = acqTime_attr
@@ -322,6 +321,12 @@ def process_tanager_stack():
 
         # Visuals
         vis_dset = grp_tanager.create_dataset("ortho_visual", shape=(len(grouped_scenes), 4, height, width), dtype='uint8', compression="gzip", fillvalue=0)
+        
+        # --- Standardized Spatial Metadata ---
+        vis_dset.attrs['spatial_ref'] = dst_crs.to_wkt()
+        gdal_transform = [tf_target.c, tf_target.a, tf_target.b, tf_target.f, tf_target.d, tf_target.e]
+        vis_dset.attrs['GeoTransform'] = np.array(gdal_transform, dtype='float64')
+        
         datasets_created_info.append(("ortho_visual", np.uint8, 4, ["Time", "VisBand", "YDim", "XDim"]))
         for t_idx, group in enumerate(grouped_scenes):
             pass_vis = np.zeros((4, height, width), dtype='uint8')

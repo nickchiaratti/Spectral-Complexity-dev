@@ -31,10 +31,10 @@ import tarfile
 
 # --- CONFIGURATION ---
 
-Location = "Tait"
+Location = "Tait-I-490"
 if Location == "Rochester":
-    ROI_LON_MIN = -77.72; ROI_LON_MAX = -77.50
-    ROI_LAT_MIN = 43.08; ROI_LAT_MAX = 43.28
+    ROI_LON_MIN = -77.72; ROI_LON_MAX = -77.4450
+    ROI_LAT_MIN = 43.0450; ROI_LAT_MAX = 43.28
 elif Location == "Tait":
     ROI_LON_MIN = -77.516127; ROI_LON_MAX = -77.461968
     ROI_LAT_MIN = 43.127698; ROI_LAT_MAX = 43.159168
@@ -45,6 +45,7 @@ elif Location == "Tait-I-490":
     ROI_LON_MIN = -77.516127; ROI_LON_MAX = -77.4450
     ROI_LAT_MIN = 43.0450; ROI_LAT_MAX = 43.159168
 
+SOURCE_DIR = "C:/satelliteImagery/LANDSAT/SourceData/Rochester"
 LANDSAT_WAVELENGTHS = [0.443, 0.482, 0.561, 0.655, 0.865, 1.609, 2.201]
 LANDSAT_BAND_NAMES = ["Coastal Aerosol", "Blue", "Green", "Red", "NIR", "SWIR 1", "SWIR 2"]
 TARGET_BANDS_LIST = [1, 2, 3, 4, 5, 6, 7]
@@ -98,13 +99,17 @@ def calculate_target_grid(roi_bounds, force_utm_zone=None):
     
     # Determine UTM Zone
     center_lon = (lon_min + lon_max) / 2
-    zone = calculate_utm_zone(center_lon)
+    utm_zone = int((center_lon + 180) / 6) + 1
     
     # Construct Destination CRS (WGS84 UTM)
     # Assumes Northern Hemisphere for now based on context (NY state)
     # A robust solution checks latitude.
     is_north = lat_min >= 0
-    dst_crs = CRS.from_dict({'proj': 'utm', 'zone': zone, 'south': not is_north, 'ellps': 'WGS84'})
+    epsg_code = 32600 + utm_zone
+    if not is_north: epsg_code += 100 # Adjust for southern hemisphere if needed
+    dst_crs = CRS.from_epsg(epsg_code)
+
+    
     
     # Transform Corners to Destination CRS
     transformer = Transformer.from_crs("EPSG:4326", dst_crs, always_xy=True)
@@ -122,7 +127,7 @@ def calculate_target_grid(roi_bounds, force_utm_zone=None):
     # Ensure north is max_y and south is min_y
     transform_30 = from_bounds(dst_min_x, dst_min_y, dst_max_x, dst_max_y, width_30, height_30)
     
-    return dst_crs, transform_30, width_30, height_30, (dst_min_x, dst_max_y), (dst_max_x, dst_min_y), zone
+    return dst_crs, transform_30, width_30, height_30, (dst_min_x, dst_max_y), (dst_max_x, dst_min_y), utm_zone
 
 def get_raster_handle(source_type, source_path, filename_inside=None):
 
@@ -281,6 +286,14 @@ def process_landsat_stack(root_dir, output_path):
         dset_sr.attrs['_FillValue'] = np.nan # Updated for float
         dset_sr.attrs['wavelengths'] = LANDSAT_WAVELENGTHS
         
+        # --- Standardized Spatial Metadata ---
+        # Write CRS as a standard UTF-8 string natively
+        dset_sr.attrs['spatial_ref'] = dst_crs.to_wkt()
+        
+        # Write the Transform in native Rasterio Affine order (a, b, c, d, e, f)
+        rasterio_transform = [tf_30.a, tf_30.b, tf_30.c, tf_30.d, tf_30.e, tf_30.f]
+        dset_sr.attrs['GeoTransform'] = np.array(rasterio_transform, dtype='float64')
+        
         # --- NEW Attributes for Metadata ---
         acq_times = []
         spacecraft_ids = []
@@ -384,11 +397,9 @@ def process_landsat_stack(root_dir, output_path):
                         dset_radsat[t, :, :] = qa_uint
                 except Exception as e: print(f"QA write error frame {t}: {e}")
 
-            # Panchromatic logic removed
-
         # Write collected attributes to dataset
         dset_sr.attrs['acquisition_time'] = np.array(acq_times, dtype='float64') # Stored as float64
-        dset_sr.attrs['spacecraft_id'] = np.array(spacecraft_ids, dtype='S20')
+        dset_sr.attrs['spacecraft_id'] = spacecraft_ids
         dset_sr.attrs['sun_azimuth'] = np.array(sun_azimuths, dtype='float32')
         dset_sr.attrs['sun_elevation'] = np.array(sun_elevations, dtype='float32')
         dset_sr.attrs['wrs_path'] = np.array(wrs_paths, dtype='int8')
@@ -398,11 +409,11 @@ def process_landsat_stack(root_dir, output_path):
     print("\nProcessing Complete.")
 
 if __name__ == '__main__':
-    in_dir = "C:/satelliteImagery/LANDSAT/SourceData"
-    if in_dir:
+    
+    if SOURCE_DIR:
         out_dir = f"C:/satelliteImagery/LANDSAT/{Location}"
         if not os.path.exists(out_dir):
             os.makedirs(out_dir)
         out_file = f"{out_dir}/LANDSAT_Stack_{Location}_HDFEOS.h5"
         
-        process_landsat_stack(in_dir, out_file)
+        process_landsat_stack(SOURCE_DIR, out_file)

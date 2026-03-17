@@ -28,7 +28,6 @@ elif AEROSOL_ACCEPT_LEVEL == 'high':
 TILE_SIZE = 3          # Size of the window (NxN pixels) for volume calc
 SLIDING_STRIDE = 1      # Stride for sliding window (1 = every pixel, higher = faster)
 
-
 # --- Parameters for Maximum-Distance ---
 num_endmembers = 7
 MAX_DIST_P2 = 0
@@ -90,6 +89,8 @@ def process_image_stack(h5, sourceName, norm_param, gram_type):
     ds_vol_curve = overwrite_dset(h5, base_fields_path, 'frame_endmember_volumes', (num_frames, num_endmembers))
     ds_tile = overwrite_dset(h5, base_fields_path, 'tile_volume_map', (num_frames, height, width))
     ds_slide = overwrite_dset(h5, base_fields_path, 'sliding_volume_map', (num_frames, height, width))
+    ds_evi = overwrite_dset(h5, base_fields_path, 'evi_map', (num_frames, height, width))
+    ds_msd = overwrite_dset(h5, base_fields_path, 'msd_map', (num_frames, height, width))
 
     for t in range(num_frames):
         print(f"\n--- Frame {t+1}/{num_frames} ---")
@@ -113,6 +114,8 @@ def process_image_stack(h5, sourceName, norm_param, gram_type):
         ds_tile[t, ...] = sc.process_volume_tiles(frame_sr, TILE_SIZE, num_endmembers, gram_type, norm_param)
         print(f"Calculating Sliding Tile Volume for frame {t+1}/{num_frames}")
         ds_slide[t, ...] = sc.process_volume_sliding_tile(frame_sr, TILE_SIZE, SLIDING_STRIDE, num_endmembers, gram_type, norm_param)
+        ds_evi[t, ...] = sc.calc_evi_frame(frame_sr)
+        ds_msd[t, ...] = sc.process_msd_sliding_tile(frame_sr, TILE_SIZE, SLIDING_STRIDE)
             
     ds_vol_curve.attrs['description'] = "Full volume curve (Volume vs Endmember Count) for entire frame"
     ds_vol_curve.attrs['gram_type'] = gram_type
@@ -142,6 +145,10 @@ def process_image_stack(h5, sourceName, norm_param, gram_type):
     ds_slide.attrs['description'] = "Volume of convex hull of spectral data within each sliding NxN tile"
     ds_tile.attrs['tile_size'] = TILE_SIZE
     ds_slide.attrs['tile_size'] = TILE_SIZE
+    ds_evi.attrs['description'] = "EVI for each pixel"
+    ds_msd.attrs['description'] = "MSD for each pixel"
+    ds_msd.attrs['tile_size'] = TILE_SIZE
+    ds_msd.attrs['sliding_stride'] = SLIDING_STRIDE
     ds_slide.attrs['sliding_stride'] = SLIDING_STRIDE
     ds_tile.attrs['gram_type'] = gram_type
     ds_slide.attrs['gram_type'] = gram_type

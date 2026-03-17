@@ -16,7 +16,7 @@ def maximumDistance(data, num_endmembers):
     image2D = np.reshape(data, (data.shape[0] * data.shape[1], data.shape[2]), order="F")
 
     # Optional: You might want to review the (0, 2) clip logic here depending on your sensor data
-    if np.min(image2D) < -1:
+    if np.min(image2D) < 0:
         warnings.warn('Data contains negative values')
         image2D = np.clip(image2D, 0, 2)
     if np.max(image2D) > 1:
@@ -121,6 +121,148 @@ def calcGramLocalVolumes(endmembers, localization_vector):
     return volumes
 
 
+def process_volume_frame(frame_data, num_endmembers, gram_type, norm_type):
+    """
+    Process the image to identify endmembers for the entire frame.
+    Pixel Filtering: Only valid pixels are extracted into the 2D matrix.
+    Returns the full volume curve, endmembers, and indices.
+    """
+    bands, height, width = frame_data.shape
+    img = np.transpose(frame_data, (1, 2, 0))
+    image2D = np.reshape(img, (height * width, bands))
+    # Check gram type
+    if gram_type == 'datasetMean': print("Localizing Gram to dataset mean")
+    elif gram_type == 'minEndmember': print("Localizing Gram to second endmember")
+    else: print("Localizing Gram to 0")
+    # Check norm type
+    if norm_type == 'bandCount': print(f"Normalizing Endmembers by √{bands}")
+    else: print("No Endmember Normalization Applied")
+    # Find endmembers
+    endmembers, endmember_indices = maximumDistance(img, num_endmembers)
+    meanVector = img.mean(axis=(0, 1))
+    localizationVec = endmembers[:,1]
+
+
+    #if norm_type == 'bandCount':
+    #    endmembers_copy = endmembers / np.sqrt(bands)
+    #    meanVector = meanVector / np.sqrt(bands)
+    #    localizationVec = localizationVec / np.sqrt(bands)
+    #else:
+    #    endmembers_copy = endmembers
+
+    if gram_type == 'datasetMean':
+        volume = calcGramLocalVolumes(endmembers,meanVector)
+    elif gram_type == 'minEndmember':
+        remainingEndmembers = np.delete(endmembers,1,axis=1)
+        volume = calcGramLocalVolumes(remainingEndmembers,localizationVec)
+        volume = np.insert(volume,0,0.0)
+    else:
+        volume = calcGramLocalVolumes(endmembers,np.zeros(bands))
+
+    if norm_type == 'bandCount':
+        m_array = np.arange(1, len(volume) + 1)
+        volume = volume / np.power(bands, (m_array / 2.0))
+
+    # Return full volume array (curve) instead of just the maximum
+    return endmembers, endmember_indices, volume
+
+def process_volume_tiles(frame_data, tile_size, num_endmembers, gram_type, norm_type):
+    """
+    Grid-based processing (Non-overlapping tiles).
+    Strict Validity: Window is only processed if ALL pixels are valid.
+    Any pixel that is part of an invalid tile is set to NaN.
+    """
+    bands, height, width = frame_data.shape
+    img = np.transpose(frame_data, (1, 2, 0))
+    output_map = np.full((height, width), np.nan, dtype=np.float32)
+    # Check gram type
+    if gram_type == 'datasetMean': print("Localizing Gram to dataset mean")
+    elif gram_type == 'minEndmember': print("Localizing Gram to second endmember")
+    else: print("Localizing Gram to 0")
+    # Check norm type
+    if norm_type == 'bandCount': print(f"Normalizing Endmembers by √{bands}")
+    else: print("No Endmember Normalization Applied")
+    
+    for y in range(0, height, tile_size):
+        for x in range(0, width, tile_size):
+            y_end, x_end = min(y + tile_size, height), min(x + tile_size, width)
+            tile = img[y:y_end, x:x_end, :]
+            if tile[:,:,0].size >= num_endmembers:
+                meanVector = tile.mean(axis=(0, 1))
+                volume = np.zeros(num_endmembers)
+                endmembers, _ = maximumDistance(tile, num_endmembers)
+                localizationVec = endmembers[:,1]
+
+                if gram_type == 'datasetMean':
+                    volume = calcGramLocalVolumes(endmembers,meanVector)
+                elif gram_type == 'minEndmember':
+                    remainingEndmembers = np.delete(endmembers,1,axis=1)
+                    volume = calcGramLocalVolumes(remainingEndmembers,localizationVec)
+                    volume = np.insert(volume,0,0.0)
+                else:
+                    volume = calcGramLocalVolumes(endmembers,np.zeros(bands))
+
+                if norm_type == 'bandCount':
+                    m_array = np.arange(1, len(volume) + 1)
+                    volume = volume / np.power(bands, (m_array / 2.0))
+                
+                output_map[y:y_end, x:x_end] = np.max(volume[2:])
+    
+    return output_map
+
+def process_volume_sliding_tile(frame_data, tile_size, stride, num_endmembers, gram_type, norm_type):
+    """
+    Sliding window processing.
+    Strict Validity: Window is only processed if ALL pixels are valid.
+    Output is masked with NaN for any pixel identified as invalid.
+    """
+    bands, height, width = frame_data.shape
+    img = np.transpose(frame_data, (1, 2, 0))
+    
+    sum_map = np.zeros((height, width), dtype=np.float32)
+    count_map = np.zeros((height, width), dtype=np.int8)
+    if gram_type == 'datasetMean':
+        print("Localizing Gram to dataset mean")
+    elif gram_type == 'minEndmember':
+        print("Localizing Gram to second endmember")
+    else:
+        print("Localizing Gram to 0")
+
+    if norm_type == 'bandCount':
+        print(f"Normalizing Endmembers by √{bands}")
+    else:
+        print("No Endmember Normalization Applied")
+    
+    for y_start in range(0, height - tile_size + 1, stride):
+        for x_start in range(0, width - tile_size + 1, stride):
+            y_end, x_end = y_start + tile_size, x_start + tile_size
+            
+            tile = img[y_start:y_end, x_start:x_end, :]
+            meanVector = tile.mean(axis=(0, 1))
+            endmembers, _ = maximumDistance(tile, num_endmembers)
+            localizationVec = endmembers[:,1]
+
+            if gram_type == 'datasetMean':
+                volume = calcGramLocalVolumes(endmembers,meanVector)
+            elif gram_type == 'minEndmember':
+                remainingEndmembers = np.delete(endmembers,1,axis=1)
+                volume = calcGramLocalVolumes(remainingEndmembers,localizationVec)
+                volume = np.insert(volume,0,0.0)
+            else:
+                volume = calcGramLocalVolumes(endmembers,np.zeros(bands))
+
+            if norm_type == 'bandCount':
+                m_array = np.arange(1, len(volume) + 1)
+                volume = volume / np.power(bands, (m_array / 2.0))
+
+            vol_val = np.max(volume[2:])
+
+            sum_map[y_start:y_end, x_start:x_end] += vol_val
+            count_map[y_start:y_end, x_start:x_end] += 1
+            
+    return sum_map / count_map
+
+
 def plot_endmember_locations(image_cube, rgb_image, endmember_indices, endmembers):
     """
     Plots the spatial (row, col) location of each found endmember
@@ -197,149 +339,85 @@ def plot_spectral_profiles(endmembers, band_count):
     plt.grid(True, linestyle='--', alpha=0.7)
     plt.xticks(x_axis) # Ensure every band has a tick
 
-def process_volume_frame(frame_data, num_endmembers, gram_type, norm_type):
+'''
+Sandbox 
+
+'''
+def process_msd_sliding_tile(frame_data, tile_size, stride):
     """
-    Process the image to identify endmembers for the entire frame.
-    Pixel Filtering: Only valid pixels are extracted into the 2D matrix.
-    Returns the full volume curve, endmembers, and indices.
-    """
-    bands, height, width = frame_data.shape
-    img = np.transpose(frame_data, (1, 2, 0))
-    image2D = np.reshape(img, (height * width, bands))
-    # Check gram type
-    if gram_type == 'datasetMean': print("Localizing Gram to dataset mean")
-    elif gram_type == 'minEndmember': print("Localizing Gram to second endmember")
-    else: print("Localizing Gram to 0")
-    # Check norm type
-    if norm_type == 'bandCount': print(f"Normalizing Endmembers by √{bands}")
-    else: print("No Endmember Normalization Applied")
-    # Find endmembers
-    endmembers, endmember_indices = maximumDistance(img, num_endmembers)
-    meanVector = img.mean(axis=(0, 1))
-    localizationVec = endmembers[:,1]
-
-
-    if norm_type == 'bandCount':
-        endmembers_copy = endmembers / np.sqrt(bands)
-        meanVector = meanVector / np.sqrt(bands)
-        localizationVec = localizationVec / np.sqrt(bands)
-    else:
-        endmembers_copy = endmembers
-
-    if gram_type == 'datasetMean':
-        volume = calcGramLocalVolumes(endmembers_copy,meanVector)
-    elif gram_type == 'minEndmember':
-        remainingEndmembers = np.delete(endmembers_copy,1,axis=1)
-        volume = calcGramLocalVolumes(remainingEndmembers,localizationVec)
-        volume = np.insert(volume,0,0.0)
-    else:
-        volume = calcGramLocalVolumes(endmembers_copy,np.zeros(bands))
-
-    # Return full volume array (curve) instead of just the maximum
-    return endmembers, endmember_indices, volume
-
-def process_volume_tiles(frame_data, tile_size, num_endmembers, gram_type, norm_type):
-    """
-    Grid-based processing (Non-overlapping tiles).
-    Strict Validity: Window is only processed if ALL pixels are valid.
-    Any pixel that is part of an invalid tile is set to NaN.
-    """
-    bands, height, width = frame_data.shape
-    img = np.transpose(frame_data, (1, 2, 0))
-    output_map = np.full((height, width), np.nan, dtype=np.float32)
-    # Check gram type
-    if gram_type == 'datasetMean': print("Localizing Gram to dataset mean")
-    elif gram_type == 'minEndmember': print("Localizing Gram to second endmember")
-    else: print("Localizing Gram to 0")
-    # Check norm type
-    if norm_type == 'bandCount': print(f"Normalizing Endmembers by √{bands}")
-    else: print("No Endmember Normalization Applied")
-    
-    for y in range(0, height, tile_size):
-        for x in range(0, width, tile_size):
-            y_end, x_end = min(y + tile_size, height), min(x + tile_size, width)
-            tile = img[y:y_end, x:x_end, :]
-            if tile[:,:,0].size >= num_endmembers:
-                meanVector = tile.mean(axis=(0, 1))
-                volume = np.zeros(num_endmembers)
-                endmembers, _ = maximumDistance(tile, num_endmembers)
-                localizationVec = endmembers[:,1]
-
-                if norm_type == 'bandCount':
-                    endmembers = endmembers / np.sqrt(bands)
-                    meanVector = meanVector / np.sqrt(bands)
-                    localizationVec = localizationVec / np.sqrt(bands)
-
-                if gram_type == 'datasetMean':
-                    volume = calcGramLocalVolumes(endmembers,meanVector)
-                elif gram_type == 'minEndmember':
-                    remainingEndmembers = np.delete(endmembers,1,axis=1)
-                    volume = calcGramLocalVolumes(remainingEndmembers,localizationVec)
-                    volume = np.insert(volume,0,0.0)
-                else:
-                    volume = calcGramLocalVolumes(endmembers,np.zeros(bands))
-                
-                output_map[y:y_end, x:x_end] = np.max(volume[2:])
-    
-    return output_map
-
-def process_volume_sliding_tile(frame_data, tile_size, stride, num_endmembers, gram_type, norm_type):
-    """
-    Sliding window processing.
-    Strict Validity: Window is only processed if ALL pixels are valid.
-    Output is masked with NaN for any pixel identified as invalid.
+    Calculates the Local Mean Spectral Distance (MSD) for a sliding window.
+    Acts as a benchmark for local spectral heterogeneity.
     """
     bands, height, width = frame_data.shape
     img = np.transpose(frame_data, (1, 2, 0))
     
     sum_map = np.zeros((height, width), dtype=np.float32)
-    count_map = np.zeros((height, width), dtype=np.int8)
-    if gram_type == 'datasetMean':
-        print("Localizing Gram to dataset mean")
-    elif gram_type == 'minEndmember':
-        print("Localizing Gram to second endmember")
-    else:
-        print("Localizing Gram to 0")
+    count_map = np.zeros((height, width), dtype=np.int32)
 
-    if norm_type == 'bandCount':
-        print(f"Normalizing Endmembers by √{bands}")
-    else:
-        print("No Endmember Normalization Applied")
-    
     for y_start in range(0, height - tile_size + 1, stride):
         for x_start in range(0, width - tile_size + 1, stride):
             y_end, x_end = y_start + tile_size, x_start + tile_size
             
-            tile = img[y_start:y_end, x_start:x_end, :]
-            meanVector = tile.mean(axis=(0, 1))
-            endmembers, _ = maximumDistance(tile, num_endmembers)
-            localizationVec = endmembers[:,1]
-            if norm_type == 'bandCount':
-                endmembers = endmembers / np.sqrt(bands)
-                meanVector = meanVector / np.sqrt(bands)
-                localizationVec = localizationVec / np.sqrt(bands)
-
-            if gram_type == 'datasetMean':
-                volume = calcGramLocalVolumes(endmembers,meanVector)
-            elif gram_type == 'minEndmember':
-                remainingEndmembers = np.delete(endmembers,1,axis=1)
-                volume = calcGramLocalVolumes(remainingEndmembers,localizationVec)
-                volume = np.insert(volume,0,0.0)
-            else:
-                volume = calcGramLocalVolumes(endmembers,np.zeros(bands))
-
-            vol_val = np.max(volume[2:])
-
-            sum_map[y_start:y_end, x_start:x_end] += vol_val
+            # Extract window and reshape to (N_pixels, Bands)
+            tile_cube = img[y_start:y_end, x_start:x_end, :]
+            tile_2d = np.reshape(tile_cube, (-1, bands))
+            
+            # 1. Calculate the local mean spectral vector
+            local_mean = np.nanmean(tile_2d, axis=0)
+            
+            # 2. Calculate the Euclidean distance of each pixel to the mean
+            # np.linalg.norm with axis=1 computes distance for each row (pixel)
+            distances = np.linalg.norm(tile_2d - local_mean, axis=1)
+            
+            # 3. Calculate the Mean Spectral Distance for the window
+            msd_value = np.nanmean(distances)
+            
+            # 4. Assign to maps (applies spatial smoothing equivalent to sliding volume)
+            sum_map[y_start:y_end, x_start:x_end] += msd_value
             count_map[y_start:y_end, x_start:x_end] += 1
             
-    return sum_map / count_map
+    output_map = np.where(count_map > 0, sum_map / count_map, np.nan)
+    return output_map
 
 
-'''
-Sandbox 
+def calc_evi_frame(frame_data):
+    """
+    Calculates the Enhanced Vegetation Index (EVI) per pixel for a given frame.
+    
+    Formula: EVI = G * ((NIR - Red) / (NIR + C1 * Red - C2 * Blue + L))
+    where G=2.5, C1=6, C2=7.5, L=1 (Reference: Huete et al., 2002).
+    
+    Assumes standard Landsat 8/9 Level-2 stacker band order:
+    Index 1: Blue  (L8/9 Band 2)
+    Index 3: Red   (L8/9 Band 4)
+    Index 4: NIR   (L8/9 Band 5)
+    """
+    bands, height, width = frame_data.shape
+    
+    if bands < 5:
+        warnings.warn("Insufficient bands to calculate EVI. Returning NaNs.")
+        return np.full((height, width), np.nan, dtype=np.float32)
+        
+    blue = frame_data[1, :, :]
+    red = frame_data[3, :, :]
+    nir = frame_data[4, :, :]
+    
+    # Standard EVI coefficients (Huete et al., 2002)
+    G = 2.5
+    C1 = 6.0
+    C2 = 7.5
+    L = 1.0
+    
+    # Calculate denominator
+    denominator = nir + (C1 * red) - (C2 * blue) + L
+    
+    # Safely calculate EVI avoiding division by zero
+    evi = G * ((nir - red) / denominator)
+    
+    # Mask out infinity caused by extreme outliers or zeros
+    evi[np.isinf(evi)] = np.nan
+    return evi
 
-'''
 def calcGramLocalVolumes_QR(endmembers, localization_vector):
     """
     See page 251 in "The Theory of Matrices" Volume 1 by F.R. Gantmacher for equating volumes to product of heights

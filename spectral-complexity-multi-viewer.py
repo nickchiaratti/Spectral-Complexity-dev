@@ -7,10 +7,12 @@ from matplotlib.widgets import Button, TextBox, CheckButtons, RadioButtons
 from datetime import datetime, timezone
 import tkinter as tk
 from tkinter import filedialog
-from scipy.spatial import ConvexHull
 from scipy.stats import pearsonr, spearmanr
 from scipy import ndimage
 from skimage import exposure
+
+import rasterio.transform
+from pyproj import Transformer, CRS
 
 # --- Configuration ---
 # Standard Landsat 8/9 True Color Indices: [C(0), B(1), G(2), R(3), NIR(4), S1(5), S2(6)]
@@ -19,18 +21,23 @@ LANDSAT_RGB_BANDS = (3, 2, 1)
 HULL_BANDS_LANDSAT = (6, 4, 2) 
 HULL_BANDS_TANAGER = (100, 50, 20) # Example hyperspectral indices
 
+TS_START_DATE = datetime(2015, 1, 1, tzinfo=timezone.utc)
+TS_END_DATE = datetime(2025, 12, 31, tzinfo=timezone.utc)
+TWIN_Y_AXIS_DEFAULT = False
+
 # Combined Pixel Mask Configuration
 SUN_ELEVATION_THRESHOLD = 30
 CLOUD_DILATION = 2
 
 # Tanager Pixel Mask Configuration
-TANAGER_AEROSOL_DEPTH_THRESHOLD = 0.25
-TANAGER_SR_UNCERTAINTY_THRESHOLD = 0.02
+TANAGER_AEROSOL_DEPTH_THRESHOLD = 0.3
+TANAGER_SR_UNCERTAINTY_THRESHOLD = 0.05
 
 # LANDSAT Pixel Mask Configuration
 QA_REJECT_MASK = 0b111111
 RADSAT_ACCEPT_VALUE = 0
 AEROSOL_ACCEPT_LEVEL = 'medium' #'low' 'medium' 'high'
+
 
 # Mapped levels for UI Dropdown
 AEROSOL_DICT = {
@@ -38,37 +45,31 @@ AEROSOL_DICT = {
     'medium': [2, 4, 32, 66, 68, 96, 100, 130, 132, 160, 164],
     'high': [2, 4, 32, 66, 68, 96, 100, 130, 132, 160, 164, 192, 194, 196, 224, 228]
 }
+landsat_path = "C:/satelliteImagery/LANDSAT/Rochester/LANDSAT_Stack_Rochester_GEE_2015_2025_SC_EM-7_Gram-general_Norm-None_Aerosol-low_QA-AllFrames_sunElMin-40.h5"
+tanager_path = "C:/satelliteImagery/Tanager/Rochester/Tanager_Stack_Rochester_HDFEOS_SC_EM-7_Gram-general_Norm-None_Aerosol-low_QA-AllFrames_sunElMin-40.h5"
 
-# Time Series Locations (y, x) for just Tait
+SAVE_DIR = "C:/satelliteImagery/MultiSensor_Analysis_Rochester_general"
+
+# Time Series Locations (Latitude, Longitude)
 TS_LOCATIONS = [
-    {'yx': (56, 127),  'label': "Golf Course",                    'color': 'tab:green'},
-    {'yx': (87, 128), 'label': "Artificial turf football field",     'color': 'tab:blue'},
-    {'yx': (80, 122), 'label': "Recently added artificial turf field",'color': 'tab:cyan'},
-    {'yx': (66, 28),  'label': "Tait Parking Lot",          'color': 'tab:red'}
+    {'latlon': (43.142856, -77.508451), 'label': "West Tait Forest",     'color': 'tab:green'},
+    {'latlon': (43.144861, -77.501176), 'label': "East Tait Forest",             'color': 'tab:olive'},
+    {'latlon': (43.136910, -77.469462), 'label': "Artificial turf football field",  'color': 'tab:blue'},
+    {'latlon': (43.138241, -77.470873), 'label': "Recently added artificial turf",  'color': 'tab:cyan'},
+    {'latlon': (43.141297, -77.506256), 'label': "Tait Parking Lot",                'color': 'tab:red'},
+    {'latlon': (43.139411, -77.504005), 'label': "ROCX NITE Tarp",                  'color': 'tab:purple'},
 ]
-
-# Time Series Locations (y, x) for Tait and I-490
-#TS_LOCATIONS = [
-#    {'yx': (55, 136),   'label': "Golf Course",                          'color': 'tab:green'},
-#    {'yx': (242, 22),   'label': "Pittsford Farms Dairy",                  'color': 'tab:olive'},
-#    {'yx': (87, 138),   'label': "Artificial turf football field",        'color': 'tab:blue'},
-#    {'yx': (80, 131),   'label': "Recently added artificial turf field",  'color': 'tab:cyan'},
-#    {'yx': (66, 38),    'label': "Tait Parking Lot",                      'color': 'tab:red'},
-#    {'yx': (352, 121),  'label': "I-490 Bridge over the Erie Canal",     'color': 'tab:orange'},
-#    {'yx': (362, 123),  'label': "I-490 Bridge over Kreag Road",         'color': 'tab:purple'},
-#    {'yx': (381, 120),  'label': "Bushnell’s Basin Park & Ride",         'color': 'tab:brown'}
+#TS_LOCATIONS = [ #Natural Locations Only
+#    {'latlon': (43.162234, -77.471623), 'label': "Rothfuss Park: Natural grass soccer fields",     'color': 'tab:green'},
+#    {'latlon': (43.165631, -77.472550), 'label': "Rothfuss Park: Artificial turf football field",  'color': 'tab:olive'},
+#    {'latlon': (43.172018, -77.456343), 'label': "Thousand Acre Swamp1",             'color': 'tab:blue'},
+#    {'latlon': (43.169826, -77.449300), 'label': "Thousand Acre Swamp2",             'color': 'tab:cyan'},
+#    {'latlon': (43.147630, -77.448109), 'label': "Penfield Country Club Golf Course1",                'color': 'tab:red'},
+#    {'latlon': (43.158111, -77.441822), 'label': "Penfield Country Club Golf Course2",                  'color': 'tab:purple'},
 #]
-l_path = "C:/satelliteImagery/LANDSAT/Tait/LANDSAT_Stack_Tait_HDFEOS_SC_EM-7_Gram-minEndmember_Norm-bandCount_Aerosol-low_QA-AllFrames_sunElMin-40.h5"
-t_path = "C:/satelliteImagery/Tanager/Tait/Tanager_Stack_Tait_HDFEOS_SC_EM-7_Gram-minEndmember_Norm-bandCount_Aerosol-low_QA-AllFrames_sunElMin-40.h5"
 
-SAVE_DIR = "C:/satelliteImagery/MultiSensor_Tait_Gram-minEndmember_Norm-bandCount_"
 DISPLAY_NORMALIZATION = False
 DISPLAY_REDUNDANT_FIGURE = True  # Toggle for the 2-subplot spatial/complexity redundant figure
-
-
-    
-
-
 
 class MultiComplexityViewer:
     def __init__(self, file_paths):
@@ -84,6 +85,12 @@ class MultiComplexityViewer:
         
         self.t_aerosol_thresh = TANAGER_AEROSOL_DEPTH_THRESHOLD
         self.t_uncertainty_thresh = TANAGER_SR_UNCERTAINTY_THRESHOLD
+        
+        # Initialize Time Series Display Range
+        self.ts_start_date = TS_START_DATE
+        self.ts_end_date = TS_END_DATE
+        self.use_twin_axis = TWIN_Y_AXIS_DEFAULT
+        self.localization_mode = 'general'
         
         # 1. Load and Parse both files
         for path in file_paths:
@@ -133,7 +140,41 @@ class MultiComplexityViewer:
         self.l_file_idx = next((i for i, f in enumerate(self.files) if f['source'] == 'LANDSAT'), None)
         self.t_file_idx = next((i for i, f in enumerate(self.files) if f['source'] == 'TANAGER'), None)
 
-        # 2. Interleave frames by acquisition time
+        # 2. Map Geographic Coordinates to Pixel Coordinates
+        if len(self.files) > 0:
+            sample_file = self.files[0]
+            sr_attrs = sample_file['data_grp']['surface_reflectance'].attrs
+            geo_transform = sr_attrs.get('GeoTransform')
+            spatial_ref = sr_attrs.get('spatial_ref')
+            
+            if geo_transform is not None and spatial_ref is not None:
+                try:
+                    if isinstance(spatial_ref, bytes):
+                        spatial_ref = spatial_ref.decode('utf-8')
+                    crs = CRS.from_wkt(spatial_ref)
+                    transformer = Transformer.from_crs("EPSG:4326", crs, always_xy=True)
+                    
+                    # rasterio.transform.Affine maps linear transformations directly 
+                    affine = rasterio.transform.Affine(*geo_transform)
+                    inv_affine = ~affine
+                    
+                    print("\n--- Coordinate Mapping ---")
+                    for loc in TS_LOCATIONS:
+                        lat, lon = loc['latlon']
+                        proj_x, proj_y = transformer.transform(lon, lat)
+                        px, py = inv_affine * (proj_x, proj_y)
+                        loc['yx'] = (int(round(py)), int(round(px)))
+                        print(f"Mapped [{loc['label']}] Lat/Lon ({lat:.4f}, {lon:.4f}) -> Pixel (y={loc['yx'][0]}, x={loc['yx'][1]})")
+                except Exception as e:
+                    print(f"Error projecting coordinates: {e}")
+                    for loc in TS_LOCATIONS:
+                        loc['yx'] = (0, 0)
+            else:
+                print("Warning: GeoTransform or spatial_ref missing from metadata. Defaulting to (0,0).")
+                for loc in TS_LOCATIONS:
+                    loc['yx'] = (0, 0)
+
+        # 3. Interleave frames by acquisition time
         self.all_frames.sort(key=lambda x: x['timestamp'])
         self.num_total_frames = len(self.all_frames)
         self.current_idx = 0
@@ -147,11 +188,12 @@ class MultiComplexityViewer:
         
         self.im_slide_redundant = None
         self.cbar_slide_redundant = None
+        self.ax_ts_twin = None
 
         # Process Time Series with initial thresholds
         self._recompute_time_series()
 
-        # 3. Initialize UI
+        # 4. Initialize UI
         self._init_control_ui()
         self._init_combined_ui()
         if DISPLAY_REDUNDANT_FIGURE:
@@ -196,7 +238,8 @@ class MultiComplexityViewer:
                 # Check specific subset locations against the generated mask
                 for loc in TS_LOCATIONS:
                     y, x = loc['yx']
-                    if dset.shape[1] > y and dset.shape[2] > x:
+                    # Verify array bounds
+                    if 0 <= y < dset.shape[1] and 0 <= x < dset.shape[2]:
                         # Only accept if the spatial mask permits this pixel
                         if mask[y, x]:
                             val = dset[f_idx, y, x]
@@ -210,78 +253,92 @@ class MultiComplexityViewer:
         print("Time series processing complete.")
 
     def _init_control_ui(self):
-        # Expanded figure size to accommodate new scatter and mask controls
-        self.fig_controls = plt.figure(figsize=(6, 10.0))
+        # Expanded figure size to accommodate new scatter, mask, range, and localization controls
+        self.fig_controls = plt.figure(figsize=(6, 12.0))
         self.fig_controls.canvas.manager.set_window_title("Timeline Navigation")
         self.ax_meta = self.fig_controls.add_axes([0, 0, 1, 1]); self.ax_meta.axis('off')
-        self.ctrl_text = self.ax_meta.text(0.5, 0.94, "", ha='center', va='center', 
+        self.ctrl_text = self.ax_meta.text(0.5, 0.96, "", ha='center', va='center', 
                                          fontsize=10, family='monospace',
                                          bbox=dict(facecolor='white', alpha=0.8, edgecolor='gray'))
         
         # Navigation Row
-        ax_prev = self.fig_controls.add_axes([0.1, 0.85, 0.25, 0.04])
-        ax_next = self.fig_controls.add_axes([0.65, 0.85, 0.25, 0.04])
-        ax_input = self.fig_controls.add_axes([0.45, 0.85, 0.1, 0.04])
+        ax_prev = self.fig_controls.add_axes([0.1, 0.90, 0.25, 0.035])
+        ax_next = self.fig_controls.add_axes([0.65, 0.90, 0.25, 0.035])
+        ax_input = self.fig_controls.add_axes([0.45, 0.90, 0.1, 0.035])
         
         self.btn_prev = Button(ax_prev, '<< Prev')
         self.btn_next = Button(ax_next, 'Next >>')
         self.txt_input = TextBox(ax_input, 'Go: ', initial='0')
         
         # Single Save Row
-        ax_save = self.fig_controls.add_axes([0.3, 0.79, 0.4, 0.04])
+        ax_save = self.fig_controls.add_axes([0.3, 0.85, 0.4, 0.035])
         self.btn_save = Button(ax_save, 'Save Current', color='lightgreen')
 
         # Auto Save Row
-        self.ax_meta.text(0.5, 0.75, "--- Batch Processing ---", ha='center', va='center', fontsize=9)
+        self.ax_meta.text(0.5, 0.81, "--- Batch Processing ---", ha='center', va='center', fontsize=9)
         
-        ax_start = self.fig_controls.add_axes([0.2, 0.69, 0.15, 0.04])
-        ax_end = self.fig_controls.add_axes([0.5, 0.69, 0.15, 0.04])
-        ax_auto = self.fig_controls.add_axes([0.3, 0.62, 0.4, 0.04])
+        ax_start = self.fig_controls.add_axes([0.2, 0.76, 0.15, 0.035])
+        ax_end = self.fig_controls.add_axes([0.5, 0.76, 0.15, 0.035])
+        ax_auto = self.fig_controls.add_axes([0.3, 0.71, 0.4, 0.035])
 
         self.txt_start = TextBox(ax_start, 'Start: ', initial='0')
         self.txt_end = TextBox(ax_end, 'End: ', initial=str(self.num_total_frames-1))
         self.btn_auto = Button(ax_auto, 'Auto Save Range', color='lightblue')
         
         # Scatter Plot Controls
-        self.ax_meta.text(0.5, 0.57, "--- Sliding Volume Scatter ---", ha='center', va='center', fontsize=9)
+        self.ax_meta.text(0.5, 0.67, "--- Sliding Volume Scatter ---", ha='center', va='center', fontsize=9)
         
-        ax_l_frame = self.fig_controls.add_axes([0.2, 0.51, 0.15, 0.04])
-        ax_t_frame = self.fig_controls.add_axes([0.5, 0.51, 0.15, 0.04])
-        ax_scatter_btn = self.fig_controls.add_axes([0.3, 0.44, 0.4, 0.04])
+        ax_l_frame = self.fig_controls.add_axes([0.2, 0.62, 0.15, 0.035])
+        ax_t_frame = self.fig_controls.add_axes([0.5, 0.62, 0.15, 0.035])
+        ax_scatter_btn = self.fig_controls.add_axes([0.3, 0.57, 0.4, 0.035])
 
         self.txt_l_frame = TextBox(ax_l_frame, 'L Idx: ', initial='80')
         self.txt_t_frame = TextBox(ax_t_frame, 'T Idx: ', initial='3')
         self.btn_scatter = Button(ax_scatter_btn, 'Update Scatter', color='lightyellow')
         
+        # --- Parallelotope Localization Controls ---
+        self.ax_meta.text(0.5, 0.53, "--- Parallelotope Localization ---", ha='center', va='center', fontsize=9)
+        ax_rad_loc = self.fig_controls.add_axes([0.3, 0.43, 0.4, 0.08])
+        self.rad_localization = RadioButtons(ax_rad_loc, ('general', 'datasetMean', 'minEndmember'), active=0)
+
         # --- Pixel Filters Controls ---
-        self.ax_meta.text(0.5, 0.39, "--- Pixel Filters ---", ha='center', va='center', fontsize=9)
+        self.ax_meta.text(0.5, 0.40, "--- Pixel Filters ---", ha='center', va='center', fontsize=9)
         
-        # Checkboxes for QA and RADSAT (Landsat)
-        ax_chk = self.fig_controls.add_axes([0.1, 0.28, 0.4, 0.09])
+        ax_chk = self.fig_controls.add_axes([0.1, 0.30, 0.4, 0.08])
         self.chk_masks = CheckButtons(ax_chk, ['L: QA Rej', 'L: RADSAT Acpt'], [self.mask_qa_enabled, self.mask_radsat_enabled])
         
-        # Radio for Aerosol (Landsat)
-        ax_rad = self.fig_controls.add_axes([0.55, 0.28, 0.35, 0.09])
+        ax_rad = self.fig_controls.add_axes([0.55, 0.30, 0.35, 0.08])
         ax_rad.set_title("L: Aerosol", fontsize=8)
-        active_idx = ['low', 'medium', 'high'].index(self.aerosol_level)
-        self.rad_aerosol = RadioButtons(ax_rad, ('low', 'medium', 'high'), active=active_idx)
+        active_idx = ['low', 'medium', 'high', 'all'].index(self.aerosol_level)
+        self.rad_aerosol = RadioButtons(ax_rad, ('low', 'medium', 'high', 'all'), active=active_idx)
         
-        # TextBoxes for numeric thresholds
-        ax_sun = self.fig_controls.add_axes([0.3, 0.22, 0.4, 0.04])
+        # Pack 4 filters into 2 rows to save UI space
+        ax_sun = self.fig_controls.add_axes([0.1, 0.25, 0.35, 0.035])
         self.txt_sun = TextBox(ax_sun, 'Sun Elev > ', initial=str(self.sun_elev_thresh))
 
-        ax_cdil = self.fig_controls.add_axes([0.3, 0.17, 0.4, 0.04])
+        ax_cdil = self.fig_controls.add_axes([0.55, 0.25, 0.35, 0.035])
         self.txt_cdil = TextBox(ax_cdil, 'Cloud Dil: ', initial=str(self.cloud_dilation))
 
-        ax_t_aod = self.fig_controls.add_axes([0.3, 0.12, 0.4, 0.04])
+        ax_t_aod = self.fig_controls.add_axes([0.1, 0.20, 0.35, 0.035])
         self.txt_t_aod = TextBox(ax_t_aod, 'T-AOD < ', initial=str(self.t_aerosol_thresh))
 
-        ax_t_unc = self.fig_controls.add_axes([0.3, 0.07, 0.4, 0.04])
+        ax_t_unc = self.fig_controls.add_axes([0.55, 0.20, 0.35, 0.035])
         self.txt_t_unc = TextBox(ax_t_unc, 'T-Unc < ', initial=str(self.t_uncertainty_thresh))
 
-        # Update Masks Execution Button
-        ax_update_mask = self.fig_controls.add_axes([0.3, 0.015, 0.4, 0.04])
-        self.btn_update_mask = Button(ax_update_mask, 'Update Masks', color='lightcoral')
+        # --- Time Series Display Controls ---
+        self.ax_meta.text(0.5, 0.16, "--- Time Series Range ---", ha='center', va='center', fontsize=9)
+        
+        ax_ts_start = self.fig_controls.add_axes([0.15, 0.11, 0.3, 0.035])
+        ax_ts_end = self.fig_controls.add_axes([0.55, 0.11, 0.3, 0.035])
+        self.txt_ts_start = TextBox(ax_ts_start, 'Start: ', initial=self.ts_start_date.strftime("%Y-%m-%d"))
+        self.txt_ts_end = TextBox(ax_ts_end, 'End: ', initial=self.ts_end_date.strftime("%Y-%m-%d"))
+        
+        ax_chk_ts = self.fig_controls.add_axes([0.3, 0.06, 0.4, 0.035])
+        self.chk_ts_axis = CheckButtons(ax_chk_ts, ['Use Twin Y-Axis'], [self.use_twin_axis])
+
+        # Update Masks / Parameters Execution Button
+        ax_update_mask = self.fig_controls.add_axes([0.3, 0.01, 0.4, 0.035])
+        self.btn_update_mask = Button(ax_update_mask, 'Update Masks & Range', color='lightcoral')
 
         # Connect events
         self.btn_prev.on_clicked(self._on_prev)
@@ -291,7 +348,10 @@ class MultiComplexityViewer:
         self.btn_auto.on_clicked(self._on_auto_save)
         self.btn_scatter.on_clicked(self._on_update_scatter)
         self.btn_update_mask.on_clicked(self._on_update_mask)
-        # Note: Event listeners for mask components removed. Use 'Update Masks' to process.
+        self.rad_localization.on_clicked(self._on_localization_change)
+        
+        # Real-time toggle specifically for Twin Y-axis since it requires no spatial mask recomputation
+        self.chk_ts_axis.on_clicked(self._on_ts_axis_toggle)
 
     def _init_combined_ui(self):
         self.fig_combined = plt.figure(figsize=(18, 10))
@@ -317,13 +377,13 @@ class MultiComplexityViewer:
 
     def _init_hull_ui(self):
         self.fig_hull = plt.figure(figsize=(8, 7))
-        self.fig_hull.canvas.manager.set_window_title("3D Convex Hull Projection")
+        self.fig_hull.canvas.manager.set_window_title("3D Parallelotope Projection")
         self.ax_hull = self.fig_hull.add_subplot(111, projection='3d')
 
     def _format_metadata(self, frame_info):
         dt = datetime.fromtimestamp(frame_info['timestamp'], tz=timezone.utc)
         return (f"TIMELINE:   {self.current_idx + 1} / {self.num_total_frames}\n"
-                f"SOURCE:     {frame_info['source']}\n"
+                f"FILE IDX:   {frame_info['frame_idx']} ({frame_info['source']})\n"
                 f"SPACECRAFT: {frame_info['sat_id']}\n"
                 f"ACQUIRED:   {dt.strftime('%Y-%m-%d %H:%M:%S UTC')}")
 
@@ -333,12 +393,12 @@ class MultiComplexityViewer:
         
         # Sun Elevation Check
         sun_elev_arr = data_grp['surface_reflectance'].attrs.get('sun_elevation')
-        if f_idx < len(sun_elev_arr):
+        if sun_elev_arr is not None and f_idx < len(sun_elev_arr):
             if sun_elev_arr[f_idx] < self.sun_elev_thresh:
                 return np.zeros(shape, dtype=bool)
 
         # QA Reject Mask
-        if self.mask_qa_enabled:
+        if self.mask_qa_enabled and 'QUALITY_L1_PIXEL' in data_grp:
             qa_pixel = data_grp['QUALITY_L1_PIXEL'][f_idx, ...]
             # True represents BAD pixels (Clouds/Shadows)
             bad_qa_mask = (qa_pixel & QA_REJECT_MASK) != 0
@@ -349,36 +409,26 @@ class MultiComplexityViewer:
             valid_mask &= ~bad_qa_mask
 
         # RADSAT Accept Value
-        if self.mask_radsat_enabled:
+        if self.mask_radsat_enabled and 'RADIOMETRIC_SATURATION' in data_grp:
             bad_radsat = data_grp['RADIOMETRIC_SATURATION'][f_idx, ...] != RADSAT_ACCEPT_VALUE
-            if self.cloud_dilation > 0:
-                kernel = np.ones((3, 3), dtype=bool)
-                bad_radsat = ndimage.binary_dilation(bad_radsat, structure=kernel, iterations=self.cloud_dilation)
+            kernel = np.ones((3, 3), dtype=bool)
+            bad_radsat = ndimage.binary_dilation(bad_radsat, structure=kernel, iterations=1)
             valid_mask &= ~bad_radsat
 
         # Aerosol Accept Values
-        aerosol = data_grp['QUALITY_L2_AEROSOL'][f_idx, ...]
-        invalid_aerosol = ~np.isin(aerosol, AEROSOL_DICT[self.aerosol_level])
-        if self.cloud_dilation > 0:
-            kernel = np.ones((3, 3), dtype=bool)
-            invalid_aerosol = ndimage.binary_dilation(invalid_aerosol, structure=kernel, iterations=self.cloud_dilation)
-        valid_mask &= ~invalid_aerosol
+        if 'QUALITY_L2_AEROSOL' in data_grp:
+            if self.aerosol_level != 'all':
+                aerosol = data_grp['QUALITY_L2_AEROSOL'][f_idx, ...]
+                invalid_aerosol = ~np.isin(aerosol, AEROSOL_DICT[self.aerosol_level])
+                kernel = np.ones((3, 3), dtype=bool)
+                invalid_aerosol = ndimage.binary_dilation(invalid_aerosol, structure=kernel, iterations=1)
+                valid_mask &= ~invalid_aerosol
 
         return valid_mask
 
     def _get_tanager_mask(self, data_grp, f_idx, shape):
         """Generates a boolean mask for TANAGER data based on active UI filters."""
         valid_mask = np.ones(shape, dtype=bool)
-
-        # Invalid Pixel Check
-        #if 'sr_invalid' in data_grp:
-        #    invalid_pixels = data_grp['sr_invalid'][f_idx, ...].astype(bool)
-        #    valid_mask &= (invalid_pixels != 0)
-
-        # No Data Check
-        #if 'nodata_pixels' in data_grp:
-        #    nodata = (data_grp['nodata_pixels'][f_idx, ...]==1)
-        #    valid_mask &= (nodata == 0)
 
         # Cloud Mask Check
         if 'beta_cloud_mask' in data_grp:
@@ -393,24 +443,33 @@ class MultiComplexityViewer:
         # Sun Elevation Check (Derived from Sun Zenith)
         if 'sun_zenith' in data_grp:
             zenith = data_grp['sun_zenith'][f_idx, ...]
-            valid_mask &= ((90.0 - zenith) >= self.sun_elev_thresh)
+            # Filter out fill value (-9999.0) and enforce elevation threshold
+            valid_mask &= (zenith != -9999.0) & ((90.0 - zenith) >= self.sun_elev_thresh)
             
         # Aerosol Optical Depth Check
         if 'aerosol_optical_depth' in data_grp:
-            bad_aod_mask = data_grp['aerosol_optical_depth'][f_idx, ...] >= self.t_aerosol_thresh
+            aod = data_grp['aerosol_optical_depth'][f_idx, ...]
+            # Filter out fill value (-9999.0) and enforce AOD threshold
+            bad_aod_mask = (aod == -9999.0) | (aod >= self.t_aerosol_thresh)
             if self.t_aerosol_thresh > 0:
                 kernel = np.ones((3, 3), dtype=bool)
-                bad_aod_mask = ndimage.binary_dilation(bad_aod_mask, structure=kernel, iterations=self.cloud_dilation)
+                bad_aod_mask = ndimage.binary_dilation(bad_aod_mask, structure=kernel, iterations=1)
             valid_mask &= ~bad_aod_mask
             
         # Surface Reflectance Uncertainty Check
         if 'surface_reflectance_uncertainty' in data_grp:
             gw_mask = data_grp['surface_reflectance'].attrs.get('all_good_wavelengths')
-            valid_bands = gw_mask[f_idx].astype(bool)
-            unc_mask = np.nanmax(data_grp['surface_reflectance_uncertainty'][f_idx, valid_bands, ...], axis=0)>= self.t_uncertainty_thresh
+            if gw_mask is not None:
+                valid_bands = gw_mask[f_idx].astype(bool)
+                unc = np.nanmax(data_grp['surface_reflectance_uncertainty'][f_idx, valid_bands, ...], axis=0)
+            else:
+                unc = np.nanmax(data_grp['surface_reflectance_uncertainty'][f_idx, ...], axis=0)
+                
+            # Filter out fill value (-9999.0) and enforce uncertainty threshold
+            unc_mask = (unc == -9999.0) | (unc >= self.t_uncertainty_thresh)
             if self.t_uncertainty_thresh > 0:
                 kernel = np.ones((3, 3), dtype=bool)
-                unc_mask = ndimage.binary_dilation(unc_mask, structure=kernel, iterations=self.cloud_dilation)
+                unc_mask = ndimage.binary_dilation(unc_mask, structure=kernel, iterations=1)
             valid_mask &= ~unc_mask
             
         return valid_mask
@@ -425,6 +484,13 @@ class MultiComplexityViewer:
 
         meta_str = self._format_metadata(frame_info)
         self.ctrl_text.set_text(meta_str)
+        
+        # Auto-update the scatter plot UI indices to match the currently viewed frames
+        if hasattr(self, 'txt_l_frame') and hasattr(self, 'txt_t_frame'):
+            if frame_info['source'] == 'LANDSAT':
+                self.txt_l_frame.set_val(str(f_idx))
+            elif frame_info['source'] == 'TANAGER':
+                self.txt_t_frame.set_val(str(f_idx))
         
         # Add an additional line with the current active filters/thresholds
         qa_val = bin(QA_REJECT_MASK) if self.mask_qa_enabled else "OFF"
@@ -535,7 +601,10 @@ class MultiComplexityViewer:
                 ax.axis('off')
             else:
                 curr_im.set_data(data)
-                curr_im.set_clim(vmin=np.nanmin(data), vmax=np.nanmax(data))
+                with np.errstate(all='ignore'):
+                    v_min, v_max = np.nanmin(data), np.nanmax(data)
+                if not np.isnan(v_min) and not np.isnan(v_max):
+                    curr_im.set_clim(vmin=v_min, vmax=v_max)
                 curr_cbar.update_normal(curr_im)
 
         if 'sliding_volume_map' in data_grp:
@@ -544,33 +613,56 @@ class MultiComplexityViewer:
             if DISPLAY_REDUNDANT_FIGURE:
                 update_map(self.ax_slide_map_redundant, data_grp['sliding_volume_map'], 'im_slide_redundant', 'cbar_slide_redundant', "Sliding Complexity")
         
+        # Reset Time Series Axis
         self.ax_ts_main.clear()
+        if self.ax_ts_twin is not None:
+            try:
+                self.ax_ts_twin.remove()
+            except Exception:
+                pass
+            self.ax_ts_twin = None
+            
+        if self.use_twin_axis:
+            self.ax_ts_twin = self.ax_ts_main.twinx()
+            tanager_ax = self.ax_ts_twin
+        else:
+            tanager_ax = self.ax_ts_main
         
-        # Plot LANDSAT Time Series
+        # Plot LANDSAT Time Series within Date Range
         for loc in TS_LOCATIONS:
             label = loc['label']
             data = self.ts_data['LANDSAT'][label]
             if data['t']:
-                self.ax_ts_main.plot(data['t'], data['v'], marker='^', color=loc['color'], label=f"L: {label}",
-                                      markersize=4, linestyle='--', linewidth=1, alpha=0.6)
+                filt_t, filt_v = [], []
+                for i in range(len(data['t'])):
+                    if self.ts_start_date <= data['t'][i] <= self.ts_end_date:
+                        filt_t.append(data['t'][i])
+                        filt_v.append(data['v'][i])
+                
+                if filt_t:
+                    self.ax_ts_main.plot(filt_t, filt_v, marker='^', color=loc['color'], label=f"L: {label}",
+                                          markersize=4, linestyle='--', linewidth=1, alpha=0.6)
         
-        # Plot TANAGER Time Series
+        # Plot TANAGER Time Series within Date Range
         for loc in TS_LOCATIONS:
             label = loc['label']
             data = self.ts_data['TANAGER'][label]
             if data['t']:
-                self.ax_ts_main.plot(data['t'], data['v'], marker='s', color=loc['color'], label=f"T: {label}",
-                                      markersize=5, linestyle='-', linewidth=1.5, alpha=0.9)
+                filt_t, filt_v = [], []
+                for i in range(len(data['t'])):
+                    if self.ts_start_date <= data['t'][i] <= self.ts_end_date:
+                        filt_t.append(data['t'][i])
+                        filt_v.append(data['v'][i])
+                        
+                if filt_t:
+                    tanager_ax.plot(filt_t, filt_v, marker='s', color=loc['color'], label=f"T: {label}",
+                                          markersize=5, linestyle='-', linewidth=1.5, alpha=0.9)
 
         if self.all_frames and len(self.ax_ts_main.lines) > 0:
             xlims = self.ax_ts_main.get_xlim() # Capture limits generated by the data
             
-            min_ts = min(f['timestamp'] for f in self.all_frames)
-            max_ts = max(f['timestamp'] for f in self.all_frames)
-            min_dt = datetime.fromtimestamp(min_ts, tz=timezone.utc)
-            max_dt = datetime.fromtimestamp(max_ts, tz=timezone.utc)
-            
-            for yr in range(min_dt.year - 1, max_dt.year + 2):
+            # Constrain background shading only to the requested/active viewing years
+            for yr in range(self.ts_start_date.year, self.ts_end_date.year + 2):
                 # Winter (Dec 1 prev year - Mar 1 curr year) -> light gray
                 self.ax_ts_main.axvspan(datetime(yr - 1, 12, 1, tzinfo=timezone.utc), 
                                         datetime(yr, 3, 1, tzinfo=timezone.utc), 
@@ -590,40 +682,115 @@ class MultiComplexityViewer:
             
             self.ax_ts_main.set_xlim(xlims) # Restore limits so it doesn't zoom out to empty seasons
 
-        self.ax_ts_main.set_title("Equated Time Series")
+        # Style and Layout the Time Series UI
+        title_str = "Twin Axis Time Series" if self.use_twin_axis else "Equated Time Series (Shared Scale)"
+        self.ax_ts_main.set_title(f"{title_str} ({self.ts_start_date.strftime('%Y-%m-%d')} to {self.ts_end_date.strftime('%Y-%m-%d')})")
         
-        self.ax_ts_main.set_ylabel("Volume", fontweight='bold')
         self.ax_ts_main.grid(True, alpha=0.3, which="both", ls="--")
         self.ax_ts_main.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m'))
         self.ax_ts_main.tick_params(axis='x', rotation=45, labelsize=8)
-        
         self.ax_ts_main.axvline(curr_dt, color='black', linestyle='--', alpha=0.8, linewidth=1.5)
-        self.ax_ts_main.legend(loc='upper left', fontsize=8, ncol=2)
+        
+        # Format Legends and Y Labels
+        lines_1, labels_1 = self.ax_ts_main.get_legend_handles_labels()
+        if self.use_twin_axis:
+            self.ax_ts_main.set_ylabel("Landsat Volume", color='black', fontweight='bold')
+            self.ax_ts_twin.set_ylabel("Tanager Volume", color='black', fontweight='bold')
+            lines_2, labels_2 = self.ax_ts_twin.get_legend_handles_labels()
+            self.ax_ts_main.legend(lines_1 + lines_2, labels_1 + labels_2, loc='upper left', fontsize=8, ncol=2)
+        else:
+            self.ax_ts_main.set_ylabel("Volume", fontweight='bold')
+            self.ax_ts_main.legend(loc='upper left', fontsize=8, ncol=2)
 
-        # --- 3D Hull Figure ---
+        # --- 3D Parallelotope Figure ---
         self.ax_hull.clear()
         pixel_data = sr_data.reshape(sr_data.shape[0], -1).T
         valid_mask = ~np.isnan(pixel_data).any(axis=1)
         pixel_data = pixel_data[valid_mask]
         
-        if pixel_data.shape[0] > 1500:
-            pixel_data = pixel_data[np.random.choice(pixel_data.shape[0], 1500, replace=False)]
-        
         b1, b2, b3 = [min(b, sr_data.shape[0]-1) for b in hull_bands]
+        
+        # Compute Dataset Mean using the full valid frame prior to random subsampling
+        if pixel_data.shape[0] > 0:
+            mean_dataset_full = np.mean(pixel_data[:, [b1, b2, b3]], axis=0)
+        else:
+            mean_dataset_full = np.array([0.0, 0.0, 0.0])
+            
+        if pixel_data.shape[0] > 1500:
+            pixel_data = pixel_data[np.random.choice(pixel_data.shape[0], 4000, replace=False)]
         
         self.ax_hull.scatter(pixel_data[:, b1], pixel_data[:, b2], pixel_data[:, b3], c='gray', alpha=0.1, s=1)
         
-        em_xyz = endmembers[[b1, b2, b3], :4].T
-        self.ax_hull.scatter(em_xyz[:, 0], em_xyz[:, 1], em_xyz[:, 2], c='red', s=40, label='Endmembers')
+        # Use all valid endmembers for basis vectors
+        em_xyz = endmembers[[b1, b2, b3], :].T
+        valid_em_mask = ~np.all(em_xyz == 0, axis=1) & ~np.isnan(em_xyz).any(axis=1)
+        valid_em_xyz = em_xyz[valid_em_mask]
         
-        try:
-            hull = ConvexHull(em_xyz)
-            for s in hull.simplices:
-                self.ax_hull.plot(em_xyz[s, 0], em_xyz[s, 1], em_xyz[s, 2], 'r-', alpha=0.3)
-        except: pass
+        self.ax_hull.scatter(valid_em_xyz[:, 0], valid_em_xyz[:, 1], valid_em_xyz[:, 2], c='red', s=40, label='Endmembers')
         
-        self.ax_hull.set_title(f"3D Scatter: Bands {b1}, {b2}, {b3}")
+        origin = np.array([0.0, 0.0, 0.0])
+        v1 = v2 = v3 = None
+        
+        # Map origin and basis vectors to exactly mirror Gramian localization mathematical shifts
+        if self.localization_mode == 'datasetMean':
+            origin = mean_dataset_full
+            self.ax_hull.scatter(origin[0], origin[1], origin[2], c='blue', s=80, marker='X', label='Dataset Mean')
+            if valid_em_xyz.shape[0] >= 3:
+                v1 = valid_em_xyz[0] - origin
+                v2 = valid_em_xyz[1] - origin
+                v3 = valid_em_xyz[2] - origin
+        elif self.localization_mode == 'minEndmember':
+            if valid_em_xyz.shape[0] >= 4:
+                # Based on maximumDistance logic, index 1 is the minimum magnitude endmember
+                origin = valid_em_xyz[1]
+                self.ax_hull.scatter(origin[0], origin[1], origin[2], c='blue', s=80, marker='X', label='Min EM (Origin)')
+                # Use 1st (0), 3rd (2), and 4th (3) endmembers as the basis vectors
+                v1 = valid_em_xyz[0] - origin
+                v2 = valid_em_xyz[2] - origin
+                v3 = valid_em_xyz[3] - origin
+        else: # 'general'
+            origin = np.array([0.0, 0.0, 0.0])
+            self.ax_hull.scatter(origin[0], origin[1], origin[2], c='blue', s=80, marker='X', label='Origin (0,0,0)')
+            if valid_em_xyz.shape[0] >= 3:
+                v1 = valid_em_xyz[0]
+                v2 = valid_em_xyz[1]
+                v3 = valid_em_xyz[2]
+        
+        # Draw the explicit 3D parallelotope defined by the shifted origin and valid basis vectors
+        if v1 is not None and v2 is not None and v3 is not None:
+            # Draw basis vectors from the computed origin
+            self.ax_hull.plot([origin[0], origin[0] + v1[0]], [origin[1], origin[1] + v1[1]], [origin[2], origin[2] + v1[2]], 'r--', alpha=0.8, linewidth=2)
+            self.ax_hull.plot([origin[0], origin[0] + v2[0]], [origin[1], origin[1] + v2[1]], [origin[2], origin[2] + v2[2]], 'r--', alpha=0.8, linewidth=2)
+            self.ax_hull.plot([origin[0], origin[0] + v3[0]], [origin[1], origin[1] + v3[1]], [origin[2], origin[2] + v3[2]], 'r--', alpha=0.8, linewidth=2)
+            
+            # Define the 8 vertices of the parallelotope anchored at the origin
+            vertices = np.array([
+                origin, 
+                origin + v1, 
+                origin + v2, 
+                origin + v3,
+                origin + v1 + v2, 
+                origin + v1 + v3, 
+                origin + v2 + v3,
+                origin + v1 + v2 + v3
+            ])
+            
+            # Define the 12 edges
+            edges = [
+                (0,1), (0,2), (0,3),
+                (1,4), (1,5),
+                (2,4), (2,6),
+                (3,5), (3,6),
+                (4,7), (5,7), (6,7)
+            ]
+            
+            for edge in edges:
+                p1, p2 = vertices[edge[0]], vertices[edge[1]]
+                self.ax_hull.plot([p1[0], p2[0]], [p1[1], p2[1]], [p1[2], p2[2]], 'b-', alpha=0.4, linewidth=1.5)
+        
+        self.ax_hull.set_title(f"3D Parallelotope: Bands {b1}, {b2}, {b3}\nMode: {self.localization_mode}")
         self.ax_hull.set_xlabel(f"B{b1}"); self.ax_hull.set_ylabel(f"B{b2}"); self.ax_hull.set_zlabel(f"B{b3}")
+        self.ax_hull.legend()
 
         # Refresh
         figs_to_draw = [self.fig_controls, self.fig_combined, self.fig_hull]
@@ -638,6 +805,16 @@ class MultiComplexityViewer:
         """Forces the scatter plot to redraw if any mask states have changed."""
         if self.fig_scatter is not None and plt.fignum_exists(self.fig_scatter.number):
             self._on_update_scatter(None)
+            
+    def _on_localization_change(self, label):
+        """Dynamically triggers geometric re-rendering of the Parallelotope projection."""
+        self.localization_mode = label
+        self.update_display()
+            
+    def _on_ts_axis_toggle(self, label):
+        """Real-time rendering toggle. Twin Y-Axis does not require complex re-calculations."""
+        self.use_twin_axis = not self.use_twin_axis
+        self.update_display()
 
     def _on_update_mask(self, event):
         """Applies all selected filter values and triggers the full recomputation."""
@@ -680,7 +857,18 @@ class MultiComplexityViewer:
         except ValueError:
             self.txt_t_unc.set_val(str(self.t_uncertainty_thresh))
 
-        # 4. Trigger full recomputation
+        # 4. Read Date Constraints
+        try:
+            self.ts_start_date = datetime.strptime(self.txt_ts_start.text.strip(), "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        except ValueError:
+            self.txt_ts_start.set_val(self.ts_start_date.strftime("%Y-%m-%d"))
+            
+        try:
+            self.ts_end_date = datetime.strptime(self.txt_ts_end.text.strip(), "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        except ValueError:
+            self.txt_ts_end.set_val(self.ts_end_date.strftime("%Y-%m-%d"))
+
+        # 5. Trigger full recomputation
         self._recompute_time_series()
         self.update_display()
         self._refresh_if_scatter_open()
@@ -797,13 +985,17 @@ class MultiComplexityViewer:
             stats_text_scatter = logStats_text_scatter = "N/A"
 
         if self.fig_scatter is None or not plt.fignum_exists(self.fig_scatter.number):
-            self.fig_scatter = plt.figure(figsize=(12, 6))
+            self.fig_scatter = plt.figure(figsize=(12, 10))
             self.fig_scatter.canvas.manager.set_window_title("Sliding Volume Correlation Scatter")
-            self.ax_scatter_lin = self.fig_scatter.add_subplot(121)
-            self.ax_scatter_log = self.fig_scatter.add_subplot(122)
+            self.ax_scatter_lin = self.fig_scatter.add_subplot(221)
+            self.ax_scatter_log = self.fig_scatter.add_subplot(222)
+            self.ax_hist_l = self.fig_scatter.add_subplot(223)
+            self.ax_hist_t = self.fig_scatter.add_subplot(224)
         else:
             self.ax_scatter_lin.clear()
             self.ax_scatter_log.clear()
+            self.ax_hist_l.clear()
+            self.ax_hist_t.clear()
         
         if len(l_valid) > 0:
             # --- Linear Subplot ---
@@ -814,7 +1006,7 @@ class MultiComplexityViewer:
             t_fit_lin = lin_slope * l_range_lin + lin_intercept
             self.ax_scatter_lin.plot(l_range_lin, t_fit_lin, color='red', linewidth=2, label='Linear Fit')
             
-            self.ax_scatter_lin.set_title(f"Linear Scale\nLANDSAT (Frame {l_idx}) vs TANAGER (Frame {t_idx})")
+            self.ax_scatter_lin.set_title(f"Linear Scale\nLANDSAT ({l_date_str}) vs TANAGER ({t_date_str})")
             self.ax_scatter_lin.set_xlabel(f"LANDSAT Volume")
             self.ax_scatter_lin.set_ylabel(f"TANAGER Volume")
             self.ax_scatter_lin.grid(True, alpha=0.3)
@@ -830,7 +1022,7 @@ class MultiComplexityViewer:
             t_fit_log = (10**log_intercept) * (l_range_log ** log_slope)
             self.ax_scatter_log.plot(l_range_log, t_fit_log, color='red', linewidth=2, label='Exponential Fit')
             
-            self.ax_scatter_log.set_title(f"Log-Log Scale\nLANDSAT (Frame {l_idx}) vs TANAGER (Frame {t_idx})")
+            self.ax_scatter_log.set_title(f"Log-Log Scale\nLANDSAT ({l_date_str}) vs TANAGER ({t_date_str})")
             self.ax_scatter_log.set_xlabel(f"LANDSAT Volume")
             self.ax_scatter_log.set_ylabel(f"TANAGER Volume")
             self.ax_scatter_log.set_xscale('log')
@@ -839,14 +1031,51 @@ class MultiComplexityViewer:
             self.ax_scatter_log.text(0.95, 0.05, logStats_text_scatter, transform=self.ax_scatter_log.transAxes, 
                                      ha='right', va='bottom', fontsize=9, bbox=dict(boxstyle='round', facecolor='white', alpha=0.5))
             self.ax_scatter_log.legend()
+            
+            # --- Landsat Histogram Subplot (Log-Scaled Bins) ---
+            # Calculate 256 bin edges equally spaced in log10 space
+            bins_l = np.logspace(np.log10(np.min(l_valid)), np.log10(np.max(l_valid)), 256)
+            self.ax_hist_l.hist(l_valid, bins=bins_l, color='tab:purple', alpha=0.7)
+            self.ax_hist_l.set_xscale('log')
+            self.ax_hist_l.set_title(f"LANDSAT Volume Distribution\n({l_date_str})")
+            self.ax_hist_l.set_xlabel("Volume (Log Scale)")
+            self.ax_hist_l.set_ylabel("Frequency")
+            self.ax_hist_l.grid(True, alpha=0.3, which="both", ls="--")
+            
+            l_stats_text = (f"Mean: {np.mean(l_valid):.4e}\n"
+                            f"Median: {np.median(l_valid):.4e}\n"
+                            f"Variance: {np.var(l_valid):.4e}")
+            self.ax_hist_l.text(0.95, 0.95, l_stats_text, transform=self.ax_hist_l.transAxes, 
+                                ha='right', va='top', fontsize=9, bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+
+            # --- Tanager Histogram Subplot (Log-Scaled Bins) ---
+            bins_t = np.logspace(np.log10(np.min(t_valid)), np.log10(np.max(t_valid)), 256)
+            self.ax_hist_t.hist(t_valid, bins=bins_t, color='tab:orange', alpha=0.7)
+            self.ax_hist_t.set_xscale('log')
+            self.ax_hist_t.set_title(f"TANAGER Volume Distribution\n({t_date_str})")
+            self.ax_hist_t.set_xlabel("Volume (Log Scale)")
+            self.ax_hist_t.set_ylabel("Frequency")
+            self.ax_hist_t.grid(True, alpha=0.3, which="both", ls="--")
+            
+            t_stats_text = (f"Mean: {np.mean(t_valid):.4e}\n"
+                            f"Median: {np.median(t_valid):.4e}\n"
+                            f"Variance: {np.var(t_valid):.4e}")
+            self.ax_hist_t.text(0.95, 0.95, t_stats_text, transform=self.ax_hist_t.transAxes, 
+                                ha='right', va='top', fontsize=9, bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+            
             qa_val = bin(QA_REJECT_MASK) if self.mask_qa_enabled else "OFF"
             filter_str = f"Filters: Sun Elev > {self.sun_elev_thresh}° | Cloud Dilation: {self.cloud_dilation} | T-AOD < {self.t_aerosol_thresh} | L-Aerosol: {self.aerosol_level} | T-Unc < {self.t_uncertainty_thresh} | L-QA Rej: {qa_val}"
             self.fig_scatter.suptitle(f"Sliding Volume Correlation | LANDSAT ({l_date_str}) vs TANAGER ({t_date_str})\n{filter_str}", fontsize=14)
+            self.fig_scatter.tight_layout(rect=[0, 0.03, 1, 0.95]) # Prevent suptitle overlap
         else:
             self.ax_scatter_lin.set_title(f"Sliding Volume Correlation (Linear)")
             self.ax_scatter_lin.text(0.5, 0.5, "No valid data to plot.", ha='center', va='center', transform=self.ax_scatter_lin.transAxes)
             self.ax_scatter_log.set_title(f"Sliding Volume Correlation (Log-Log)")
             self.ax_scatter_log.text(0.5, 0.5, "No valid data to plot.", ha='center', va='center', transform=self.ax_scatter_log.transAxes)
+            self.ax_hist_l.set_title("LANDSAT Volume Distribution")
+            self.ax_hist_l.text(0.5, 0.5, "No valid data to plot.", ha='center', va='center', transform=self.ax_hist_l.transAxes)
+            self.ax_hist_t.set_title("TANAGER Volume Distribution")
+            self.ax_hist_t.text(0.5, 0.5, "No valid data to plot.", ha='center', va='center', transform=self.ax_hist_t.transAxes)
 
         self.fig_scatter.canvas.draw_idle()
         self.fig_scatter.show()
@@ -886,7 +1115,6 @@ class MultiComplexityViewer:
         
         # Determine output directory based on attributes or default
         save_path = self.save_dir
-        save_path = save_path + f"_sunElMin-{self.sun_elev_thresh}_Aerosol-{self.aerosol_level}_T-AOD-{self.t_aerosol_thresh}_L-QA-{QA_REJECT_MASK}_Dilate-{self.cloud_dilation}"
         if 'frame_endmember_volumes' in data_grp:
             try:
                 vol_dset = data_grp['frame_endmember_volumes']
@@ -897,8 +1125,9 @@ class MultiComplexityViewer:
                 if hasattr(norm, 'decode'): norm = norm.decode('utf-8')
                 if norm is None: norm = "None"
                 
-                os.makedirs(save_path, exist_ok=True)
-                save_path = save_path
+                new_dir = f"{SAVE_DIR}_EM-{num_em}_Gram-{gram}_Norm-{norm}/"
+                os.makedirs(new_dir, exist_ok=True)
+                save_path = new_dir
             except Exception as e:
                 print(f"Error constructing dynamic path, using default: {e}")
 
@@ -911,7 +1140,7 @@ class MultiComplexityViewer:
             
         for fig, name in figs_to_save:
             path = os.path.join(save_path, f"{prefix}_{name}.png")
-            fig.savefig(path, dpi=400)
+            fig.savefig(path, dpi=300)
             print(f"Saved: {path}")
 
     def run(self): plt.show()
@@ -924,12 +1153,6 @@ def percentile_normalize_array(arr, low=2, high=98):
 
 if __name__ == "__main__":
     root = tk.Tk(); root.withdraw()
-    print("Select LANDSAT HDF5...")
-    #l_path = filedialog.askopenfilename(title="Select Landsat HDF5", filetypes=[("HDF5", "*.h5")])
-    
-    if l_path and t_path:
-        viewer = MultiComplexityViewer([l_path, t_path])
-        viewer.run()
-    else:
-        print("Selection cancelled.")
+    viewer = MultiComplexityViewer([landsat_path, tanager_path])
+    viewer.run()
     root.destroy()
