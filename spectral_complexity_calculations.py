@@ -115,12 +115,6 @@ def process_image_stack(h5, sourceName, norm_param, gram_type):
     ds_endmember_indices.attrs['description'] = "Endmember indices for each pixel"
     ds_endmembers.attrs['description'] = "Endmembers for each pixel"
     ds_endmembers.attrs['num_endmembers'] = num_endmembers
-    
-    # Store configuration attributes on datasets resulting from process_volume_frame
-    for ds in [ds_endmembers, ds_endmember_indices, ds_vol_curve]:
-        ds.attrs['SUN_ELEVATION_THRESHOLD'] = SUN_ELEVATION_THRESHOLD
-        ds.attrs['QA_REJECT_MASK'] = QA_REJECT_MASK
-        ds.attrs['AEROSOL_ACCEPT_VALUES'] = AEROSOL_ACCEPT_VALUES
 
     if norm_param:
         ds_endmembers.attrs['Normalization'] = norm_param

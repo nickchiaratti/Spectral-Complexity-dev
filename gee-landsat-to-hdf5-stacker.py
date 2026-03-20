@@ -18,7 +18,7 @@ except Exception as e:
     ee.Authenticate()
     ee.Initialize()
 
-Location = "Rochester"
+Location = "Tait"
 if Location == "Rochester":
     # Rochester Bounding Box
     ROI = ee.Geometry.Rectangle([-77.72, 43.0450, -77.4450, 43.28])
@@ -201,19 +201,35 @@ for feature in info['features']:
         print(f"Failed to download {short_name}: {e}")
 
 print(f"\nTranslating downloaded GeoTIFFs to HDF5: {OUTPUT_HDF5}")
-raw_tif_files = glob.glob(os.path.join(TEMP_DIR, "*.tif"))
 
-if len(raw_tif_files) == 0:
-    print("Error: No files downloaded.")
+# --- DOCTORAL LEVEL FIX: MANIFEST-DRIVEN FILE RESOLUTION ---
+# Anti-pattern: glob.glob() blindly reads orphaned files from previous runs (causing KeyErrors).
+# Best Practice: Use the GEE API response (gee_metadata) as the strict processing manifest.
+
+tif_files = []
+missing_files = 0
+
+# 1. Sort the API manifest keys chronologically using their Unix timestamps
+sorted_img_ids = sorted(gee_metadata.keys(), key=lambda k: gee_metadata[k]['acquisition_time'])
+
+# 2. Safely resolve only the files authorized by the current GEE query
+for img_id in sorted_img_ids:
+    expected_path = os.path.join(TEMP_DIR, f"{img_id}.tif")
+    if os.path.exists(expected_path) and os.path.getsize(expected_path) > 0:
+        tif_files.append(expected_path)
+    else:
+        missing_files += 1
+        print(f"WARNING: Expected file {expected_path} is missing or corrupted.")
+
+if len(tif_files) == 0:
+    print("Error: No valid files found matching the current GEE query.")
     exit()
 
-def get_acquisition_time(filepath):
-    filename = os.path.basename(filepath).replace('.tif', '')
-    return gee_metadata[filename]['acquisition_time']
+print(f"Successfully resolved and chronologically sorted {len(tif_files)} files.")
+if missing_files > 0:
+    print(f"({missing_files} files failed to download properly).")
 
-tif_files = sorted(raw_tif_files, key=get_acquisition_time)
-print(f"Successfully sorted {len(tif_files)} files in strict chronological order.")
-
+# We can safely delete the old sorting function since we sorted the keys above
 with rasterio.open(tif_files[0]) as src:
     height, width = src.height, src.width
     num_bands = src.count

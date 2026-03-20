@@ -15,7 +15,6 @@ def maximumDistance(data, num_endmembers):
     # Flatten 3D cube [rows, cols, bands] -> 2D [pixels, bands]
     image2D = np.reshape(data, (data.shape[0] * data.shape[1], data.shape[2]), order="F")
 
-    # Optional: You might want to review the (0, 2) clip logic here depending on your sensor data
     if np.min(image2D) < 0:
         warnings.warn('Data contains negative values')
         image2D = np.clip(image2D, 0, 2)
@@ -141,14 +140,6 @@ def process_volume_frame(frame_data, num_endmembers, gram_type, norm_type):
     endmembers, endmember_indices = maximumDistance(img, num_endmembers)
     meanVector = img.mean(axis=(0, 1))
     localizationVec = endmembers[:,1]
-
-
-    #if norm_type == 'bandCount':
-    #    endmembers_copy = endmembers / np.sqrt(bands)
-    #    meanVector = meanVector / np.sqrt(bands)
-    #    localizationVec = localizationVec / np.sqrt(bands)
-    #else:
-    #    endmembers_copy = endmembers
 
     if gram_type == 'datasetMean':
         volume = calcGramLocalVolumes(endmembers,meanVector)
@@ -349,6 +340,7 @@ def calculate_global_z_score(volume_array):
     Calculates the global Z-score for an entire frame of spectral complexity volumes.
     Uses log-transformation to enforce normality on the heavily right-skewed volume data.
     """
+    print("Calculating global Z-score for frame")
     height, width = volume_array.shape
     z_scores = np.full((height, width), np.nan, dtype=np.float32)
     
@@ -383,6 +375,7 @@ def calculate_local_z_score(volume_array, window_size, stride):
     Uses a sum_map and count_map to average the Z-scores across all overlapping sliding windows,
     creating an ensemble anomaly detection map.
     """
+    print(f"Calculating local {window_size}x{window_size} neighborhood Z-score for frame")
     height, width = volume_array.shape
     
     sum_map = np.zeros((height, width), dtype=np.float32)
@@ -438,7 +431,7 @@ def calculate_local_z_score(volume_array, window_size, stride):
 
 def calculate_annular_z_score(volume_array, bg_window_size, guard_window_size, stride):
     """
-    Calculates the local sliding-window Z-score (Adaptive CFAR) for a frame of spectral complexity volumes.
+    Calculates the local sliding-window Z-score for a frame of spectral complexity volumes.
     Uses an ensemble annular (dual-window) guard band approach to prevent signal swamping.
     """
     height, width = volume_array.shape
