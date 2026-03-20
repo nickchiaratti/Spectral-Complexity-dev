@@ -11,7 +11,7 @@ def calculate_true_discrete_limit(N_bands):
             vol_sq = ((A + B)**2) * (A + 4*B + 3*C)
             if vol_sq > best_vol_sq:
                 best_vol_sq = vol_sq
-    return np.sqrt(best_vol_sq) / (N_bands**1.5)
+    return np.sqrt(best_vol_sq) * np.power(N_bands,-3/2)
 
 def binary_monte_carlo_sweep(N_min=4, N_max=100, iterations_per_N=200_000):
     """
@@ -20,6 +20,7 @@ def binary_monte_carlo_sweep(N_min=4, N_max=100, iterations_per_N=200_000):
     """
     N_vals = np.arange(N_min, N_max + 1)
     mc_max_volumes = np.zeros(len(N_vals))
+    mc_min_volumes = np.zeros(len(N_vals))
     true_max_volumes = np.zeros(len(N_vals))
 
     
@@ -28,7 +29,7 @@ def binary_monte_carlo_sweep(N_min=4, N_max=100, iterations_per_N=200_000):
     start_time = time.time()
     
     for i, N in enumerate(N_vals):
-
+        
         #iterations_per_N = int(np.maximum(i/10,1)*iterations_per_N)
         # 1. Calculate the true theoretical limit for reference
         true_max_volumes[i] = calculate_true_discrete_limit(N)
@@ -41,12 +42,14 @@ def binary_monte_carlo_sweep(N_min=4, N_max=100, iterations_per_N=200_000):
         G = np.matmul(V, V.transpose(0, 2, 1))
         
         # 4. Vectorized Determinant Calculation
-        dets = np.linalg.det(G)
-        dets = np.clip(dets, 0.0, None)
+        dets = np.clip(np.linalg.det(G), 0.0,None)
         
         # 5. Scale and extract the maximum
-        max_vol = np.max(np.sqrt(dets)) / (N ** 1.5)
+        vol = np.sqrt(dets)* np.power(N,-3/2)
+        max_vol = np.max(vol) 
         mc_max_volumes[i] = max_vol
+        min_vol = np.min(vol) 
+        mc_min_volumes[i] = min_vol
         
         # Print progress every 20 bands
         if N % 20 == 0:
@@ -55,14 +58,14 @@ def binary_monte_carlo_sweep(N_min=4, N_max=100, iterations_per_N=200_000):
     elapsed = time.time() - start_time
     print(f"Sweep completed in {elapsed:.2f} seconds.")
     
-    return N_vals, mc_max_volumes, true_max_volumes
+    return N_vals, mc_max_volumes, mc_min_volumes, true_max_volumes
 
 # --- Execute Simulation ---
-N_min = 4
-N_max = 100
-iterations = 5_000_000
+N_min = 5
+N_max = 10
+iterations = 100000_000
 
-N_vals, mc_volumes, true_volumes = binary_monte_carlo_sweep(N_min, N_max, iterations)
+N_vals, mc_max_volumes, mc_min_volumes, true_max_volumes = binary_monte_carlo_sweep(N_min, N_max, iterations)
 
 # --- Plot the Results ---
 true_asymptotic_limit = np.sqrt(4 / 27)
@@ -70,21 +73,20 @@ true_asymptotic_limit = np.sqrt(4 / 27)
 plt.figure(figsize=(11, 6))
 
 # Plot the True Discrete Limit
-plt.plot(N_vals, true_volumes, color='blue', linewidth=2, 
-         label='True Combinatorial Limit')
+#plt.plot(N_vals, true_volumes, color='blue', linewidth=2, 
+         #label='True Combinatorial Limit')
 
 # Plot the Binary Monte Carlo Results
-plt.plot(N_vals, mc_volumes, color='orange', alpha=0.8, 
-         label=f'Binary Monte Carlo Max ({iterations:,} iter/N)')
+plt.plot(N_vals, mc_max_volumes, color='orange', alpha=0.8, label=f'Binary Monte Carlo Max ({iterations:,} iter/N)')
+plt.plot(N_vals, mc_min_volumes, color='green', alpha=0.8, label=f'Binary Monte Carlo Min ({iterations:,} iter/N)')
+plt.yscale('log')
 
 # Plot the Asymptotic Bound
-plt.axhline(true_asymptotic_limit, color='red', linestyle='--', 
-            label=f'Asymptotic Limit ($\\approx {true_asymptotic_limit:.4f}$)')
+#plt.axhline(true_asymptotic_limit, color='red', linestyle='--', label=f'Asymptotic Limit ($\\approx {true_asymptotic_limit:.4f}$)')
 
 plt.xlabel('Number of Spectral Bands ($N$)')
 plt.ylabel('Normalized Volume')
 plt.title('Binary Monte Carlo vs. Theoretical Maximum Simplex Volume ($m=3$)')
 plt.grid(True, alpha=0.3)
 plt.legend()
-plt.tight_layout()
 plt.show()

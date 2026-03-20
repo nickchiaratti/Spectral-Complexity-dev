@@ -26,7 +26,7 @@ def simulate_max_orthogonal_endmembers(N_bands):
     return scaled_volume
 
 # --- Run the Simulation from 4 to 1000 Bands ---
-N_vals = np.arange(4, 1001)
+N_vals = np.arange(4, 101)
 max_volumes = np.zeros(len(N_vals))
 
 for i, N in enumerate(N_vals):
