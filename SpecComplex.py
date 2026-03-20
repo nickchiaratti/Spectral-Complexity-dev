@@ -343,6 +343,178 @@ def plot_spectral_profiles(endmembers, band_count):
 Sandbox 
 
 '''
+
+def calculate_global_z_score(volume_array):
+    """
+    Calculates the global Z-score for an entire frame of spectral complexity volumes.
+    Uses log-transformation to enforce normality on the heavily right-skewed volume data.
+    """
+    height, width = volume_array.shape
+    z_scores = np.full((height, width), np.nan, dtype=np.float32)
+    
+    # Identify globally valid pixels (strictly positive for log transform)
+    global_valid_mask = volume_array > 0.0
+    
+    if not np.any(global_valid_mask):
+        warnings.warn("No valid volumes found in frame > 0. Returning NaNs.")
+        return z_scores
+        
+    # Extract valid volumes and apply log transform to normalize distribution
+    valid_vols = volume_array[global_valid_mask]
+    log_vols = np.log(valid_vols)
+    
+    # Calculate global scene statistics
+    global_mean = np.mean(log_vols)
+    global_std = np.std(log_vols)
+    
+    if global_std <= 1e-6:
+        warnings.warn("Global standard deviation is zero. Returning 0 Z-scores.")
+        z_scores[global_valid_mask] = 0.0
+        return z_scores
+        
+    # Apply standard Z-score equation
+    z_scores[global_valid_mask] = (log_vols - global_mean) / global_std
+    
+    return z_scores
+
+def calculate_local_z_score(volume_array, window_size, stride):
+    """
+    Calculates the local sliding-window Z-score for a frame of spectral complexity volumes.
+    Uses a sum_map and count_map to average the Z-scores across all overlapping sliding windows,
+    creating an ensemble anomaly detection map.
+    """
+    height, width = volume_array.shape
+    
+    sum_map = np.zeros((height, width), dtype=np.float32)
+    count_map = np.zeros((height, width), dtype=np.int32)
+    
+    # 1. Identify globally valid pixels (strictly positive for log transform)
+    global_valid_mask = volume_array > 0.0
+    
+    if not np.any(global_valid_mask):
+        warnings.warn("No valid volumes found in frame > 0. Returning NaNs.")
+        return np.full((height, width), np.nan, dtype=np.float32)
+
+    for y_start in range(0, height - window_size + 1, stride):
+        for x_start in range(0, width - window_size + 1, stride):
+            y_end = y_start + window_size
+            x_end = x_start + window_size
+            
+            window = volume_array[y_start:y_end, x_start:x_end]
+            valid_mask = window > 0.0
+            
+            # We need at least two valid pixels in the window to calculate a standard deviation
+            if np.sum(valid_mask) < 2:
+                continue
+            
+            valid_vols = window[valid_mask]
+            log_vols = np.log(valid_vols)
+            
+            local_mean = np.mean(log_vols)
+            local_std = np.std(log_vols)
+            
+            # Initialize a Z-score window of 0s
+            z_window = np.zeros((window_size, window_size), dtype=np.float32)
+            
+            # Calculate Z-scores for valid pixels only
+            if local_std > 1e-12:
+                z_window[valid_mask] = (log_vols - local_mean) / local_std
+            
+            # Accumulate the calculated Z-scores into the sum map
+            sum_map[y_start:y_end, x_start:x_end] += z_window
+            
+            # Only increment the count map for pixels that actually received a calculation
+            count_map[y_start:y_end, x_start:x_end] += valid_mask.astype(np.int32)
+
+    # NumPy will safely evaluate 0/0 to NaN for the untouched margins
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=RuntimeWarning)
+        output_map = sum_map / count_map
+        
+    # Explicitly enforce the spatial mask on the final output to clear out invalid pixels
+    output_map[~global_valid_mask] = np.nan
+    
+    return output_map
+
+def calculate_annular_z_score(volume_array, bg_window_size, guard_window_size, stride):
+    """
+    Calculates the local sliding-window Z-score (Adaptive CFAR) for a frame of spectral complexity volumes.
+    Uses an ensemble annular (dual-window) guard band approach to prevent signal swamping.
+    """
+    height, width = volume_array.shape
+    
+    sum_map = np.zeros((height, width), dtype=np.float32)
+    count_map = np.zeros((height, width), dtype=np.int32)
+    
+    # Identify globally valid pixels (strictly positive for log transform)
+    global_valid_mask = volume_array > 0.0
+    
+    if not np.any(global_valid_mask):
+        warnings.warn("No valid volumes found in frame > 0. Returning NaNs.")
+        return np.full((height, width), np.nan, dtype=np.float32)
+
+    # Calculate guard window boundaries relative to the outer window
+    center_idx = bg_window_size // 2
+    g_half = guard_window_size // 2
+    g_start = center_idx - g_half
+    g_end = center_idx + g_half + 1
+
+    for y_start in range(0, height - bg_window_size + 1, stride):
+        for x_start in range(0, width - bg_window_size + 1, stride):
+            y_end = y_start + bg_window_size
+            x_end = x_start + bg_window_size
+            
+            window = volume_array[y_start:y_end, x_start:x_end]
+            valid_mask = window > 0.0
+            
+            # Create the Annular (Donut) Background Mask
+            bg_mask = valid_mask.copy()
+            bg_mask[g_start:g_end, g_start:g_end] = False # Hollow out the guard area
+            
+            # We need enough background pixels to calculate a meaningful standard deviation
+            if np.sum(bg_mask) < 5: 
+                continue
+            
+            # Calculate background statistics ONLY on the outer ring
+            bg_vols = window[bg_mask]
+            log_bg_vols = np.log(bg_vols)
+            
+            local_mean = np.mean(log_bg_vols)
+            local_std = np.std(log_bg_vols)
+            
+            if local_std <= 1e-6:
+                continue # Perfectly flat background, cannot calculate Z-score
+            
+            # Create the Target Mask (Only score pixels inside the Guard Window)
+            target_mask = np.zeros_like(valid_mask, dtype=bool)
+            target_mask[g_start:g_end, g_start:g_end] = valid_mask[g_start:g_end, g_start:g_end]
+            
+            if not np.any(target_mask):
+                continue # No valid pixels in the target area to score
+            
+            # Apply Z-score equation to target pixels based on outer background stats
+            target_vols = window[target_mask]
+            log_target_vols = np.log(target_vols)
+            
+            z_scores = (log_target_vols - local_mean) / local_std
+            
+            # Accumulate results exactly into the guard spatial locations
+            z_window = np.zeros((bg_window_size, bg_window_size), dtype=np.float32)
+            z_window[target_mask] = z_scores
+            
+            sum_map[y_start:y_end, x_start:x_end] += z_window
+            count_map[y_start:y_end, x_start:x_end] += target_mask.astype(np.int32)
+
+    # Average overlapping ensemble scores mimicking SpecComplex.py pattern
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=RuntimeWarning)
+        output_map = sum_map / count_map
+        
+    # Enforce global mask
+    output_map[~global_valid_mask] = np.nan
+    
+    return output_map
+
 def process_msd_sliding_tile(frame_data, tile_size, stride):
     """
     Calculates the Local Mean Spectral Distance (MSD) for a sliding window.

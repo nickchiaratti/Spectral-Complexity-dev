@@ -11,22 +11,9 @@ from tkinter import filedialog
 import SpecComplex as sc
 
 # --- Configuration ---
-
-QA_REJECT_MASK = 0b111111
-SUN_ELEVATION_THRESHOLD = 40
-QA_AEROSOL_ACCEPT_VALUES = [2, 4, 32, 66, 68, 96, 100]
-AEROSOL_ACCEPT_LEVEL = 'low' #'low' 'medium' 'high'
-AEROSOL_ACCEPT_VALUES = [2, 4, 32, 66, 68, 96, 100]
-
-# Flattened list creation to prevent h5py attribute assignment errors
-if AEROSOL_ACCEPT_LEVEL == 'medium':
-    AEROSOL_ACCEPT_VALUES.extend([130, 132, 160, 164])
-elif AEROSOL_ACCEPT_LEVEL == 'high':
-    AEROSOL_ACCEPT_VALUES.extend([130, 132, 160, 164, 192, 194, 196, 224, 228])
-
-
 TILE_SIZE = 3          # Size of the window (NxN pixels) for volume calc
-SLIDING_STRIDE = 1      # Stride for sliding window (1 = every pixel, higher = faster)
+SLIDING_STRIDE = 1      # Stride for sliding window
+Z_SCORE_WINDOW_SIZE = 11
 
 # --- Parameters for Maximum-Distance ---
 num_endmembers = 7
@@ -34,12 +21,12 @@ MAX_DIST_P2 = 0
 #gram_type = 'datasetMean' # 'general
 #SC_Param_Norm = 'bandCount' #'bandCount' None 
 
-def process_file(filepath, norm_param='bandCount', gram_type='datasetMean'):
+def process_file(filepath, norm_param='bandCount', gram_type='minEndmember'):
     print(f"Processing: {filepath}")
     
     # Construct Output Filename
-    suffix = f"_SC_EM-{num_endmembers}_Gram-{gram_type}_Norm-{norm_param}_Aerosol-{AEROSOL_ACCEPT_LEVEL}_QA-AllFrames"
-    out_path = filepath.replace(".h5", f"{suffix}_sunElMin-{SUN_ELEVATION_THRESHOLD}.h5")
+    suffix = f"_SC_EM-{num_endmembers}_Gram-{gram_type}_Norm-{norm_param}"
+    out_path = filepath.replace(".h5", f"{suffix}.h5")
     
     print(f"Output Path: {out_path}")
     shutil.copy2(filepath, out_path)
@@ -91,6 +78,9 @@ def process_image_stack(h5, sourceName, norm_param, gram_type):
     ds_slide = overwrite_dset(h5, base_fields_path, 'sliding_volume_map', (num_frames, height, width))
     ds_evi = overwrite_dset(h5, base_fields_path, 'evi_map', (num_frames, height, width))
     ds_msd = overwrite_dset(h5, base_fields_path, 'msd_map', (num_frames, height, width))
+    ds_slideZ = overwrite_dset(h5, base_fields_path, 'sliding_volume_z_score', (num_frames, height, width))
+    ds_localZ = overwrite_dset(h5, base_fields_path, 'sliding_volume_local_z_score', (num_frames, height, width))
+
 
     for t in range(num_frames):
         print(f"\n--- Frame {t+1}/{num_frames} ---")
@@ -116,6 +106,8 @@ def process_image_stack(h5, sourceName, norm_param, gram_type):
         ds_slide[t, ...] = sc.process_volume_sliding_tile(frame_sr, TILE_SIZE, SLIDING_STRIDE, num_endmembers, gram_type, norm_param)
         ds_evi[t, ...] = sc.calc_evi_frame(frame_sr)
         ds_msd[t, ...] = sc.process_msd_sliding_tile(frame_sr, TILE_SIZE, SLIDING_STRIDE)
+        ds_slideZ[t,...]=sc.calculate_global_z_score(ds_slide[t, ...])
+        ds_localZ[t,...]=sc.calculate_local_z_score(ds_slide[t, ...], Z_SCORE_WINDOW_SIZE, SLIDING_STRIDE)
             
     ds_vol_curve.attrs['description'] = "Full volume curve (Volume vs Endmember Count) for entire frame"
     ds_vol_curve.attrs['gram_type'] = gram_type
@@ -154,6 +146,10 @@ def process_image_stack(h5, sourceName, norm_param, gram_type):
     ds_slide.attrs['gram_type'] = gram_type
     ds_tile.attrs['num_endmembers'] = num_endmembers
     ds_slide.attrs['num_endmembers'] = num_endmembers
+    ds_slideZ.attrs['description'] = "Global Spectral Complexity Z-score. (Log(volume)-Log(mean_volume))/Std(Log(volume))"
+    ds_localZ.attrs['description'] = "Sliding Window Adaptive Z-score of the local spectral complexity. (Log(volume)-Log(mean_volume))/Std(Log(volume))"
+    ds_localZ.attrs['z_score_window_size'] = Z_SCORE_WINDOW_SIZE
+    ds_localZ.attrs['z_score_sliding_stride'] = SLIDING_STRIDE
     h5.close()
         
 

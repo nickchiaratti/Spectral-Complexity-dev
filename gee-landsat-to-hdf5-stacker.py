@@ -11,27 +11,28 @@ import shutil
 # ==========================================
 # 1. CONFIGURATION
 # ==========================================
+cloud_threshold = 60
 try:
     ee.Initialize(project="project-ee18dbee-cd7e-4d08-812")
 except Exception as e:
     ee.Authenticate()
     ee.Initialize()
 
-Location = "Tait"
+Location = "Rochester"
 if Location == "Rochester":
     # Rochester Bounding Box
     ROI = ee.Geometry.Rectangle([-77.72, 43.0450, -77.4450, 43.28])
     START_DATE = '2015-01-01'
     END_DATE = '2025-12-31'
     OUTPUT_HDF5 = "C:/satelliteImagery/LANDSAT/Rochester/LANDSAT_Stack_Rochester_GEE_2015_2025.h5"
-    TEMP_DIR = "C:/satelliteImagery/Rochester_TEMP_GEE_DOWNLOAD"
+    TEMP_DIR = "C:/satelliteImagery/LANDSAT/SourceData/Rochester_TEMP_GEE_DOWNLOAD"
 elif Location == "Tait":
     # Tait Bounding Box
     ROI = ee.Geometry.Rectangle([-77.516127, 43.127698, -77.461968, 43.159168])
     START_DATE = '2015-01-01'
     END_DATE = '2025-12-31'
     OUTPUT_HDF5 = "C:/satelliteImagery/LANDSAT/Tait/LANDSAT_Stack_Tait_GEE_2015_2025.h5"
-    TEMP_DIR = "C:/satelliteImagery/Tait_TEMP_GEE_DOWNLOAD"
+    TEMP_DIR = "C:/satelliteImagery/LANDSAT/SourceData/Tait_TEMP_GEE_DOWNLOAD"
 
 # Target Coordinate Reference System (UTM Zone 18N for Rochester)
 TARGET_CRS = 'EPSG:32618'
@@ -148,7 +149,7 @@ filtered_collection = merged_collection \
     .filterBounds(ROI) \
     .filterDate(START_DATE, END_DATE) \
     .map(calculate_roi_cloud_cover) \
-    .filter(ee.Filter.lt('roi_cloud_cover', 30)) \
+    .filter(ee.Filter.lt('roi_cloud_cover', cloud_threshold)) \
     .map(apply_scale_factors) \
     .select(BANDS) \
     .sort('system:time_start')
@@ -161,9 +162,6 @@ gee_metadata = {}
 for feature in info['features']:
     img_id = feature['id'].split('/')[-1] 
     props = feature['properties']
-    
-    # --- TEMPORAL TRUTH DERIVATION ---
-    # Convert universally guaranteed system:time_start (ms) to mathematically exact date/time strings
     time_start_ms = props.get('system:time_start')
     unix_time_sec = time_start_ms / 1000.0
     
@@ -203,11 +201,18 @@ for feature in info['features']:
         print(f"Failed to download {short_name}: {e}")
 
 print(f"\nTranslating downloaded GeoTIFFs to HDF5: {OUTPUT_HDF5}")
-tif_files = sorted(glob.glob(os.path.join(TEMP_DIR, "*.tif")))
+raw_tif_files = glob.glob(os.path.join(TEMP_DIR, "*.tif"))
 
-if len(tif_files) == 0:
+if len(raw_tif_files) == 0:
     print("Error: No files downloaded.")
     exit()
+
+def get_acquisition_time(filepath):
+    filename = os.path.basename(filepath).replace('.tif', '')
+    return gee_metadata[filename]['acquisition_time']
+
+tif_files = sorted(raw_tif_files, key=get_acquisition_time)
+print(f"Successfully sorted {len(tif_files)} files in strict chronological order.")
 
 with rasterio.open(tif_files[0]) as src:
     height, width = src.height, src.width
@@ -245,7 +250,10 @@ for idx, tif_path in enumerate(tif_files):
     cloud_covers.append(meta['cloud_cover'])
     
     with rasterio.open(tif_path) as src:
-        stacked_data[idx] = src.read()
+        frame_data = src.read()
+        nodata_val = src.nodata
+        frame_data = np.where(frame_data == nodata_val, np.nan, frame_data)
+        stacked_data[idx] = frame_data
 
 with h5py.File(OUTPUT_HDF5, 'w') as h5f:
     
@@ -287,4 +295,4 @@ with h5py.File(OUTPUT_HDF5, 'w') as h5f:
     sr_ds.attrs['wrs_row'] = np.array(wrs_rows, dtype='int8')
     sr_ds.attrs['cloud_cover'] = np.array(cloud_covers, dtype='float32')
 
-print("\nHDF5 compilation complete. Validated HDF-EOS5 compliant metadata attached.")
+print("\nHDF5 compilation complete.")

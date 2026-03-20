@@ -15,6 +15,7 @@ import rasterio.transform
 from pyproj import Transformer, CRS
 
 # --- Configuration ---
+complexity_type = 'sliding_volume_z_score' #'sliding_volume_map'  'sliding_volume_local_z_score'  'sliding_volume_z_score'
 # Standard Landsat 8/9 True Color Indices: [C(0), B(1), G(2), R(3), NIR(4), S1(5), S2(6)]
 LANDSAT_RGB_BANDS = (3, 2, 1) 
 # Default Projection Bands for 3D Hull (Indices)
@@ -45,10 +46,10 @@ AEROSOL_DICT = {
     'medium': [2, 4, 32, 66, 68, 96, 100, 130, 132, 160, 164],
     'high': [2, 4, 32, 66, 68, 96, 100, 130, 132, 160, 164, 192, 194, 196, 224, 228]
 }
-landsat_path = "C:/satelliteImagery/LANDSAT/Rochester/LANDSAT_Stack_Rochester_GEE_2015_2025_SC_EM-7_Gram-general_Norm-None_Aerosol-low_QA-AllFrames_sunElMin-40.h5"
-tanager_path = "C:/satelliteImagery/Tanager/Rochester/Tanager_Stack_Rochester_HDFEOS_SC_EM-7_Gram-general_Norm-None_Aerosol-low_QA-AllFrames_sunElMin-40.h5"
+landsat_path = "C:/satelliteImagery/LANDSAT/Tait/LANDSAT_Stack_Tait_GEE_2015_2025_SC_EM-7_Gram-minEndmember_Norm-bandCount_Aerosol-low_QA-AllFrames_sunElMin-40.h5"
+tanager_path = "C:/satelliteImagery/Tanager/Tait/Tanager_Stack_Tait_HDFEOS_SC_EM-7_Gram-minEndmember_Norm-bandCount_Aerosol-low_QA-AllFrames_sunElMin-40.h5"
 
-SAVE_DIR = "C:/satelliteImagery/MultiSensor_Analysis_Rochester_general"
+SAVE_DIR = "C:/satelliteImagery/MultiSensor_Analysis_Tait_minEndmember"
 
 # Time Series Locations (Latitude, Longitude)
 TS_LOCATIONS = [
@@ -189,6 +190,7 @@ class MultiComplexityViewer:
         self.im_slide_redundant = None
         self.cbar_slide_redundant = None
         self.ax_ts_twin = None
+        self.ax_ts_redundant_twin = None
 
         # Process Time Series with initial thresholds
         self._recompute_time_series()
@@ -218,11 +220,9 @@ class MultiComplexityViewer:
         for frame in self.all_frames:
             file_info = self.files[frame['file_idx']]
             dgrp = file_info['data_grp']
-            if 'sliding_volume_map' not in dgrp:
-                continue
 
             try:
-                dset = dgrp['sliding_volume_map']
+                dset = dgrp[complexity_type]
                 src = frame['source']
                 key = 'LANDSAT' if 'LANDSAT' in src.upper() else 'TANAGER'
                 dt = datetime.fromtimestamp(frame['timestamp'], tz=timezone.utc)
@@ -356,6 +356,7 @@ class MultiComplexityViewer:
     def _init_combined_ui(self):
         self.fig_combined = plt.figure(figsize=(18, 10))
         self.fig_combined.canvas.manager.set_window_title("Comprehensive Complexity Analysis")
+        self.fig_combined.subplots_adjust(top=0.9, bottom=0.05, left=0.05, right=0.95, hspace=0.25, wspace=0.2)
         
         self.combined_hud = self.fig_combined.text(0.5, 0.98, "", ha='center', va='top', fontsize=11, 
                                                   bbox=dict(facecolor='white', alpha=0.8, edgecolor='lightgray'))
@@ -365,15 +366,20 @@ class MultiComplexityViewer:
         self.ax_vol_curve = self.fig_combined.add_subplot(233)
         self.ax_slide_map = self.fig_combined.add_subplot(234)
         self.ax_ts_main = self.fig_combined.add_subplot(2, 3, (5, 6))
-        
-        plt.subplots_adjust(top=0.9, bottom=0.05, left=0.05, right=0.95, hspace=0.25, wspace=0.2)
 
     def _init_redundant_ui(self):
         self.fig_redundant = plt.figure(figsize=(14, 7))
         self.fig_redundant.canvas.manager.set_window_title("Spatial and Complexity Details")
+        self.fig_redundant.subplots_adjust(top=0.85, bottom=0.05, left=0.05, right=0.95, wspace=0.2)
+        
         self.ax_spatial_redundant = self.fig_redundant.add_subplot(121)
         self.ax_slide_map_redundant = self.fig_redundant.add_subplot(122)
-        plt.subplots_adjust(top=0.85, bottom=0.05, left=0.05, right=0.95, wspace=0.2)
+        
+        # New standalone Time Series figure
+        self.fig_ts_redundant = plt.figure(figsize=(14, 6))
+        self.fig_ts_redundant.canvas.manager.set_window_title("Time Series Detail")
+        self.fig_ts_redundant.subplots_adjust(top=0.85, bottom=0.15, left=0.05, right=0.95)
+        self.ax_ts_redundant_main = self.fig_ts_redundant.add_subplot(111)
 
     def _init_hull_ui(self):
         self.fig_hull = plt.figure(figsize=(8, 7))
@@ -607,13 +613,12 @@ class MultiComplexityViewer:
                     curr_im.set_clim(vmin=v_min, vmax=v_max)
                 curr_cbar.update_normal(curr_im)
 
-        if 'sliding_volume_map' in data_grp:
-            update_map(self.ax_slide_map, data_grp['sliding_volume_map'], 'im_slide', 'cbar_slide', "Sliding Complexity")
-            
-            if DISPLAY_REDUNDANT_FIGURE:
-                update_map(self.ax_slide_map_redundant, data_grp['sliding_volume_map'], 'im_slide_redundant', 'cbar_slide_redundant', "Sliding Complexity")
+        update_map(self.ax_slide_map, data_grp[complexity_type], 'im_slide', 'cbar_slide', "Sliding Complexity")
         
-        # Reset Time Series Axis
+        if DISPLAY_REDUNDANT_FIGURE:
+            update_map(self.ax_slide_map_redundant, data_grp[complexity_type], 'im_slide_redundant', 'cbar_slide_redundant', "Sliding Complexity")
+        
+        # --- Time Series Construction and Plotting ---
         self.ax_ts_main.clear()
         if self.ax_ts_twin is not None:
             try:
@@ -624,83 +629,103 @@ class MultiComplexityViewer:
             
         if self.use_twin_axis:
             self.ax_ts_twin = self.ax_ts_main.twinx()
-            tanager_ax = self.ax_ts_twin
-        else:
-            tanager_ax = self.ax_ts_main
-        
-        # Plot LANDSAT Time Series within Date Range
-        for loc in TS_LOCATIONS:
-            label = loc['label']
-            data = self.ts_data['LANDSAT'][label]
-            if data['t']:
-                filt_t, filt_v = [], []
-                for i in range(len(data['t'])):
-                    if self.ts_start_date <= data['t'][i] <= self.ts_end_date:
-                        filt_t.append(data['t'][i])
-                        filt_v.append(data['v'][i])
+            
+        if DISPLAY_REDUNDANT_FIGURE:
+            self.ax_ts_redundant_main.clear()
+            if self.ax_ts_redundant_twin is not None:
+                try:
+                    self.ax_ts_redundant_twin.remove()
+                except Exception:
+                    pass
+                self.ax_ts_redundant_twin = None
+            if self.use_twin_axis:
+                self.ax_ts_redundant_twin = self.ax_ts_redundant_main.twinx()
+
+        def plot_time_series(ax_main, ax_twin=None):
+            """Internal helper method to cleanly plot the time series to any given axis."""
+            t_ax = ax_twin if ax_twin is not None else ax_main
+            
+            # Plot LANDSAT Time Series within Date Range
+            for loc in TS_LOCATIONS:
+                label = loc['label']
+                data = self.ts_data['LANDSAT'][label]
+                if data['t']:
+                    filt_t, filt_v = [], []
+                    for i in range(len(data['t'])):
+                        if self.ts_start_date <= data['t'][i] <= self.ts_end_date:
+                            filt_t.append(data['t'][i])
+                            filt_v.append(data['v'][i])
+                    
+                    if filt_t:
+                        ax_main.plot(filt_t, filt_v, marker='^', color=loc['color'], label=f"L: {label}",
+                                              markersize=4, linestyle='--', linewidth=1, alpha=0.6)
+            
+            # Plot TANAGER Time Series within Date Range
+            for loc in TS_LOCATIONS:
+                label = loc['label']
+                data = self.ts_data['TANAGER'][label]
+                if data['t']:
+                    filt_t, filt_v = [], []
+                    for i in range(len(data['t'])):
+                        if self.ts_start_date <= data['t'][i] <= self.ts_end_date:
+                            filt_t.append(data['t'][i])
+                            filt_v.append(data['v'][i])
+                            
+                    if filt_t:
+                        t_ax.plot(filt_t, filt_v, marker='s', color=loc['color'], label=f"T: {label}",
+                                              markersize=5, linestyle='-', linewidth=1.5, alpha=0.9)
+
+            if self.all_frames and len(ax_main.lines) > 0:
+                xlims = ax_main.get_xlim() # Capture limits generated by the data
                 
-                if filt_t:
-                    self.ax_ts_main.plot(filt_t, filt_v, marker='^', color=loc['color'], label=f"L: {label}",
-                                          markersize=4, linestyle='--', linewidth=1, alpha=0.6)
-        
-        # Plot TANAGER Time Series within Date Range
-        for loc in TS_LOCATIONS:
-            label = loc['label']
-            data = self.ts_data['TANAGER'][label]
-            if data['t']:
-                filt_t, filt_v = [], []
-                for i in range(len(data['t'])):
-                    if self.ts_start_date <= data['t'][i] <= self.ts_end_date:
-                        filt_t.append(data['t'][i])
-                        filt_v.append(data['v'][i])
-                        
-                if filt_t:
-                    tanager_ax.plot(filt_t, filt_v, marker='s', color=loc['color'], label=f"T: {label}",
-                                          markersize=5, linestyle='-', linewidth=1.5, alpha=0.9)
+                # Constrain background shading only to the requested/active viewing years
+                for yr in range(self.ts_start_date.year, self.ts_end_date.year + 2):
+                    # Winter (Dec 1 prev year - Mar 1 curr year) -> light gray
+                    ax_main.axvspan(datetime(yr - 1, 12, 1, tzinfo=timezone.utc), 
+                                            datetime(yr, 3, 1, tzinfo=timezone.utc), 
+                                            color='lightgray', alpha=0.3, zorder=0, lw=0)
+                    # Spring (Mar 1 - Jun 1) -> light green
+                    ax_main.axvspan(datetime(yr, 3, 1, tzinfo=timezone.utc), 
+                                            datetime(yr, 6, 1, tzinfo=timezone.utc), 
+                                            color='lightgreen', alpha=0.2, zorder=0, lw=0)
+                    # Summer (Jun 1 - Sep 1) -> light yellow
+                    ax_main.axvspan(datetime(yr, 6, 1, tzinfo=timezone.utc), 
+                                            datetime(yr, 9, 1, tzinfo=timezone.utc), 
+                                            color='lightyellow', alpha=0.3, zorder=0, lw=0)
+                    # Fall (Sep 1 - Dec 1) -> light orange
+                    ax_main.axvspan(datetime(yr, 9, 1, tzinfo=timezone.utc), 
+                                            datetime(yr, 12, 1, tzinfo=timezone.utc), 
+                                            color='orange', alpha=0.15, zorder=0, lw=0)
+                
+                ax_main.set_xlim(xlims) # Restore limits so it doesn't zoom out to empty seasons
 
-        if self.all_frames and len(self.ax_ts_main.lines) > 0:
-            xlims = self.ax_ts_main.get_xlim() # Capture limits generated by the data
+            # Style and Layout the Time Series UI
+            title_str = "Twin Axis Time Series" if self.use_twin_axis else "Equated Time Series (Shared Scale)"
+            ax_main.set_title(f"{title_str} ({self.ts_start_date.strftime('%Y-%m-%d')} to {self.ts_end_date.strftime('%Y-%m-%d')})")
             
-            # Constrain background shading only to the requested/active viewing years
-            for yr in range(self.ts_start_date.year, self.ts_end_date.year + 2):
-                # Winter (Dec 1 prev year - Mar 1 curr year) -> light gray
-                self.ax_ts_main.axvspan(datetime(yr - 1, 12, 1, tzinfo=timezone.utc), 
-                                        datetime(yr, 3, 1, tzinfo=timezone.utc), 
-                                        color='lightgray', alpha=0.3, zorder=0, lw=0)
-                # Spring (Mar 1 - Jun 1) -> light green
-                self.ax_ts_main.axvspan(datetime(yr, 3, 1, tzinfo=timezone.utc), 
-                                        datetime(yr, 6, 1, tzinfo=timezone.utc), 
-                                        color='lightgreen', alpha=0.2, zorder=0, lw=0)
-                # Summer (Jun 1 - Sep 1) -> light yellow
-                self.ax_ts_main.axvspan(datetime(yr, 6, 1, tzinfo=timezone.utc), 
-                                        datetime(yr, 9, 1, tzinfo=timezone.utc), 
-                                        color='lightyellow', alpha=0.3, zorder=0, lw=0)
-                # Fall (Sep 1 - Dec 1) -> light orange
-                self.ax_ts_main.axvspan(datetime(yr, 9, 1, tzinfo=timezone.utc), 
-                                        datetime(yr, 12, 1, tzinfo=timezone.utc), 
-                                        color='orange', alpha=0.15, zorder=0, lw=0)
+            ax_main.grid(True, alpha=0.3, which="both", ls="--")
+            ax_main.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m'))
+            ax_main.tick_params(axis='x', rotation=45, labelsize=8)
+            ax_main.axvline(curr_dt, color='black', linestyle='--', alpha=0.8, linewidth=1.5)
             
-            self.ax_ts_main.set_xlim(xlims) # Restore limits so it doesn't zoom out to empty seasons
+            # Format Legends and Y Labels
+            lines_1, labels_1 = ax_main.get_legend_handles_labels()
+            if self.use_twin_axis and ax_twin is not None:
+                ax_main.set_ylabel("Landsat Volume", color='black', fontweight='bold')
+                ax_twin.set_ylabel("Tanager Volume", color='black', fontweight='bold')
+                lines_2, labels_2 = ax_twin.get_legend_handles_labels()
+                ax_main.legend(lines_1 + lines_2, labels_1 + labels_2, loc='upper left', fontsize=8, ncol=2)
+            else:
+                ax_main.set_ylabel("Volume", fontweight='bold')
+                ax_main.legend(loc='upper left', fontsize=8, ncol=2)
 
-        # Style and Layout the Time Series UI
-        title_str = "Twin Axis Time Series" if self.use_twin_axis else "Equated Time Series (Shared Scale)"
-        self.ax_ts_main.set_title(f"{title_str} ({self.ts_start_date.strftime('%Y-%m-%d')} to {self.ts_end_date.strftime('%Y-%m-%d')})")
+        # Plot onto the primary layout
+        plot_time_series(self.ax_ts_main, self.ax_ts_twin)
         
-        self.ax_ts_main.grid(True, alpha=0.3, which="both", ls="--")
-        self.ax_ts_main.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m'))
-        self.ax_ts_main.tick_params(axis='x', rotation=45, labelsize=8)
-        self.ax_ts_main.axvline(curr_dt, color='black', linestyle='--', alpha=0.8, linewidth=1.5)
-        
-        # Format Legends and Y Labels
-        lines_1, labels_1 = self.ax_ts_main.get_legend_handles_labels()
-        if self.use_twin_axis:
-            self.ax_ts_main.set_ylabel("Landsat Volume", color='black', fontweight='bold')
-            self.ax_ts_twin.set_ylabel("Tanager Volume", color='black', fontweight='bold')
-            lines_2, labels_2 = self.ax_ts_twin.get_legend_handles_labels()
-            self.ax_ts_main.legend(lines_1 + lines_2, labels_1 + labels_2, loc='upper left', fontsize=8, ncol=2)
-        else:
-            self.ax_ts_main.set_ylabel("Volume", fontweight='bold')
-            self.ax_ts_main.legend(loc='upper left', fontsize=8, ncol=2)
+        # Plot onto the new standalone redundant layout
+        if DISPLAY_REDUNDANT_FIGURE:
+            plot_time_series(self.ax_ts_redundant_main, self.ax_ts_redundant_twin)
+            self.fig_ts_redundant.suptitle(f"Time Series Extraction | {frame_info['sat_id']} - {curr_dt.strftime('%Y-%m-%d %H:%M:%S UTC')}\n{filter_str}", fontsize=14)
 
         # --- 3D Parallelotope Figure ---
         self.ax_hull.clear()
@@ -796,6 +821,7 @@ class MultiComplexityViewer:
         figs_to_draw = [self.fig_controls, self.fig_combined, self.fig_hull]
         if DISPLAY_REDUNDANT_FIGURE:
             figs_to_draw.append(self.fig_redundant)
+            figs_to_draw.append(self.fig_ts_redundant)
         
         for f in figs_to_draw:
             f.canvas.draw_idle()
@@ -908,12 +934,8 @@ class MultiComplexityViewer:
         l_grp = self.files[self.l_file_idx]['data_grp']
         t_grp = self.files[self.t_file_idx]['data_grp']
 
-        if 'sliding_volume_map' not in l_grp or 'sliding_volume_map' not in t_grp:
-            print("Error: Sliding volume maps not found in one or both files.")
-            return
-
-        l_slide_dset = l_grp['sliding_volume_map']
-        t_slide_dset = t_grp['sliding_volume_map']
+        l_slide_dset = l_grp[complexity_type]
+        t_slide_dset = t_grp[complexity_type]
 
         if l_idx < 0 or l_idx >= l_slide_dset.shape[0] or t_idx < 0 or t_idx >= t_slide_dset.shape[0]:
             print("Error: Selected frame index out of bounds.")
@@ -1137,6 +1159,7 @@ class MultiComplexityViewer:
         figs_to_save = [(self.fig_combined, "CombinedAnalysis")]
         if DISPLAY_REDUNDANT_FIGURE:
             figs_to_save.append((self.fig_redundant, "SpatialComplexityDetails"))
+            figs_to_save.append((self.fig_ts_redundant, "TimeSeriesDetail"))
             
         for fig, name in figs_to_save:
             path = os.path.join(save_path, f"{prefix}_{name}.png")
