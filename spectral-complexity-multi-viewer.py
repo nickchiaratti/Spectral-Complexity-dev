@@ -22,17 +22,18 @@ LANDSAT_RGB_BANDS = (3, 2, 1)
 HULL_BANDS_LANDSAT = (6, 4, 2) 
 HULL_BANDS_TANAGER = (100, 50, 20) # Example hyperspectral indices
 
-TS_START_DATE = datetime(2015, 1, 1, tzinfo=timezone.utc)
+TS_START_DATE = datetime(2025, 1, 1, tzinfo=timezone.utc)
 TS_END_DATE = datetime(2025, 12, 31, tzinfo=timezone.utc)
 TWIN_Y_AXIS_DEFAULT = False
 
 # Combined Pixel Mask Configuration
+MASKING = False
 SUN_ELEVATION_THRESHOLD = 30
-CLOUD_DILATION = 2
+CLOUD_DILATION = 0
 
 # Tanager Pixel Mask Configuration
 TANAGER_AEROSOL_DEPTH_THRESHOLD = 0.3
-TANAGER_SR_UNCERTAINTY_THRESHOLD = 0.05
+TANAGER_SR_UNCERTAINTY_THRESHOLD = 0.10
 
 # LANDSAT Pixel Mask Configuration
 QA_REJECT_MASK = 0b111111
@@ -44,12 +45,17 @@ AEROSOL_ACCEPT_LEVEL = 'medium' #'low' 'medium' 'high'
 AEROSOL_DICT = {
     'low': [2, 4, 32, 66, 68, 96, 100],
     'medium': [2, 4, 32, 66, 68, 96, 100, 130, 132, 160, 164],
-    'high': [2, 4, 32, 66, 68, 96, 100, 130, 132, 160, 164, 192, 194, 196, 224, 228]
+    'high': [2, 4, 32, 66, 68, 96, 100, 130, 132, 160, 164, 192, 194, 196, 224, 228] # Aerosol_Optical_Depth > 0.3
 }
-landsat_path = "C:/satelliteImagery/LANDSAT/Tait/LANDSAT_Stack_Tait_GEE_2015_2025_SC_EM-7_Gram-minEndmember_Norm-bandCount_Aerosol-low_QA-AllFrames_sunElMin-40.h5"
-tanager_path = "C:/satelliteImagery/Tanager/Tait/Tanager_Stack_Tait_HDFEOS_SC_EM-7_Gram-minEndmember_Norm-bandCount_Aerosol-low_QA-AllFrames_sunElMin-40.h5"
+landsat_path = "C:/satelliteImagery/LANDSAT/Rochester/LANDSAT_Stack_Rochester_GEE_2015_2025_SC_EM-7_Gram-minEndmember_Norm-bandCount.h5"
+tanager_path = "C:/satelliteImagery/Tanager/Rochester/Tanager_Stack_Rochester_HDFEOS_SC_EM-7_Gram-minEndmember_Norm-bandCount.h5"
 
-SAVE_DIR = "C:/satelliteImagery/MultiSensor_Analysis_Tait_minEndmember"
+if complexity_type == 'sliding_volume_z_score':
+    suffix = '_zscore'
+else:
+    suffix = ''
+
+SAVE_DIR = "C:/satelliteImagery/MultiSensor_Analysis_Rochester_minEndmember" + suffix
 
 # Time Series Locations (Latitude, Longitude)
 TS_LOCATIONS = [
@@ -397,6 +403,9 @@ class MultiComplexityViewer:
         """Generates a boolean mask for LANDSAT data based on active UI filters."""
         valid_mask = np.ones(shape, dtype=bool)
         
+        if not MASKING:
+            return valid_mask
+        
         # Sun Elevation Check
         sun_elev_arr = data_grp['surface_reflectance'].attrs.get('sun_elevation')
         if sun_elev_arr is not None and f_idx < len(sun_elev_arr):
@@ -435,6 +444,9 @@ class MultiComplexityViewer:
     def _get_tanager_mask(self, data_grp, f_idx, shape):
         """Generates a boolean mask for TANAGER data based on active UI filters."""
         valid_mask = np.ones(shape, dtype=bool)
+        
+        if not MASKING:
+            return valid_mask
 
         # Cloud Mask Check
         if 'beta_cloud_mask' in data_grp:
@@ -456,7 +468,7 @@ class MultiComplexityViewer:
         if 'aerosol_optical_depth' in data_grp:
             aod = data_grp['aerosol_optical_depth'][f_idx, ...]
             # Filter out fill value (-9999.0) and enforce AOD threshold
-            bad_aod_mask = (aod == -9999.0) | (aod >= self.t_aerosol_thresh)
+            bad_aod_mask = (aod == -9999.0) | (aod <= self.t_aerosol_thresh)
             if self.t_aerosol_thresh > 0:
                 kernel = np.ones((3, 3), dtype=bool)
                 bad_aod_mask = ndimage.binary_dilation(bad_aod_mask, structure=kernel, iterations=1)
@@ -498,10 +510,13 @@ class MultiComplexityViewer:
             elif frame_info['source'] == 'TANAGER':
                 self.txt_t_frame.set_val(str(f_idx))
         
-        # Add an additional line with the current active filters/thresholds
-        qa_val = bin(QA_REJECT_MASK) if self.mask_qa_enabled else "OFF"
-        filter_str = f"Filters: Sun Elev > {self.sun_elev_thresh}° | Cloud Dilation: {self.cloud_dilation} | T-AOD < {self.t_aerosol_thresh} | L-Aerosol: {self.aerosol_level} | T-Unc < {self.t_uncertainty_thresh} | L-QA Rej: {qa_val}"
-        
+        # Add an additional line with the current active filters/thresholds or "Unmasked" status
+        if MASKING:
+            qa_val = bin(QA_REJECT_MASK) if self.mask_qa_enabled else "OFF"
+            filter_str = f"Filters: Sun Elev > {self.sun_elev_thresh}° | Cloud Dilation: {self.cloud_dilation} | T-AOD < {self.t_aerosol_thresh} | L-Aerosol: {self.aerosol_level} | T-Unc < {self.t_uncertainty_thresh} | L-QA Rej: {qa_val}"
+        else:
+            filter_str = "Filters: Unmasked"
+            
         self.combined_hud.set_text(meta_str.replace('\n', ' | ') + '\n' + filter_str)
 
         # --- RGB Generation ---
@@ -1032,6 +1047,12 @@ class MultiComplexityViewer:
             self.ax_scatter_lin.set_xlabel(f"LANDSAT Volume")
             self.ax_scatter_lin.set_ylabel(f"TANAGER Volume")
             self.ax_scatter_lin.grid(True, alpha=0.3)
+            if MASKING:
+                qa_val = bin(QA_REJECT_MASK) if self.mask_qa_enabled else "OFF"
+                filter_str = f"Filters: Sun Elev > {self.sun_elev_thresh}° | Cloud Dilation: {self.cloud_dilation} | T-AOD < {self.t_aerosol_thresh} | L-Aerosol: {self.aerosol_level} | T-Unc < {self.t_uncertainty_thresh} | L-QA Rej: {qa_val}"
+            else:
+                filter_str = "Filters: Unmasked"
+                
             self.ax_scatter_lin.text(0.95, 0.05, stats_text_scatter, transform=self.ax_scatter_lin.transAxes, 
                                      ha='right', va='bottom', fontsize=9, bbox=dict(boxstyle='round', facecolor='white', alpha=0.5))
             self.ax_scatter_lin.legend()
@@ -1085,8 +1106,6 @@ class MultiComplexityViewer:
             self.ax_hist_t.text(0.95, 0.95, t_stats_text, transform=self.ax_hist_t.transAxes, 
                                 ha='right', va='top', fontsize=9, bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
             
-            qa_val = bin(QA_REJECT_MASK) if self.mask_qa_enabled else "OFF"
-            filter_str = f"Filters: Sun Elev > {self.sun_elev_thresh}° | Cloud Dilation: {self.cloud_dilation} | T-AOD < {self.t_aerosol_thresh} | L-Aerosol: {self.aerosol_level} | T-Unc < {self.t_uncertainty_thresh} | L-QA Rej: {qa_val}"
             self.fig_scatter.suptitle(f"Sliding Volume Correlation | LANDSAT ({l_date_str}) vs TANAGER ({t_date_str})\n{filter_str}", fontsize=14)
             self.fig_scatter.tight_layout(rect=[0, 0.03, 1, 0.95]) # Prevent suptitle overlap
         else:
