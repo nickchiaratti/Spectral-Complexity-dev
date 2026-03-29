@@ -8,7 +8,6 @@ try:
     from zoneinfo import ZoneInfo
 except ImportError:
     from backports.zoneinfo import ZoneInfo # For Python < 3.9
-from skimage import exposure
 
 import rasterio.transform
 from pyproj import Transformer, CRS
@@ -24,16 +23,14 @@ OUTPUT_DIR = "C:/satelliteImagery/MultiSensor_Analysis_Videos"
 COMPLEXITY_TYPE = 'sliding_volume_z_score'
 
 # Temporal Configuration
-START_DATE = datetime(2025, 1, 1, tzinfo=timezone.utc)
+START_DATE = datetime(2015, 1, 1, tzinfo=timezone.utc)
 END_DATE = datetime(2025, 12, 31, tzinfo=timezone.utc)
 
 # Video Output Configuration
-FPS = 1  # Frames Per Second (3 FPS = 0.33 second delay between frames)
-DPI = 300
+FPS = 3  # Frames Per Second (3 FPS = 0.33 second delay between frames)
+DPI = 150
 SHOW_PIXEL_INDICATORS = True
 GLOBAL_COLOR_SCALE = True # HIGHLY RECOMMENDED: Prevents colormap "flickering"
-
-LANDSAT_RGB_BANDS = (3, 2, 1)
 
 # Time Series Locations (Latitude, Longitude)
 TS_LOCATIONS = [
@@ -49,12 +46,6 @@ TS_LOCATIONS = [
 # 2. UTILITY FUNCTIONS
 # ==========================================
 
-def percentile_normalize_array(arr, low=1, high=99):
-    if np.all(np.isnan(arr)): return np.zeros_like(arr)
-    p_low, p_high = np.nanpercentile(arr, (low, high))
-    if p_low == p_high: return np.zeros_like(arr)
-    return exposure.rescale_intensity(arr, in_range=(p_low, p_high), out_range=(0, 1)).clip(0, 1)
-
 def map_locations(dset):
     """Maps geographic lat/lon to specific pixel grid coordinates."""
     geo_transform = dset.attrs.get('GeoTransform')
@@ -65,7 +56,13 @@ def map_locations(dset):
         if isinstance(spatial_ref, bytes): spatial_ref = spatial_ref.decode('utf-8')
         crs = CRS.from_wkt(spatial_ref)
         transformer = Transformer.from_crs("EPSG:4326", crs, always_xy=True)
-        affine = rasterio.transform.Affine(*geo_transform)
+        
+        # Since both the Landsat and Tanager stackers have been standardized to the 
+        # Analysis Ready Data (ARD) Common Geographic Framework, they both strictly 
+        # output the OGC/GDAL compliant GeoTransform array:
+        # [Origin_X, Pixel_Width, X_Rotation, Origin_Y, Y_Rotation, Pixel_Height]
+        affine = rasterio.transform.Affine.from_gdal(*geo_transform)
+            
         inv_affine = ~affine
         
         for loc in TS_LOCATIONS:
@@ -109,7 +106,7 @@ def generate_videos():
             unified_frames.append({
                 'sensor': 'LANDSAT', 'idx': idx, 'dt': dt, 
                 'dt_et': dt.astimezone(ZoneInfo("America/New_York")),
-                'vol_dset': vol_l, 'grp': grp_l, 'sr_dset': sr_l
+                'vol_dset': vol_l, 'grp': grp_l
             })
             
     for idx, ts in enumerate(sr_t.attrs.get('acquisition_time', [])):
@@ -118,7 +115,7 @@ def generate_videos():
             unified_frames.append({
                 'sensor': 'TANAGER', 'idx': idx, 'dt': dt, 
                 'dt_et': dt.astimezone(ZoneInfo("America/New_York")),
-                'vol_dset': vol_t, 'grp': grp_t, 'sr_dset': sr_t
+                'vol_dset': vol_t, 'grp': grp_t
             })
             
     # Sort chronologically to create the virtual constellation time series
@@ -152,7 +149,7 @@ def generate_videos():
     writer_comp = Writer(fps=FPS, metadata=dict(artist='MultiSensor Virtual Constellation'), bitrate=1800)
     writer_side = Writer(fps=FPS, metadata=dict(artist='MultiSensor Virtual Constellation'), bitrate=2500)
     
-    prefix = f"MultiSensor_{COMPLEXITY_TYPE}_{START_DATE.strftime('%Y')}-{END_DATE.strftime('%Y')}_Unmasked_{FPS}fps"
+    prefix = f"MultiSensor_{COMPLEXITY_TYPE}_{START_DATE.strftime('%Y')}-{END_DATE.strftime('%Y')}_Unmasked"
     path_rgb = os.path.join(OUTPUT_DIR, f"{prefix}_TrueColor.mp4")
     path_comp = os.path.join(OUTPUT_DIR, f"{prefix}_Complexity.mp4")
     path_side = os.path.join(OUTPUT_DIR, f"{prefix}_SideBySide.mp4")
@@ -170,14 +167,14 @@ def generate_videos():
     
     # Aesthetic background for data voids
     for ax in [ax_rgb, ax_comp, ax_s1, ax_s2]:
-        ax.set_facecolor('#2F4F4F') # Dark Slate Gray for masked/void pixels
+        ax.set_facecolor('#2F4F4F') # Dark Slate Gray shows through transparent pixels
         ax.axis('off')
 
     # Initialize Imshow objects
     dummy_shape = (100, 100) # Replaced dynamically on frame 1
-    im_rgb = ax_rgb.imshow(np.zeros((*dummy_shape, 3)))
+    im_rgb = ax_rgb.imshow(np.zeros((*dummy_shape, 4))) # Using 4 channels (RGBA)
     im_comp = ax_comp.imshow(np.zeros(dummy_shape), cmap='viridis', vmin=v_min, vmax=v_max)
-    im_s1 = ax_s1.imshow(np.zeros((*dummy_shape, 3)))
+    im_s1 = ax_s1.imshow(np.zeros((*dummy_shape, 4)))
     im_s2 = ax_s2.imshow(np.zeros(dummy_shape), cmap='viridis', vmin=v_min, vmax=v_max)
     
     # Format Colorbars to contrast against the black background
@@ -194,10 +191,9 @@ def generate_videos():
     # Initialize Time Annotations
     txt_rgb = ax_rgb.text(0.5, 0.02, "", transform=ax_rgb.transAxes, ha='center', va='bottom', color='white', fontsize=12, fontweight='bold', bbox=dict(facecolor='black', alpha=0.6, pad=3))
     txt_comp = ax_comp.text(0.5, 0.02, "", transform=ax_comp.transAxes, ha='center', va='bottom', color='white', fontsize=12, fontweight='bold', bbox=dict(facecolor='black', alpha=0.6, pad=3))
-    # Positioned at 0.02 to ensure it hovers neatly inside the image rather than floating in a cropped margin
     txt_side = fig_side.text(0.5, 0.02, "", ha='center', va='bottom', color='white', fontsize=14, fontweight='bold', bbox=dict(facecolor='black', alpha=0.6, pad=5))
     
-    ax_s1.set_title("True Color", color='white', fontweight='bold')
+    ax_s1.set_title("Ortho Visual", color='white', fontweight='bold')
     ax_s2.set_title(f"Complexity ({COMPLEXITY_TYPE})", color='white', fontweight='bold')
 
     # Initialize Pixel Indicators (Empty lists to be updated per frame)
@@ -225,19 +221,38 @@ def generate_videos():
             if i % 10 == 0:
                 print(f"  Rendering frame {i}/{len(unified_frames)}...")
             
-            # Extract RGB
-            raw_sr = frame['sr_dset'][idx, ...]
-            if sensor == 'LANDSAT':
-                r = percentile_normalize_array(raw_sr[LANDSAT_RGB_BANDS[0]])
-                g = percentile_normalize_array(raw_sr[LANDSAT_RGB_BANDS[1]])
-                b = percentile_normalize_array(raw_sr[LANDSAT_RGB_BANDS[2]])
-                rgb = np.stack([r, g, b], axis=-1)
-            else: # TANAGER
-                vis = grp['ortho_visual'][idx, ...]
-                rgb = np.transpose(vis[:3, ...], (1, 2, 0))
+            # --- 1. Process Ortho Visual (RGB + Alpha) ---
+            raw_ortho = grp['ortho_visual'][idx, ...]
             
-            # Extract Complexity Map
+            # Convert Band Sequential (BSQ) [Channels, H, W] to Band Interleaved by Pixel (BIP) [H, W, Channels]
+            if raw_ortho.shape[0] in [3, 4]:
+                raw_ortho = np.transpose(raw_ortho, (1, 2, 0))
+                
+            # Standardize to float32 [0.0, 1.0] for reliable Matplotlib RGBA rendering
+            rgba = np.zeros((raw_ortho.shape[0], raw_ortho.shape[1], 4), dtype=np.float32)
+            
+            # Normalize uint8 RGB Channels (0-255) to float (0.0-1.0)
+            rgba[..., :3] = raw_ortho[..., :3] / 255.0
+                
+            # Handle the explicit Alpha logic based on the updated dataset structure
+            if raw_ortho.shape[-1] == 4:
+                user_alpha = raw_ortho[..., 3]
+                # Updated config: > 0 is valid (opaque), 0 is fill/background (transparent)
+                rgba[..., 3] = np.where(user_alpha > 0, 1.0, 0.0)
+            else:
+                rgba[..., 3] = 1.0 # Fallback if no alpha channel exists
+                
+            # Catch stray NaNs and force them to transparent to protect rendering engine
+            invalid_rgb_mask = np.isnan(rgba[..., 0])
+            rgba[invalid_rgb_mask, 3] = 0.0
+            rgba = np.nan_to_num(rgba, nan=0.0)
+            
+            # --- 2. Extract Complexity Map ---
             comp_data = frame['vol_dset'][idx, ...].copy()
+            
+            # Synchronize Complexity data voids with the ortho alpha channel
+            if raw_ortho.shape[-1] == 4:
+                comp_data[rgba[..., 3] == 0.0] = np.nan
             
             if not GLOBAL_COLOR_SCALE:
                 with np.errstate(all='ignore'):
@@ -256,9 +271,9 @@ def generate_videos():
             im_s2.set_extent(dynamic_extent)
 
             # Update Images (Replace the underlying pixel array)
-            im_rgb.set_data(rgb)
+            im_rgb.set_data(rgba)
             im_comp.set_data(comp_data)
-            im_s1.set_data(rgb)
+            im_s1.set_data(rgba)
             im_s2.set_data(comp_data)
             
             # Align the viewer axes to perfectly frame the true spatial extent

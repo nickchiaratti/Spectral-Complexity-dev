@@ -27,9 +27,6 @@ elif Location == "Tait":
 elif Location == "RIT":
     ROI_LON_MIN = -77.688990; ROI_LON_MAX = -77.660365
     ROI_LAT_MIN = 43.072486; ROI_LAT_MAX = 43.093298
-elif Location == "Tait-I-490":
-    ROI_LON_MIN = -77.516127; ROI_LON_MAX = -77.4450
-    ROI_LAT_MIN = 43.0450; ROI_LAT_MAX = 43.159168
 
 # Main directory
 SOURCE_DIR = "C:/satelliteImagery/Tanager/SourceData"
@@ -334,7 +331,7 @@ def process_tanager_stack():
                 with rasterio.open(scene['vis_file']) as src:
                     incoming = np.zeros((4, height, width), dtype='uint8')
                     reproject(rasterio.band(src, [1, 2, 3, 4]), incoming, src_transform=src.transform, 
-                              src_crs=src.crs, dst_transform=tf_target, dst_crs=dst_crs, resampling=Resampling.cubic)
+                              src_crs=src.crs, dst_transform=tf_target, dst_crs=dst_crs, resampling=Resampling.cubic_spline)
                     mask = (incoming[3] > 0); pass_vis[:, mask] = incoming[:, mask]
             vis_dset[t_idx, ...] = pass_vis
 

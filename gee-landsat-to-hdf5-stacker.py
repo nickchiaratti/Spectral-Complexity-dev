@@ -7,6 +7,10 @@ import os
 import glob
 from datetime import datetime, timezone
 import shutil
+from rasterio.transform import from_bounds
+from rasterio.warp import reproject, Resampling
+from pyproj import Transformer, CRS
+import SpecComplex as sc
 
 # ==========================================
 # 1. CONFIGURATION
@@ -18,32 +22,92 @@ except Exception as e:
     ee.Authenticate()
     ee.Initialize()
 
-Location = "Tait"
+Location = "Rochester"
+# Set SOURCE_CACHE to a larger parent region (e.g., "Rochester") to bypass GEE downloads
+# and perform fast, local spatial subsetting from existing parent .tif files.
+# Set to None to use the dedicated Location folder.
+SOURCE_CACHE = "Rochester" 
+
 if Location == "Rochester":
     # Rochester Bounding Box
-    ROI = ee.Geometry.Rectangle([-77.72, 43.0450, -77.4450, 43.28])
+    ROI_LON_MIN = -77.72; ROI_LON_MAX = -77.4450
+    ROI_LAT_MIN = 43.0450; ROI_LAT_MAX = 43.28
     START_DATE = '2015-01-01'
     END_DATE = '2025-12-31'
-    OUTPUT_HDF5 = "C:/satelliteImagery/LANDSAT/Rochester/LANDSAT_Stack_Rochester_GEE_2015_2025.h5"
-    TEMP_DIR = "C:/satelliteImagery/LANDSAT/SourceData/Rochester_TEMP_GEE_DOWNLOAD"
 elif Location == "Tait":
     # Tait Bounding Box
-    ROI = ee.Geometry.Rectangle([-77.516127, 43.127698, -77.461968, 43.159168])
+    ROI_LON_MIN = -77.516127; ROI_LON_MAX = -77.461968
+    ROI_LAT_MIN = 43.127698; ROI_LAT_MAX = 43.159168
     START_DATE = '2015-01-01'
-    END_DATE = '2025-12-31'
-    OUTPUT_HDF5 = "C:/satelliteImagery/LANDSAT/Tait/LANDSAT_Stack_Tait_GEE_2015_2025.h5"
-    TEMP_DIR = "C:/satelliteImagery/LANDSAT/SourceData/Tait_TEMP_GEE_DOWNLOAD"
+    END_DATE = '2025-12-31' 
 
-# Target Coordinate Reference System (UTM Zone 18N for Rochester)
-TARGET_CRS = 'EPSG:32618'
+OUTPUT_HDF5 = f"C:/satelliteImagery/LANDSAT/{Location}/LANDSAT_Stack_{Location}_GEE_2015_2025.h5"
 
+if SOURCE_CACHE:
+    TEMP_DIR = f"C:/satelliteImagery/LANDSAT/SourceData/{SOURCE_CACHE}_TEMP_GEE_DOWNLOAD"
+else:
+    TEMP_DIR = f"C:/satelliteImagery/LANDSAT/SourceData/{Location}_TEMP_GEE_DOWNLOAD"
+
+# Reconstruct GEE Geometry for searching the catalog
+ROI = ee.Geometry.Rectangle([ROI_LON_MIN, ROI_LAT_MIN, ROI_LON_MAX, ROI_LAT_MAX])
+
+# Target Resolution (Matches Tanager)
+TARGET_RESOLUTION = 30.0
 
 # Landsat 8/9 SR Bands to extract, plus all required QA bands
 BANDS = ['SR_B1', 'SR_B2', 'SR_B3', 'SR_B4', 'SR_B5', 'SR_B6', 'SR_B7', 'QA_PIXEL', 'QA_RADSAT', 'SR_QA_AEROSOL']
 LANDSAT_WAVELENGTHS = [0.443, 0.482, 0.561, 0.655, 0.865, 1.609, 2.201]
 
 # ==========================================
-# 2. HDF-EOS5 STRUCTURAL UTILITY
+# 2. COMMON GEOGRAPHIC FRAMEWORK (MASTER GRID)
+# ==========================================
+def calculate_target_grid(lon_min, lon_max, lat_min, lat_max, resolution):
+    """
+    Calculates the exact Euclidean target grid, perfectly mirroring the local 
+    Tanager processing logic to establish a Common Geographic Framework.
+    """
+    central_lon = (lon_min + lon_max) / 2
+    utm_zone = int((central_lon + 180) / 6) + 1
+    epsg_code = 32600 + utm_zone
+    dst_crs = CRS.from_epsg(epsg_code)
+    
+    transformer = Transformer.from_crs("EPSG:4326", dst_crs, always_xy=True)
+    xs, ys = transformer.transform([lon_min, lon_max, lon_max, lon_min], 
+                                   [lat_max, lat_max, lat_min, lat_min])
+    
+    dst_min_x, dst_max_x = min(xs), max(xs)
+    dst_min_y, dst_max_y = min(ys), max(ys)
+    
+    width = int(np.ceil((dst_max_x - dst_min_x) / resolution))
+    height = int(np.ceil((dst_max_y - dst_min_y) / resolution))
+    
+    target_transform = from_bounds(dst_min_x, dst_min_y, dst_max_x, dst_max_y, width, height)
+    
+    return dst_crs, target_transform, width, height, (dst_min_x, dst_max_y), (dst_max_x, dst_min_y), utm_zone
+
+# Generate the Master Grid parameters before querying GEE
+print("Establishing Common Geographic Framework (Master Grid)...")
+dst_crs, tf_target, grid_width, grid_height, ul_coords, lr_coords, utm_zone = calculate_target_grid(
+    ROI_LON_MIN, ROI_LON_MAX, ROI_LAT_MIN, ROI_LAT_MAX, TARGET_RESOLUTION
+)
+
+TARGET_CRS_STR = f"EPSG:{32600 + utm_zone}"
+
+# Create a strictly projected Geometry bounding box for our baseline
+exact_bounds_ee = ee.Geometry.Rectangle(
+    coords=[ul_coords[0], lr_coords[1], lr_coords[0], ul_coords[1]], 
+    proj=TARGET_CRS_STR, 
+    geodesic=False
+)
+
+# Apply a 500-meter buffer to the boundary. 
+# This prevents interpolation ringing artifacts at the edges during local reprojection.
+buffered_bounds_ee = exact_bounds_ee.buffer(500).bounds()
+
+print(f"Master Grid dimensions locked to {grid_width}x{grid_height} at {TARGET_CRS_STR}")
+
+# ==========================================
+# 3. HDF-EOS5 STRUCTURAL UTILITY
 # ==========================================
 def generate_struct_metadata(grid_name, x_dim, y_dim, ul_coords, lr_coords, zone_code, num_bands, num_frames):
     """Generates the ODL StructMetadata.0 string required for HDF-EOS5 compliance."""
@@ -79,6 +143,10 @@ GROUP=GridStructure
                 DimensionName="XDim"
                 Size={x_dim}
             END_OBJECT=Dimension_4
+            OBJECT=Dimension_5
+                DimensionName="VisBand"
+                Size=4
+            END_OBJECT=Dimension_5
         END_GROUP=Dimension
         
         GROUP=DataField
@@ -92,6 +160,11 @@ GROUP=GridStructure
                 DataType=HDF5T_NATIVE_UINT16
                 DimList=("Time","YDim","XDim")
             END_OBJECT=DataField_2
+            OBJECT=DataField_3
+                DataFieldName="ortho_visual"
+                DataType=HDF5T_NATIVE_UINT8
+                DimList=("Time","VisBand","YDim","XDim")
+            END_OBJECT=DataField_3
         END_GROUP=DataField
         GROUP=MergedFields
         END_GROUP=MergedFields
@@ -106,51 +179,38 @@ END
     return odl
 
 # ==========================================
-# 3. GEE SERVER-SIDE PROCESSING
+# 4. GEE SERVER-SIDE PROCESSING
 # ==========================================
-def apply_scale_factors(image):
-    optical_bands = image.select('SR_B.').multiply(0.0000275).add(-0.2)
-    return image.addBands(optical_bands, None, True)
-
-def calculate_roi_cloud_cover(image):
-    """Calculates the percentage of cloud/shadow specifically within the ROI."""
-    qa = image.select('QA_PIXEL')
+def prepare_export_types(image):
+    """
+    Enforces strict native integer data types to minimize GEE payload size.
+    Radiometric scaling (float conversion) is deferred to local client-side processing.
+    """
+    # Keep surface reflectance as native uint16 to halve download size
+    optical_bands = image.select('SR_B.').toUint16()
     
-    # Bit 3 = Cloud, Bit 4 = Cloud Shadow
-    cloud_shadow_bit_mask = (1 << 4)
-    clouds_bit_mask = (1 << 3)
+    # Enforce minimum viable integer footprints for QA bitmasks
+    qa_bands = image.select(['QA_PIXEL', 'QA_RADSAT']).toUint16()
+    qa_aerosol = image.select('SR_QA_AEROSOL').toUint8()
     
-    # Create a binary mask where 1 = cloud/shadow, 0 = clear
-    is_cloudy = qa.bitwiseAnd(cloud_shadow_bit_mask).neq(0) \
-        .Or(qa.bitwiseAnd(clouds_bit_mask).neq(0))
-        
-    stats = is_cloudy.reduceRegion(
-        reducer=ee.Reducer.mean(),
-        geometry=ROI,
-        scale=40,
-        maxPixels=1e9
-    )
+    # Replace bands in the image
+    img = image.addBands(optical_bands, None, True)
+    img = img.addBands(qa_bands, None, True)
+    img = img.addBands(qa_aerosol, None, True)
     
-    cloud_fraction = stats.get('QA_PIXEL')
-    roi_cc = ee.Algorithms.If(
-        cloud_fraction, 
-        ee.Number(cloud_fraction).multiply(100), 
-        100 
-    )
-    
-    return image.set('roi_cloud_cover', roi_cc)
+    return img
 
 print("Querying Google Earth Engine for Landsat 8/9 Collection 2 SR...")
 collection_l8 = ee.ImageCollection("LANDSAT/LC08/C02/T1_L2")
 collection_l9 = ee.ImageCollection("LANDSAT/LC09/C02/T1_L2")
 merged_collection = collection_l8.merge(collection_l9)
 
+# Fast metadata-based filtering (Coarse Filter)
 filtered_collection = merged_collection \
     .filterBounds(ROI) \
     .filterDate(START_DATE, END_DATE) \
-    .map(calculate_roi_cloud_cover) \
-    .filter(ee.Filter.lt('roi_cloud_cover', cloud_threshold)) \
-    .map(apply_scale_factors) \
+    .filter(ee.Filter.lt('CLOUD_COVER', cloud_threshold)) \
+    .map(prepare_export_types) \
     .select(BANDS) \
     .sort('system:time_start')
 
@@ -172,16 +232,16 @@ for feature in info['features']:
         'sun_elevation': props.get('SUN_ELEVATION'),
         'wrs_path': props.get('WRS_PATH'),
         'wrs_row': props.get('WRS_ROW'),
-        'cloud_cover': props.get('roi_cloud_cover', props.get('CLOUD_COVER'))
+        'cloud_cover': props.get('CLOUD_COVER')
     }
 
 # ==========================================
-# 4. DOWNLOAD & TRANSLATE TO HDF5
+# 5. DOWNLOAD & TRANSLATE TO HDF5
 # ==========================================
 if not os.path.exists(TEMP_DIR):
     os.makedirs(TEMP_DIR)
 
-print(f"Downloading GeoTIFFs (Forced to {TARGET_CRS} Euclidean Grid)...")
+print(f"Downloading GeoTIFFs (Buffered region for local reprojection)...")
 
 for feature in info['features']:
     img_id = feature['id']
@@ -195,24 +255,26 @@ for feature in info['features']:
     print(f"Downloading {short_name}...")
     try:
         image = ee.Image(img_id)
-        processed_image = apply_scale_factors(image).select(BANDS)
-        geemap.ee_export_image(processed_image, filename=out_tif, scale=30, region=ROI, crs=TARGET_CRS)
+        processed_image = prepare_export_types(image).select(BANDS)
+        
+        # Download loose, buffered tiles via standard scale, preventing server compute charges
+        geemap.ee_export_image(
+            processed_image, 
+            filename=out_tif, 
+            region=buffered_bounds_ee, 
+            scale=TARGET_RESOLUTION,
+            crs=TARGET_CRS_STR
+        )
     except Exception as e:
         print(f"Failed to download {short_name}: {e}")
 
-print(f"\nTranslating downloaded GeoTIFFs to HDF5: {OUTPUT_HDF5}")
+print(f"\nTranslating and Harmonizing downloaded GeoTIFFs to HDF5: {OUTPUT_HDF5}")
 
-# --- DOCTORAL LEVEL FIX: MANIFEST-DRIVEN FILE RESOLUTION ---
-# Anti-pattern: glob.glob() blindly reads orphaned files from previous runs (causing KeyErrors).
-# Best Practice: Use the GEE API response (gee_metadata) as the strict processing manifest.
-
+# Manifest-Driven File Resolution
 tif_files = []
 missing_files = 0
-
-# 1. Sort the API manifest keys chronologically using their Unix timestamps
 sorted_img_ids = sorted(gee_metadata.keys(), key=lambda k: gee_metadata[k]['acquisition_time'])
 
-# 2. Safely resolve only the files authorized by the current GEE query
 for img_id in sorted_img_ids:
     expected_path = os.path.join(TEMP_DIR, f"{img_id}.tif")
     if os.path.exists(expected_path) and os.path.getsize(expected_path) > 0:
@@ -229,18 +291,12 @@ print(f"Successfully resolved and chronologically sorted {len(tif_files)} files.
 if missing_files > 0:
     print(f"({missing_files} files failed to download properly).")
 
-# We can safely delete the old sorting function since we sorted the keys above
-with rasterio.open(tif_files[0]) as src:
-    height, width = src.height, src.width
-    num_bands = src.count
-    dst_crs_wkt = src.crs.to_wkt()
-    dst_transform = src.transform
-    bounds = src.bounds
-    ul_coords = (bounds.left, bounds.top)
-    lr_coords = (bounds.right, bounds.bottom)
-    utm_zone = int(TARGET_CRS.split(':')[-1]) - 32600 
+num_frames = len(tif_files)
+num_bands = len(BANDS)
 
-stacked_data = np.zeros((len(tif_files), num_bands, height, width), dtype=np.float32)
+# Master Data Arrays
+stacked_data = np.zeros((num_frames, num_bands, grid_height, grid_width), dtype=np.float32)
+vis_data = np.zeros((num_frames, 4, grid_height, grid_width), dtype=np.uint8)
 
 acq_times, spacecraft_ids, sun_azimuths = [], [], []
 sun_elevations, wrs_paths, wrs_rows, cloud_covers = [], [], [], []
@@ -265,11 +321,66 @@ for idx, tif_path in enumerate(tif_files):
     wrs_rows.append(meta['wrs_row'])
     cloud_covers.append(meta['cloud_cover'])
     
+    # --- Local Client-Side Reprojection ---
     with rasterio.open(tif_path) as src:
-        frame_data = src.read()
-        nodata_val = src.nodata
-        frame_data = np.where(frame_data == nodata_val, np.nan, frame_data)
-        stacked_data[idx] = frame_data
+        # Standard fill value for native raw Landsat SR is 0
+        nodata_val = src.nodata if src.nodata is not None else 0
+        
+        # Temporary arrays constrained to Master Grid
+        temp_sr_raw = np.zeros((7, grid_height, grid_width), dtype=np.uint16)
+        temp_sr_scaled = np.full((7, grid_height, grid_width), np.nan, dtype=np.float32)
+        temp_qa = np.zeros((3, grid_height, grid_width), dtype=np.float32)
+        
+        # 1. Reproject Continuous SR Bands (Cubic Spline on raw DNs to preserve gradients)
+        reproject(
+            source=rasterio.band(src, list(range(1, 8))), # Bands 1-7 in rasterio
+            destination=temp_sr_raw,
+            src_transform=src.transform,
+            src_crs=src.crs,
+            dst_transform=tf_target,
+            dst_crs=dst_crs,
+            resampling=Resampling.cubic_spline,
+            src_nodata=nodata_val,
+            dst_nodata=0
+        )
+        
+        # --- 1b. Local Radiometric Scaling ---
+        valid_sr_mask = (temp_sr_raw != 0)
+        if np.any(valid_sr_mask):
+            # Scale factor: value * 0.0000275 - 0.2
+            scaled_sr = (temp_sr_raw[valid_sr_mask].astype(np.float32) * 0.0000275) - 0.2
+            temp_sr_scaled[valid_sr_mask] = np.clip(scaled_sr, 0.0, 1.0)
+        
+        # 2. Reproject Categorical QA Bands (Nearest Neighbor to preserve binary bitmasks)
+        reproject(
+            source=rasterio.band(src, [8, 9, 10]),
+            destination=temp_qa,
+            src_transform=src.transform,
+            src_crs=src.crs,
+            dst_transform=tf_target,
+            dst_crs=dst_crs,
+            resampling=Resampling.nearest,
+            src_nodata=nodata_val,
+            dst_nodata=np.nan
+        )
+        
+        # Slot the perfectly aligned, scaled, edge-corrected data into the master stack
+        stacked_data[idx, 0:7, :, :] = temp_sr_scaled
+        stacked_data[idx, 7:10, :, :] = temp_qa
+
+# Slice the master stack into respective HDF5 dataset categories
+sr_data = stacked_data[:, 0:7, :, :] 
+qa_pixel_data = stacked_data[:, 7, :, :].astype(np.uint16)
+qa_radsat_data = stacked_data[:, 8, :, :].astype(np.uint16)
+qa_aerosol_data = stacked_data[:, 9, :, :].astype(np.uint8)
+
+print("Generating ortho_visual RGBA representations...")
+for t in range(len(tif_files)):
+    rgba_img = sc.generate_rgba_image(sr_data[t, ...])
+    vis_data[t, ...] = np.transpose(rgba_img, (2, 0, 1))
+
+# Ensure output directory exists before saving
+os.makedirs(os.path.dirname(OUTPUT_HDF5), exist_ok=True)
 
 with h5py.File(OUTPUT_HDF5, 'w') as h5f:
     
@@ -277,31 +388,34 @@ with h5py.File(OUTPUT_HDF5, 'w') as h5f:
     info_grp = h5f.create_group("HDFEOS INFORMATION")
     info_grp.attrs["HDFEOSVersion"] = "HDFEOS_5.1.16"
     
-    struct_meta = generate_struct_metadata("LANDSAT", width, height, ul_coords, lr_coords, utm_zone, 7, len(tif_files))
+    struct_meta = generate_struct_metadata("LANDSAT", grid_width, grid_height, ul_coords, lr_coords, utm_zone, num_bands, len(tif_files))
     dt = h5py.string_dtype(encoding='ascii')
     info_grp.create_dataset("StructMetadata.0", shape=(1,), dtype=dt, data=struct_meta)
 
     # --- DATA ARRAYS ---
     data_grp = h5f.create_group('/HDFEOS/GRIDS/LANDSAT/Data Fields')
     
-    sr_data = stacked_data[:, 0:7, :, :] 
-    qa_pixel_data = stacked_data[:, 7, :, :].astype(np.uint16)
-    qa_radsat_data = stacked_data[:, 8, :, :].astype(np.uint16)
-    qa_aerosol_data = stacked_data[:, 9, :, :].astype(np.uint8)
+    sr_ds = data_grp.create_dataset('surface_reflectance', data=sr_data, compression='gzip', compression_opts=6)
+    data_grp.create_dataset('QUALITY_L1_PIXEL', data=qa_pixel_data, compression='gzip', compression_opts=6)
+    data_grp.create_dataset('RADIOMETRIC_SATURATION', data=qa_radsat_data, compression='gzip', compression_opts=6)
+    data_grp.create_dataset('QUALITY_L2_AEROSOL', data=qa_aerosol_data, compression='gzip', compression_opts=6)
+    ds_ortho_visual = data_grp.create_dataset('ortho_visual', data=vis_data, dtype='uint8', compression='gzip', compression_opts=6)
     
-    sr_ds = data_grp.create_dataset('surface_reflectance', data=sr_data, compression='gzip', compression_opts=4)
-    data_grp.create_dataset('QUALITY_L1_PIXEL', data=qa_pixel_data, compression='gzip', compression_opts=4)
-    data_grp.create_dataset('RADIOMETRIC_SATURATION', data=qa_radsat_data, compression='gzip', compression_opts=4)
-    data_grp.create_dataset('QUALITY_L2_AEROSOL', data=qa_aerosol_data, compression='gzip', compression_opts=4)
-
     # --- PER-FRAME METADATA ATTRIBUTES ---
     sr_ds.attrs['units'] = "Reflectance"
     sr_ds.attrs['_FillValue'] = np.nan
     sr_ds.attrs['wavelengths'] = LANDSAT_WAVELENGTHS
-    sr_ds.attrs['spatial_ref'] = dst_crs_wkt
+    sr_ds.attrs['spatial_ref'] = dst_crs.to_wkt()
     
-    gdal_transform = [dst_transform.a, dst_transform.b, dst_transform.c, dst_transform.d, dst_transform.e, dst_transform.f]
+    # --- EXPLICIT GEOTRANSFORM ---
+    # Affine natively stores: a(Pixel Width), b(Skew X), c(Origin X), d(Skew Y), e(Pixel Height), f(Origin Y)
+    # GDAL standard requires: c(Origin X), a(Pixel Width), b(Skew X), f(Origin Y), d(Skew Y), e(Pixel Height)
+    gdal_transform = [tf_target.c, tf_target.a, tf_target.b, tf_target.f, tf_target.d, tf_target.e]
     sr_ds.attrs['GeoTransform'] = np.array(gdal_transform, dtype='float64')
+    
+    # Attach standardized spatial metadata to the visual layer as well for GIS compatibility
+    ds_ortho_visual.attrs['spatial_ref'] = dst_crs.to_wkt()
+    ds_ortho_visual.attrs['GeoTransform'] = np.array(gdal_transform, dtype='float64')
 
     sr_ds.attrs['acquisition_time'] = np.array(acq_times, dtype='float64') 
     sr_ds.attrs['spacecraft_id'] = spacecraft_ids 

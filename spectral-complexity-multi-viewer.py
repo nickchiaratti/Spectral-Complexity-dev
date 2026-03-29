@@ -22,7 +22,7 @@ LANDSAT_RGB_BANDS = (3, 2, 1)
 HULL_BANDS_LANDSAT = (6, 4, 2) 
 HULL_BANDS_TANAGER = (100, 50, 20) # Example hyperspectral indices
 
-TS_START_DATE = datetime(2025, 1, 1, tzinfo=timezone.utc)
+TS_START_DATE = datetime(2015, 1, 1, tzinfo=timezone.utc)
 TS_END_DATE = datetime(2025, 12, 31, tzinfo=timezone.utc)
 TWIN_Y_AXIS_DEFAULT = False
 
@@ -66,14 +66,6 @@ TS_LOCATIONS = [
     {'latlon': (43.141297, -77.506256), 'label': "Tait Parking Lot",                'color': 'tab:red'},
     {'latlon': (43.139411, -77.504005), 'label': "ROCX NITE Tarp",                  'color': 'tab:purple'},
 ]
-#TS_LOCATIONS = [ #Natural Locations Only
-#    {'latlon': (43.162234, -77.471623), 'label': "Rothfuss Park: Natural grass soccer fields",     'color': 'tab:green'},
-#    {'latlon': (43.165631, -77.472550), 'label': "Rothfuss Park: Artificial turf football field",  'color': 'tab:olive'},
-#    {'latlon': (43.172018, -77.456343), 'label': "Thousand Acre Swamp1",             'color': 'tab:blue'},
-#    {'latlon': (43.169826, -77.449300), 'label': "Thousand Acre Swamp2",             'color': 'tab:cyan'},
-#    {'latlon': (43.147630, -77.448109), 'label': "Penfield Country Club Golf Course1",                'color': 'tab:red'},
-#    {'latlon': (43.158111, -77.441822), 'label': "Penfield Country Club Golf Course2",                  'color': 'tab:purple'},
-#]
 
 DISPLAY_NORMALIZATION = False
 DISPLAY_REDUNDANT_FIGURE = True  # Toggle for the 2-subplot spatial/complexity redundant figure
@@ -99,25 +91,22 @@ class MultiComplexityViewer:
         self.use_twin_axis = TWIN_Y_AXIS_DEFAULT
         self.localization_mode = 'general'
         
-        # 1. Load and Parse both files
+        # 1. Load and Parse both files (Strict execution; no silent exceptions)
         for path in file_paths:
             h5 = h5py.File(path, 'r')
             source_name = list(h5['/HDFEOS/GRIDS'].keys())[0]
             data_grp = h5[f'HDFEOS/GRIDS/{source_name}/Data Fields']
             
             sr_dset = data_grp['surface_reflectance']
-            acq_times = sr_dset.attrs.get('acquisition_time')
-            sat_ids = sr_dset.attrs.get('spacecraft_id')
+            acq_times = sr_dset.attrs['acquisition_time']
+            sat_ids = sr_dset.attrs['spacecraft_id']
             
-            # Retrieve and Scale Wavelengths
-            raw_wl = sr_dset.attrs.get('wavelengths')
-            if raw_wl is not None:
-                if source_name == 'TANAGER':
-                    wavelengths = raw_wl[:] / 1000.0
-                else:
-                    wavelengths = raw_wl[:]
+            # Retrieve and Scale Wavelengths strictly
+            raw_wl = sr_dset.attrs['wavelengths']
+            if source_name == 'TANAGER':
+                wavelengths = raw_wl[:] / 1000.0
             else:
-                wavelengths = np.arange(sr_dset.shape[1])
+                wavelengths = raw_wl[:]
             
             num_frames = sr_dset.shape[0]
             
@@ -151,35 +140,24 @@ class MultiComplexityViewer:
         if len(self.files) > 0:
             sample_file = self.files[0]
             sr_attrs = sample_file['data_grp']['surface_reflectance'].attrs
-            geo_transform = sr_attrs.get('GeoTransform')
-            spatial_ref = sr_attrs.get('spatial_ref')
+            geo_transform = sr_attrs['GeoTransform']
+            spatial_ref = sr_attrs['spatial_ref']
             
-            if geo_transform is not None and spatial_ref is not None:
-                try:
-                    if isinstance(spatial_ref, bytes):
-                        spatial_ref = spatial_ref.decode('utf-8')
-                    crs = CRS.from_wkt(spatial_ref)
-                    transformer = Transformer.from_crs("EPSG:4326", crs, always_xy=True)
-                    
-                    # rasterio.transform.Affine maps linear transformations directly 
-                    affine = rasterio.transform.Affine(*geo_transform)
-                    inv_affine = ~affine
-                    
-                    print("\n--- Coordinate Mapping ---")
-                    for loc in TS_LOCATIONS:
-                        lat, lon = loc['latlon']
-                        proj_x, proj_y = transformer.transform(lon, lat)
-                        px, py = inv_affine * (proj_x, proj_y)
-                        loc['yx'] = (int(round(py)), int(round(px)))
-                        print(f"Mapped [{loc['label']}] Lat/Lon ({lat:.4f}, {lon:.4f}) -> Pixel (y={loc['yx'][0]}, x={loc['yx'][1]})")
-                except Exception as e:
-                    print(f"Error projecting coordinates: {e}")
-                    for loc in TS_LOCATIONS:
-                        loc['yx'] = (0, 0)
-            else:
-                print("Warning: GeoTransform or spatial_ref missing from metadata. Defaulting to (0,0).")
-                for loc in TS_LOCATIONS:
-                    loc['yx'] = (0, 0)
+            if isinstance(spatial_ref, bytes):
+                spatial_ref = spatial_ref.decode('utf-8')
+            crs = CRS.from_wkt(spatial_ref)
+            transformer = Transformer.from_crs("EPSG:4326", crs, always_xy=True)
+            
+            affine = rasterio.transform.Affine(*geo_transform)
+            inv_affine = ~affine
+            
+            print("\n--- Coordinate Mapping ---")
+            for loc in TS_LOCATIONS:
+                lat, lon = loc['latlon']
+                proj_x, proj_y = transformer.transform(lon, lat)
+                px, py = inv_affine * (proj_x, proj_y)
+                loc['yx'] = (int(round(py)), int(round(px)))
+                print(f"Mapped [{loc['label']}] Lat/Lon ({lat:.4f}, {lon:.4f}) -> Pixel (y={loc['yx'][0]}, x={loc['yx'][1]})")
 
         # 3. Interleave frames by acquisition time
         self.all_frames.sort(key=lambda x: x['timestamp'])
@@ -227,35 +205,31 @@ class MultiComplexityViewer:
             file_info = self.files[frame['file_idx']]
             dgrp = file_info['data_grp']
 
-            try:
-                dset = dgrp[complexity_type]
-                src = frame['source']
-                key = 'LANDSAT' if 'LANDSAT' in src.upper() else 'TANAGER'
-                dt = datetime.fromtimestamp(frame['timestamp'], tz=timezone.utc)
-                f_idx = frame['frame_idx']
-                
-                # Retrieve the full 2D spatial mask exactly as the image views do
-                shape = dset[f_idx].shape
-                if key == 'LANDSAT':
-                    mask = self._get_landsat_mask(dgrp, f_idx, shape)
-                else:
-                    mask = self._get_tanager_mask(dgrp, f_idx, shape)
-                
-                # Check specific subset locations against the generated mask
-                for loc in TS_LOCATIONS:
-                    y, x = loc['yx']
-                    # Verify array bounds
-                    if 0 <= y < dset.shape[1] and 0 <= x < dset.shape[2]:
-                        # Only accept if the spatial mask permits this pixel
-                        if mask[y, x]:
-                            val = dset[f_idx, y, x]
-                            if not np.isnan(val):
-                                self.ts_data[key][loc['label']]['t'].append(dt)
-                                self.ts_data[key][loc['label']]['v'].append(val)
+            dset = dgrp[complexity_type]
+            src = frame['source']
+            key = 'LANDSAT' if 'LANDSAT' in src.upper() else 'TANAGER'
+            dt = datetime.fromtimestamp(frame['timestamp'], tz=timezone.utc)
+            f_idx = frame['frame_idx']
+            
+            # Retrieve the full 2D spatial mask exactly as the image views do
+            shape = dset[f_idx].shape
+            if key == 'LANDSAT':
+                mask = self._get_landsat_mask(dgrp, f_idx, shape)
+            else:
+                mask = self._get_tanager_mask(dgrp, f_idx, shape)
+            
+            # Check specific subset locations against the generated mask
+            for loc in TS_LOCATIONS:
+                y, x = loc['yx']
+                # Verify array bounds
+                if 0 <= y < dset.shape[1] and 0 <= x < dset.shape[2]:
+                    # Only accept if the spatial mask permits this pixel
+                    if mask[y, x]:
+                        val = dset[f_idx, y, x]
+                        if not np.isnan(val):
+                            self.ts_data[key][loc['label']]['t'].append(dt)
+                            self.ts_data[key][loc['label']]['v'].append(val)
 
-            except Exception as e:
-                print(f"TS Extraction Error frame {frame['frame_idx']}: {e}")
-                
         print("Time series processing complete.")
 
     def _init_control_ui(self):
@@ -407,13 +381,12 @@ class MultiComplexityViewer:
             return valid_mask
         
         # Sun Elevation Check
-        sun_elev_arr = data_grp['surface_reflectance'].attrs.get('sun_elevation')
-        if sun_elev_arr is not None and f_idx < len(sun_elev_arr):
-            if sun_elev_arr[f_idx] < self.sun_elev_thresh:
-                return np.zeros(shape, dtype=bool)
+        sun_elev_arr = data_grp['surface_reflectance'].attrs['sun_elevation']
+        if sun_elev_arr[f_idx] < self.sun_elev_thresh:
+            return np.zeros(shape, dtype=bool)
 
         # QA Reject Mask
-        if self.mask_qa_enabled and 'QUALITY_L1_PIXEL' in data_grp:
+        if self.mask_qa_enabled:
             qa_pixel = data_grp['QUALITY_L1_PIXEL'][f_idx, ...]
             # True represents BAD pixels (Clouds/Shadows)
             bad_qa_mask = (qa_pixel & QA_REJECT_MASK) != 0
@@ -424,20 +397,19 @@ class MultiComplexityViewer:
             valid_mask &= ~bad_qa_mask
 
         # RADSAT Accept Value
-        if self.mask_radsat_enabled and 'RADIOMETRIC_SATURATION' in data_grp:
+        if self.mask_radsat_enabled:
             bad_radsat = data_grp['RADIOMETRIC_SATURATION'][f_idx, ...] != RADSAT_ACCEPT_VALUE
             kernel = np.ones((3, 3), dtype=bool)
             bad_radsat = ndimage.binary_dilation(bad_radsat, structure=kernel, iterations=1)
             valid_mask &= ~bad_radsat
 
         # Aerosol Accept Values
-        if 'QUALITY_L2_AEROSOL' in data_grp:
-            if self.aerosol_level != 'all':
-                aerosol = data_grp['QUALITY_L2_AEROSOL'][f_idx, ...]
-                invalid_aerosol = ~np.isin(aerosol, AEROSOL_DICT[self.aerosol_level])
-                kernel = np.ones((3, 3), dtype=bool)
-                invalid_aerosol = ndimage.binary_dilation(invalid_aerosol, structure=kernel, iterations=1)
-                valid_mask &= ~invalid_aerosol
+        if self.aerosol_level != 'all':
+            aerosol = data_grp['QUALITY_L2_AEROSOL'][f_idx, ...]
+            invalid_aerosol = ~np.isin(aerosol, AEROSOL_DICT[self.aerosol_level])
+            kernel = np.ones((3, 3), dtype=bool)
+            invalid_aerosol = ndimage.binary_dilation(invalid_aerosol, structure=kernel, iterations=1)
+            valid_mask &= ~invalid_aerosol
 
         return valid_mask
 
@@ -449,46 +421,39 @@ class MultiComplexityViewer:
             return valid_mask
 
         # Cloud Mask Check
-        if 'beta_cloud_mask' in data_grp:
-            cloud_mask = (data_grp['beta_cloud_mask'][f_idx, ...]==1)
-            cirrus_mask = (data_grp['beta_cirrus_mask'][f_idx, ...]==1)
-            combined_cloud = cloud_mask | cirrus_mask
-            if self.cloud_dilation > 0:
-                kernel = np.ones((3, 3), dtype=bool)
-                combined_cloud = ndimage.binary_dilation(combined_cloud, structure=kernel, iterations=self.cloud_dilation)
-            valid_mask &= ~combined_cloud
+        cloud_mask = (data_grp['beta_cloud_mask'][f_idx, ...]==1)
+        cirrus_mask = (data_grp['beta_cirrus_mask'][f_idx, ...]==1)
+        combined_cloud = cloud_mask | cirrus_mask
+        if self.cloud_dilation > 0:
+            kernel = np.ones((3, 3), dtype=bool)
+            combined_cloud = ndimage.binary_dilation(combined_cloud, structure=kernel, iterations=self.cloud_dilation)
+        valid_mask &= ~combined_cloud
         
         # Sun Elevation Check (Derived from Sun Zenith)
-        if 'sun_zenith' in data_grp:
-            zenith = data_grp['sun_zenith'][f_idx, ...]
-            # Filter out fill value (-9999.0) and enforce elevation threshold
-            valid_mask &= (zenith != -9999.0) & ((90.0 - zenith) >= self.sun_elev_thresh)
+        zenith = data_grp['sun_zenith'][f_idx, ...]
+        # Filter out fill value (-9999.0) and enforce elevation threshold
+        valid_mask &= (zenith != -9999.0) & ((90.0 - zenith) >= self.sun_elev_thresh)
             
         # Aerosol Optical Depth Check
-        if 'aerosol_optical_depth' in data_grp:
-            aod = data_grp['aerosol_optical_depth'][f_idx, ...]
-            # Filter out fill value (-9999.0) and enforce AOD threshold
-            bad_aod_mask = (aod == -9999.0) | (aod <= self.t_aerosol_thresh)
-            if self.t_aerosol_thresh > 0:
-                kernel = np.ones((3, 3), dtype=bool)
-                bad_aod_mask = ndimage.binary_dilation(bad_aod_mask, structure=kernel, iterations=1)
-            valid_mask &= ~bad_aod_mask
+        aod = data_grp['aerosol_optical_depth'][f_idx, ...]
+        # Filter out fill value (-9999.0) and enforce AOD threshold
+        bad_aod_mask = (aod == -9999.0) | (aod <= self.t_aerosol_thresh)
+        if self.t_aerosol_thresh > 0:
+            kernel = np.ones((3, 3), dtype=bool)
+            bad_aod_mask = ndimage.binary_dilation(bad_aod_mask, structure=kernel, iterations=1)
+        valid_mask &= ~bad_aod_mask
             
         # Surface Reflectance Uncertainty Check
-        if 'surface_reflectance_uncertainty' in data_grp:
-            gw_mask = data_grp['surface_reflectance'].attrs.get('all_good_wavelengths')
-            if gw_mask is not None:
-                valid_bands = gw_mask[f_idx].astype(bool)
-                unc = np.nanmax(data_grp['surface_reflectance_uncertainty'][f_idx, valid_bands, ...], axis=0)
-            else:
-                unc = np.nanmax(data_grp['surface_reflectance_uncertainty'][f_idx, ...], axis=0)
-                
-            # Filter out fill value (-9999.0) and enforce uncertainty threshold
-            unc_mask = (unc == -9999.0) | (unc >= self.t_uncertainty_thresh)
-            if self.t_uncertainty_thresh > 0:
-                kernel = np.ones((3, 3), dtype=bool)
-                unc_mask = ndimage.binary_dilation(unc_mask, structure=kernel, iterations=1)
-            valid_mask &= ~unc_mask
+        gw_mask = data_grp['surface_reflectance'].attrs['all_good_wavelengths']
+        valid_bands = gw_mask[f_idx].astype(bool)
+        unc = np.nanmax(data_grp['surface_reflectance_uncertainty'][f_idx, valid_bands, ...], axis=0)
+            
+        # Filter out fill value (-9999.0) and enforce uncertainty threshold
+        unc_mask = (unc == -9999.0) | (unc >= self.t_uncertainty_thresh)
+        if self.t_uncertainty_thresh > 0:
+            kernel = np.ones((3, 3), dtype=bool)
+            unc_mask = ndimage.binary_dilation(unc_mask, structure=kernel, iterations=1)
+        valid_mask &= ~unc_mask
             
         return valid_mask
 
@@ -519,18 +484,28 @@ class MultiComplexityViewer:
             
         self.combined_hud.set_text(meta_str.replace('\n', ' | ') + '\n' + filter_str)
 
-        # --- RGB Generation ---
         sr_data = data_grp['surface_reflectance'][f_idx, ...]
-        if frame_info['source'] == 'LANDSAT':
-            r = percentile_normalize_array(sr_data[LANDSAT_RGB_BANDS[0]])
-            g = percentile_normalize_array(sr_data[LANDSAT_RGB_BANDS[1]])
-            b = percentile_normalize_array(sr_data[LANDSAT_RGB_BANDS[2]])
-            rgb = np.nan_to_num(np.stack([r, g, b], axis=-1), nan=0.0)
-            hull_bands = HULL_BANDS_LANDSAT
-        else: # TANAGER
-            vis = data_grp['ortho_visual'][f_idx, ...]
-            rgb = np.transpose(vis[:3, ...], (1, 2, 0)) # Drop alpha
-            hull_bands = HULL_BANDS_TANAGER
+
+        # Strict execution block requires an ARD compliant visual array
+        raw_vis = data_grp['ortho_visual'][f_idx, ...]
+        
+        # 1. Transform Band Sequential (BSQ) to Band Interleaved by Pixel (BIP)
+        if raw_vis.shape[0] in [3, 4]:
+            raw_vis = np.transpose(raw_vis, (1, 2, 0))
+            
+        # 2. Standardize array to float32 for Matplotlib RGBA rendering [0.0, 1.0]
+        if raw_vis.dtype == np.uint8:
+            rgba = raw_vis.astype(np.float32) / 255.0
+        else:
+            rgba = raw_vis.astype(np.float32)
+            
+        # any non-zero source alpha (>0) is valid/opaque (1.0).
+        # Zeros are background fill and remain fully transparent (0.0).
+        # This allows standard Matplotlib white backgrounds to display clearly through the data voids.
+        rgba[..., 3] = np.where(rgba[..., 3] > 0, 1.0, 0.0)
+        rgb = rgba
+
+        hull_bands = HULL_BANDS_LANDSAT if frame_info['source'] == 'LANDSAT' else HULL_BANDS_TANAGER
 
         # --- Row 1: Spatial & Spectral Analysis ---
         self.ax_spatial.clear()
@@ -547,7 +522,7 @@ class MultiComplexityViewer:
             self.ax_spatial.plot(x, y, marker='s', markersize=10, markeredgecolor=loc['color'], 
                                  markerfacecolor='none', markeredgewidth=1.5, linestyle='None')
 
-        self.ax_spatial.set_title(f"EM Locations ({frame_info['source']})")
+        self.ax_spatial.set_title(f"EM Locations ({frame_info['source']})", color='black')
         self.ax_spatial.axis('off')
 
         if DISPLAY_REDUNDANT_FIGURE:
@@ -1154,23 +1129,18 @@ class MultiComplexityViewer:
         file_info = self.files[info['file_idx']]
         data_grp = file_info['data_grp']
         
-        # Determine output directory based on attributes or default
-        save_path = self.save_dir
-        if 'frame_endmember_volumes' in data_grp:
-            try:
-                vol_dset = data_grp['frame_endmember_volumes']
-                num_em = vol_dset.attrs.get('num_endmembers', 'X')
-                gram = vol_dset.attrs.get('gram_type', 'X')
-                norm = vol_dset.attrs.get('Normalization', 'None')
-                # Handle possible byte strings or None
-                if hasattr(norm, 'decode'): norm = norm.decode('utf-8')
-                if norm is None: norm = "None"
-                
-                new_dir = f"{SAVE_DIR}_EM-{num_em}_Gram-{gram}_Norm-{norm}/"
-                os.makedirs(new_dir, exist_ok=True)
-                save_path = new_dir
-            except Exception as e:
-                print(f"Error constructing dynamic path, using default: {e}")
+        # Determine output directory strictly from parameters (Fail fast if missing)
+        vol_dset = data_grp['frame_endmember_volumes']
+        num_em = vol_dset.attrs.get('num_endmembers', 'X')
+        gram = vol_dset.attrs.get('gram_type', 'X')
+        norm = vol_dset.attrs.get('Normalization', 'None')
+        # Handle possible byte strings or None
+        if hasattr(norm, 'decode'): norm = norm.decode('utf-8')
+        if norm is None: norm = "None"
+        
+        new_dir = f"{SAVE_DIR}_EM-{num_em}_Gram-{gram}_Norm-{norm}/"
+        os.makedirs(new_dir, exist_ok=True)
+        save_path = new_dir
 
         time_str = datetime.fromtimestamp(info['timestamp'], tz=timezone.utc).strftime('%Y%m%d_%H%M%S')
         prefix = f"{time_str}_{info['source']}_{self.current_idx:02d}"

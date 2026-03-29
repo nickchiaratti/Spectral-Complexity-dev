@@ -11,7 +11,44 @@ import SpecComplex as sc
 Z_SCORE_WINDOW_SIZE = 7
 SLIDING_STRIDE = 1
 
-def process_file(filepath):
+def process_file_rgb(filepath):
+    print(f"Opening HDF5 File: {filepath}")
+    
+    with h5py.File(filepath, 'r+') as h5:
+        # Dynamically determine the grid name (LANDSAT or TANAGER)
+        grid_name = list(h5['/HDFEOS/GRIDS'].keys())[0]
+        base_fields_path = f"/HDFEOS/GRIDS/{grid_name}/Data Fields"
+        
+        target_ds_name = "surface_reflectance"
+        if target_ds_name not in h5[base_fields_path]:
+            print(f"Error: Dataset '{target_ds_name}' not found in file.")
+            return
+        
+        ds_surface_reflectance = h5[f"{base_fields_path}/{target_ds_name}"]
+        num_frames, bands, height, width = ds_surface_reflectance.shape
+
+        # Create or overwrite the RGB dataset
+        out_ds_name = "ortho_visual"
+        if out_ds_name in h5[base_fields_path]:
+            print(f"Overwriting existing dataset: {out_ds_name}")
+            del h5[f"{base_fields_path}/{out_ds_name}"]
+            
+        ds_ortho_visual = h5[base_fields_path].create_dataset(out_ds_name,shape=(num_frames, 4, height, width),dtype='uint8',compression="gzip")
+        
+        print(f"Generating RGB frames...")
+        for t in range(num_frames):
+            frame_sr = ds_surface_reflectance[t, ...]
+            rgba_img = sc.generate_rgba_image(frame_sr)
+            ds_ortho_visual[t, ...] = np.transpose(rgba_img, (2, 0, 1))
+            print(f"  Frame {t+1}/{num_frames} processed.")
+            
+        ds_ortho_visual.attrs['description'] = "RGBalpha frame of the surface reflectance (B4, B3, B2, Alpha)"
+
+
+    print("\nRGB frame generation complete and saved to file.")
+
+
+def process_file_z_score(filepath):
     print(f"Opening HDF5 File: {filepath}")
     
     with h5py.File(filepath, 'r+') as h5:
@@ -82,7 +119,7 @@ if __name__ == "__main__":
     )
     
     if file_path:
-        process_file(file_path)
+        process_file_rgb(file_path)
     else:
         print("No file selected.")
     
