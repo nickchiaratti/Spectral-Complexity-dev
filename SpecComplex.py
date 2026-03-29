@@ -1,6 +1,7 @@
 import numpy as np
 import math
 import warnings
+from skimage import exposure
 
 
 def maximumDistance(data, num_endmembers):
@@ -118,6 +119,71 @@ def calcGramLocalVolumes(endmembers, localization_vector):
         volumes[i-1] = np.sqrt(det)
         
     return volumes
+
+def generate_rgba_image(frame_sr, red_idx=3, green_idx=2, blue_idx=1, low=2, high=98, gamma=1.2):
+    """
+    Extracts, stretches, and gamma-corrects the RGB bands from a surface 
+    reflectance frame to create a true color image with an alpha channel.
+    
+    The alpha channel follows standard RGBA opacity conventions:
+    255 (Opaque) where pixels are valid, and 0 (Transparent) where 
+    pixels are invalid (all 0s or containing NaNs).
+    
+    Returns:
+        rgba_8bit (np.ndarray): Shape (height, width, 4), dtype uint8.
+    """
+    bands, height, width = frame_sr.shape
+
+    # Handle case where the entire frame is NaN
+    if np.all(np.isnan(frame_sr)): 
+        return np.zeros((height, width, 4), dtype=np.uint8)
+
+    # 1. Determine Invalid Pixel Mask
+    all_zeros_mask = np.all(frame_sr == 0, axis=0)
+    has_nan_mask = np.any(np.isnan(frame_sr), axis=0)
+    invalid_pixel_mask = all_zeros_mask | has_nan_mask
+    valid_mask = ~invalid_pixel_mask
+
+    # 2. Extract, Stretch, and Gamma Correct RGB bands
+    rgb_indices = [red_idx, green_idx, blue_idx]
+    rgb = np.zeros((height, width, 3), dtype=np.float32)
+
+    for i, idx in enumerate(rgb_indices):
+        band_data = frame_sr[idx, :, :]
+        
+        # Calculate percentiles ONLY on valid pixels to bypass slow NaN handling
+        valid_pixels = band_data[valid_mask]
+        
+        if valid_pixels.size == 0:
+            continue # Leave as 0 if band is entirely empty
+            
+        p_low, p_high = np.percentile(valid_pixels, (low, high))
+        
+        if p_low < p_high: 
+            # Manual linear stretch (highly optimized)
+            stretched = np.clip((band_data - p_low) / (p_high - p_low), 0.0, 1.0)
+            
+            # Non-linear Gamma Correction to improve mid-tone visibility
+            if gamma != 1.0:
+                # Prevent power warnings on 0 values
+                with np.errstate(invalid='ignore', divide='ignore'):
+                    stretched = np.power(stretched, 1.0 / gamma)
+                    # Clean up any potential inf/nan from power operation
+                    stretched = np.nan_to_num(stretched, nan=0.0, posinf=1.0, neginf=0.0)
+            
+            rgb[:, :, i] = stretched
+
+    # Scale to 8-bit for highly efficient HDF5 storage
+    rgb_8bit = (rgb * 255).astype(np.uint8)
+    
+    # 3. Construct the Alpha Channel
+    alpha = np.full((height, width), 255, dtype=np.uint8)
+    alpha[invalid_pixel_mask] = 0
+    
+    # 4. Stack alpha onto RGB to create RGBA
+    rgba_8bit = np.dstack((rgb_8bit, alpha))
+    
+    return rgba_8bit
 
 
 def process_volume_frame(frame_data, num_endmembers, gram_type, norm_type):

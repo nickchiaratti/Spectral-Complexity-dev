@@ -1,8 +1,3 @@
-'''
-todo: implement LANDSAT radsat exclusion
-
-'''
-
 import shutil
 import h5py
 import numpy as np
@@ -44,10 +39,11 @@ def process_file(filepath, norm_param='bandCount', gram_type='minEndmember'):
     print(f"\nCalculation Complete. Saved to: {out_path}")
 
 # Helper to manage output datasets
-def overwrite_dset(h5, base_fields_path, name, shape, dtype='float32'):
+# Updated to accept **kwargs to allow for fillvalue=0
+def overwrite_dset(h5, base_fields_path, name, shape, dtype='float32', **kwargs):
     path = f"{base_fields_path}/{name}"
     if name in h5[base_fields_path]: del h5[path]
-    return h5[base_fields_path].create_dataset(name, shape=shape, dtype=dtype, compression="gzip")
+    return h5[base_fields_path].create_dataset(name, shape=shape, dtype=dtype, compression="gzip", **kwargs)
 
 def process_image_stack(h5, sourceName, norm_param, gram_type):
 
@@ -71,6 +67,7 @@ def process_image_stack(h5, sourceName, norm_param, gram_type):
         
 
     # Initialize Results
+    ds_ortho = overwrite_dset(h5, base_fields_path, 'ortho_visual', (num_frames, 4, height, width), dtype='uint8', fillvalue=0)
     ds_endmembers = overwrite_dset(h5, base_fields_path, 'frame_endmembers', (num_frames, num_bands, num_endmembers))
     ds_endmember_indices = overwrite_dset(h5, base_fields_path, 'frame_endmember_indices', (num_frames, num_endmembers), dtype='int32')
     ds_vol_curve = overwrite_dset(h5, base_fields_path, 'frame_endmember_volumes', (num_frames, num_endmembers))
@@ -96,6 +93,10 @@ def process_image_stack(h5, sourceName, norm_param, gram_type):
             em_full[gw_mask[t]==1, :] = endmembers
             ds_endmembers[t, ...] = em_full
         else:
+            # Generate RGBA image of shape (Height, Width, 4)
+            rgba_img = sc.generate_rgba_image(frame_sr)
+            # Transpose to (4, Height, Width) to match Tanager ortho_visual specifications
+            ds_ortho[t, ...] = np.transpose(rgba_img, (2, 0, 1))
             ds_endmembers[t, ...] = endmembers
 
         ds_endmember_indices[t, ...] = endmember_idx
@@ -115,6 +116,12 @@ def process_image_stack(h5, sourceName, norm_param, gram_type):
     ds_endmember_indices.attrs['description'] = "Endmember indices for each pixel"
     ds_endmembers.attrs['description'] = "Endmembers for each pixel"
     ds_endmembers.attrs['num_endmembers'] = num_endmembers
+    
+    # Map spatial metadata explicitly to ortho_visual
+    ds_ortho.attrs['description'] = "True color (RGBA) composite matching Tanager format."
+    for key in ['spatial_ref', 'GeoTransform', 'Projection']:
+        if key in ds_surfRef.attrs:
+            ds_ortho.attrs[key] = ds_surfRef.attrs[key]
 
     if norm_param:
         ds_endmembers.attrs['Normalization'] = norm_param
