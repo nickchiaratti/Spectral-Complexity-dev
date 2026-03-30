@@ -10,6 +10,8 @@ import shutil
 from rasterio.transform import from_bounds
 from rasterio.warp import reproject, Resampling
 from pyproj import Transformer, CRS
+from skimage.registration import phase_cross_correlation
+from scipy.ndimage import shift as scipy_shift
 import SpecComplex as sc
 
 # ==========================================
@@ -41,8 +43,6 @@ elif Location == "Tait":
     START_DATE = '2015-01-01'
     END_DATE = '2025-12-31' 
 
-OUTPUT_HDF5 = f"C:/satelliteImagery/LANDSAT/{Location}/LANDSAT_Stack_{Location}_GEE_2015_2025.h5"
-
 if SOURCE_CACHE:
     TEMP_DIR = f"C:/satelliteImagery/LANDSAT/SourceData/{SOURCE_CACHE}_TEMP_GEE_DOWNLOAD"
 else:
@@ -53,6 +53,25 @@ ROI = ee.Geometry.Rectangle([ROI_LON_MIN, ROI_LAT_MIN, ROI_LON_MAX, ROI_LAT_MAX]
 
 # Target Resolution (Matches Tanager)
 TARGET_RESOLUTION = 30.0
+
+# --- Artifact Correction & Alignment ---
+# Enforce a single orbital path to prevent 1-pixel stereoscopic parallax shifting.
+TARGET_WRS_PATH = None#16  # Set to None to include all paths
+
+# Attempt sub-pixel phase correlation registration against a Master Anchor.
+AUTO_CO_REGISTER = True 
+# Strict failure threshold: If calculated shift exceeds this many pixels, the script will crash.
+MAX_ALLOWED_SHIFT = 1.0 
+
+suffix = ""
+
+if TARGET_WRS_PATH is not None:
+    suffix += f"_WRS{TARGET_WRS_PATH}"
+
+if AUTO_CO_REGISTER:
+    suffix += "_CoReg"
+
+OUTPUT_HDF5 = f"C:/satelliteImagery/LANDSAT/{Location}/LANDSAT_Stack_{Location}_GEE_2015_2025{suffix}.h5"
 
 # Landsat 8/9 SR Bands to extract, plus all required QA bands
 BANDS = ['SR_B1', 'SR_B2', 'SR_B3', 'SR_B4', 'SR_B5', 'SR_B6', 'SR_B7', 'QA_PIXEL', 'QA_RADSAT', 'SR_QA_AEROSOL']
@@ -209,8 +228,14 @@ merged_collection = collection_l8.merge(collection_l9)
 filtered_collection = merged_collection \
     .filterBounds(ROI) \
     .filterDate(START_DATE, END_DATE) \
-    .filter(ee.Filter.lt('CLOUD_COVER', cloud_threshold)) \
-    .map(prepare_export_types) \
+    .filter(ee.Filter.lt('CLOUD_COVER', cloud_threshold))
+
+# Apply Orbital Path Filter to resolve stereoscopic parallax misregistration
+if TARGET_WRS_PATH is not None:
+    print(f"Applying strict orbital filter: WRS_PATH == {TARGET_WRS_PATH}")
+    filtered_collection = filtered_collection.filter(ee.Filter.eq('WRS_PATH', TARGET_WRS_PATH))
+
+filtered_collection = filtered_collection.map(prepare_export_types) \
     .select(BANDS) \
     .sort('system:time_start')
 
@@ -284,8 +309,8 @@ for img_id in sorted_img_ids:
         print(f"WARNING: Expected file {expected_path} is missing or corrupted.")
 
 if len(tif_files) == 0:
-    print("Error: No valid files found matching the current GEE query.")
-    exit()
+    # Fail fast if data ingestion is broken
+    raise RuntimeError("CRITICAL ERROR: No valid files found matching the current GEE query.")
 
 print(f"Successfully resolved and chronologically sorted {len(tif_files)} files.")
 if missing_files > 0:
@@ -299,7 +324,12 @@ stacked_data = np.zeros((num_frames, num_bands, grid_height, grid_width), dtype=
 vis_data = np.zeros((num_frames, 4, grid_height, grid_width), dtype=np.uint8)
 
 acq_times, spacecraft_ids, sun_azimuths = [], [], []
-sun_elevations, wrs_paths, wrs_rows, cloud_covers = [], [], [], []
+sun_elevations, wrs_paths, wrs_rows, cloud_covers = [], [], [] , []
+
+# Variables for Image Co-Registration
+anchor_nir = None
+anchor_mask = None
+valid_frame_idx = 0
 
 for idx, tif_path in enumerate(tif_files):
     filename = os.path.basename(tif_path).replace('.tif', '')
@@ -313,14 +343,6 @@ for idx, tif_path in enumerate(tif_files):
         if value is None:
              raise ValueError(f"CRITICAL ERROR: Metadata attribute '{key}' for '{filename}' is missing/null from GEE. Halting pipeline.")
 
-    acq_times.append(meta['acquisition_time'])
-    spacecraft_ids.append(meta['spacecraft_id'])
-    sun_azimuths.append(meta['sun_azimuth'])
-    sun_elevations.append(meta['sun_elevation'])
-    wrs_paths.append(meta['wrs_path'])
-    wrs_rows.append(meta['wrs_row'])
-    cloud_covers.append(meta['cloud_cover'])
-    
     # --- Local Client-Side Reprojection ---
     with rasterio.open(tif_path) as src:
         # Standard fill value for native raw Landsat SR is 0
@@ -364,18 +386,71 @@ for idx, tif_path in enumerate(tif_files):
             dst_nodata=np.nan
         )
         
+        # --- 1c. Optional Phase Correlation Co-Registration ---
+        if AUTO_CO_REGISTER:
+            # Reconstruct the valid data mask (Reject clouds, shadow, snow, fill)
+            # QA_REJECT_MASK = 0b111111 (Bits 0-5)
+            qa_pixel_int = temp_qa[0].astype(np.uint16)
+            structural_valid_mask = (qa_pixel_int & 0b111111) == 0
+            
+            # Utilize Band 5 (NIR) for structural registration as it cuts through atmospheric haze best
+            current_nir = temp_sr_scaled[4, :, :]
+            
+            if anchor_nir is None:
+                # Require the anchor to be at least 90% structurally clear
+                if np.sum(structural_valid_mask) / structural_valid_mask.size >= 0.90:
+                    anchor_nir = current_nir.copy()
+                    anchor_mask = structural_valid_mask.copy()
+                    print(f"  -> Frame {filename} initialized as Phase Correlation Master Anchor.")
+            else:
+                # Only attempt registration if the moving image has enough clear data to match features (>15%)
+                if np.sum(structural_valid_mask) / structural_valid_mask.size >= 0.15:
+                    shift, error, diffphase = phase_cross_correlation(
+                        anchor_nir, current_nir, 
+                        reference_mask=anchor_mask, moving_mask=structural_valid_mask
+                    )
+                    
+                    # Strict Failure Handling: Prevent bad warps from polluting the dataset
+                    if abs(shift[0]) > MAX_ALLOWED_SHIFT or abs(shift[1]) > MAX_ALLOWED_SHIFT:
+                        print(f"WARNING: Calculated phase shift (dy={shift[0]:.2f}, dx={shift[1]:.2f}) for {filename} exceeds MAX_ALLOWED_SHIFT. Excluding frame from stack.")
+                        continue # Skip this frame entirely
+                    
+                    if shift[0] != 0.0 or shift[1] != 0.0:
+                        # Apply Cubic Spline shift to continuous variables
+                        for b in range(7):
+                            temp_sr_scaled[b] = scipy_shift(temp_sr_scaled[b], shift, cval=np.nan, order=3)
+                        # Apply Nearest Neighbor shift to categorical variables (QA bands)
+                        for b in range(3):
+                            temp_qa[b] = scipy_shift(temp_qa[b], shift, cval=1 if b==0 else 0, order=0)
+
+        # If the frame passes co-registration (or if it's skipped), append metadata and slot the data
+        acq_times.append(meta['acquisition_time'])
+        spacecraft_ids.append(meta['spacecraft_id'])
+        sun_azimuths.append(meta['sun_azimuth'])
+        sun_elevations.append(meta['sun_elevation'])
+        wrs_paths.append(meta['wrs_path'])
+        wrs_rows.append(meta['wrs_row'])
+        cloud_covers.append(meta['cloud_cover'])
+
         # Slot the perfectly aligned, scaled, edge-corrected data into the master stack
-        stacked_data[idx, 0:7, :, :] = temp_sr_scaled
-        stacked_data[idx, 7:10, :, :] = temp_qa
+        stacked_data[valid_frame_idx, 0:7, :, :] = temp_sr_scaled
+        stacked_data[valid_frame_idx, 7:10, :, :] = temp_qa
+        valid_frame_idx += 1
+
+# Trim the master arrays to remove any excluded frames
+stacked_data = stacked_data[:valid_frame_idx]
+vis_data = vis_data[:valid_frame_idx]
 
 # Slice the master stack into respective HDF5 dataset categories
 sr_data = stacked_data[:, 0:7, :, :] 
-qa_pixel_data = stacked_data[:, 7, :, :].astype(np.uint16)
-qa_radsat_data = stacked_data[:, 8, :, :].astype(np.uint16)
-qa_aerosol_data = stacked_data[:, 9, :, :].astype(np.uint8)
+
+# Defensively convert edge-padding NaNs to compliant integer bitmask fallbacks before casting
+qa_pixel_data = np.nan_to_num(stacked_data[:, 7, :, :], nan=1).astype(np.uint16)  # 1 = Fill Bit Active
+qa_radsat_data = np.nan_to_num(stacked_data[:, 8, :, :], nan=0).astype(np.uint16)
+qa_aerosol_data = np.nan_to_num(stacked_data[:, 9, :, :], nan=0).astype(np.uint8)
 
 print("Generating ortho_visual RGBA representations...")
-for t in range(len(tif_files)):
+for t in range(valid_frame_idx):
     rgba_img = sc.generate_rgba_image(sr_data[t, ...])
     vis_data[t, ...] = np.transpose(rgba_img, (2, 0, 1))
 
@@ -388,7 +463,7 @@ with h5py.File(OUTPUT_HDF5, 'w') as h5f:
     info_grp = h5f.create_group("HDFEOS INFORMATION")
     info_grp.attrs["HDFEOSVersion"] = "HDFEOS_5.1.16"
     
-    struct_meta = generate_struct_metadata("LANDSAT", grid_width, grid_height, ul_coords, lr_coords, utm_zone, num_bands, len(tif_files))
+    struct_meta = generate_struct_metadata("LANDSAT", grid_width, grid_height, ul_coords, lr_coords, utm_zone, num_bands, valid_frame_idx)
     dt = h5py.string_dtype(encoding='ascii')
     info_grp.create_dataset("StructMetadata.0", shape=(1,), dtype=dt, data=struct_meta)
 
