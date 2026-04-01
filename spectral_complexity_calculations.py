@@ -16,6 +16,22 @@ MAX_DIST_P2 = 0
 #gram_type = 'datasetMean' # 'general
 #SC_Param_Norm = 'bandCount' #'bandCount' None 
 
+# Pixel Mask Configuration
+MASKING = True
+SUN_ELEVATION_THRESHOLD = 30
+CLOUD_DILATION = 2
+
+# LANDSAT Specific Configuration
+QA_REJECT_MASK = 0b111111
+RADSAT_ACCEPT_VALUE = 0
+AEROSOL_ACCEPT_LEVEL = 'medium' #'low' 'medium' 'high'
+
+# TANAGER Specific Configuration
+TANAGER_CLOUD_MASK = True
+TANAGER_UNCERTAINTY_THRESHOLD = 0.1
+TANAGER_AEROSOL_THRESHOLD = 0.3
+
+
 def process_file(filepath, norm_param='bandCount', gram_type='minEndmember'):
     print(f"Processing: {filepath}")
     
@@ -39,7 +55,6 @@ def process_file(filepath, norm_param='bandCount', gram_type='minEndmember'):
     print(f"\nCalculation Complete. Saved to: {out_path}")
 
 # Helper to manage output datasets
-# Updated to accept **kwargs to allow for fillvalue=0
 def overwrite_dset(h5, base_fields_path, name, shape, dtype='float32', **kwargs):
     path = f"{base_fields_path}/{name}"
     if name in h5[base_fields_path]: del h5[path]
@@ -49,22 +64,13 @@ def process_image_stack(h5, sourceName, norm_param, gram_type):
 
     grid_name = sourceName
     base_fields_path = f"/HDFEOS/GRIDS/{grid_name}/Data Fields"
-    ds_surfRef = h5[f"{base_fields_path}/surface_reflectance"]
+    data_grp = h5[base_fields_path]
+    ds_surfRef = data_grp["surface_reflectance"]
     num_frames, num_bands, height, width = ds_surfRef.shape
 
-    if sourceName == "LANDSAT":
-        # Apply the exact same mask here to handle pixel-level exclusions if Strict QA is False
-        ds_quality = h5[f"{base_fields_path}/QUALITY_L1_PIXEL"]
-        ds_aerosol = h5[f"{base_fields_path}/QUALITY_L2_AEROSOL"]
-        ds_radsat = h5[f"{base_fields_path}/RADIOMETRIC_SATURATION"]
-    elif sourceName == "TANAGER":
+    # Pre-fetch the gw_mask for Tanager processing
+    if sourceName == "TANAGER":
         gw_mask = ds_surfRef.attrs.get("all_good_wavelengths").astype(bool)
-        invalid_mask = h5[f"{base_fields_path}/sr_invalid"]
-        cloud_mask = h5[f"{base_fields_path}/beta_cloud_mask"]
-        cirrus_mask = h5[f"{base_fields_path}/beta_cirrus_mask"]
-        nodata_mask = h5[f"{base_fields_path}/nodata_pixels"]
-        sun_zenith_ds = h5[f"{base_fields_path}/sun_zenith"]
-        
 
     # Initialize Results
     ds_endmembers = overwrite_dset(h5, base_fields_path, 'frame_endmembers', (num_frames, num_bands, num_endmembers))
@@ -75,14 +81,34 @@ def process_image_stack(h5, sourceName, norm_param, gram_type):
     ds_evi = overwrite_dset(h5, base_fields_path, 'evi_map', (num_frames, height, width))
     ds_msd = overwrite_dset(h5, base_fields_path, 'msd_map', (num_frames, height, width))
     ds_slideZ = overwrite_dset(h5, base_fields_path, 'sliding_volume_z_score', (num_frames, height, width))
-    ds_localZ = overwrite_dset(h5, base_fields_path, 'sliding_volume_local_z_score', (num_frames, height, width))
+    ds_slideZ_masked = overwrite_dset(h5, base_fields_path, 'sliding_volume_z_score_masked', (num_frames, height, width))
 
 
     for t in range(num_frames):
         print(f"\n--- Frame {t+1}/{num_frames} ---")
         frame_sr = ds_surfRef[t, ...]
+        
         if sourceName == "TANAGER":
             frame_sr = np.delete(frame_sr, np.where(~gw_mask[t]), axis=0)
+
+        # Generate spatial mask utilizing centralized SpecComplex functions
+        if MASKING:
+            if sourceName == "LANDSAT":
+                valid_mask = sc.get_landsat_mask(data_grp, t, (height, width), 
+                                                 sun_elevation_threshold=SUN_ELEVATION_THRESHOLD,
+                                                 cloud_dilation=CLOUD_DILATION,
+                                                 qa_reject_mask=QA_REJECT_MASK,
+                                                 radsat_accept_value=RADSAT_ACCEPT_VALUE,
+                                                 aerosol_accept_level=AEROSOL_ACCEPT_LEVEL)
+            elif sourceName == "TANAGER":
+                valid_mask = sc.get_tanager_mask(data_grp, t, (height, width),
+                                                 sun_elevation_threshold=SUN_ELEVATION_THRESHOLD,
+                                                 cloud_dilation=CLOUD_DILATION,
+                                                 apply_cloud_mask=TANAGER_CLOUD_MASK,
+                                                 uncertainty_threshold=TANAGER_UNCERTAINTY_THRESHOLD,
+                                                 aerosol_depth_threshold=TANAGER_AEROSOL_THRESHOLD)
+        else:
+            valid_mask = np.ones((height, width), dtype=bool)
 
         print(f"Calculating full frame Volume for frame {t+1}/{num_frames}")
         endmembers, endmember_idx, vol_curve = sc.process_volume_frame(frame_sr, num_endmembers, gram_type, norm_param)
@@ -102,8 +128,12 @@ def process_image_stack(h5, sourceName, norm_param, gram_type):
         ds_slide[t, ...] = sc.process_volume_sliding_tile(frame_sr, TILE_SIZE, SLIDING_STRIDE, num_endmembers, gram_type, norm_param)
         ds_evi[t, ...] = sc.calc_evi_frame(frame_sr)
         ds_msd[t, ...] = sc.process_msd_sliding_tile(frame_sr, TILE_SIZE, SLIDING_STRIDE)
-        ds_slideZ[t,...]=sc.calculate_global_z_score(ds_slide[t, ...])
-        ds_localZ[t,...]=sc.calculate_local_z_score(ds_slide[t, ...], Z_SCORE_WINDOW_SIZE, SLIDING_STRIDE)
+        
+        # Standard Z-Score (Background calculated on entire valid frame > 0.0)
+        ds_slideZ[t,...] = sc.calculate_global_z_score(ds_slide[t, ...], np.ones((height, width), dtype=bool))
+        
+        # Masked Z-Score (Background cleanly calculated from sensor-valid pixels only)
+        ds_slideZ_masked[t,...] = sc.calculate_global_z_score(ds_slide[t, ...], valid_mask)
             
     ds_vol_curve.attrs['description'] = "Full volume curve (Volume vs Endmember Count) for entire frame"
     ds_vol_curve.attrs['gram_type'] = gram_type
@@ -137,9 +167,21 @@ def process_image_stack(h5, sourceName, norm_param, gram_type):
     ds_tile.attrs['num_endmembers'] = num_endmembers
     ds_slide.attrs['num_endmembers'] = num_endmembers
     ds_slideZ.attrs['description'] = "Global Spectral Complexity Z-score. (Log(volume)-Log(mean_volume))/Std(Log(volume))"
-    ds_localZ.attrs['description'] = "Sliding Window Adaptive Z-score of the local spectral complexity. (Log(volume)-Log(mean_volume))/Std(Log(volume))"
-    ds_localZ.attrs['z_score_window_size'] = Z_SCORE_WINDOW_SIZE
-    ds_localZ.attrs['z_score_sliding_stride'] = SLIDING_STRIDE
+    
+    ds_slideZ_masked.attrs['description'] = "Global Spectral Complexity Z-score. Sensor-masked pixels excluded from background stats."
+    ds_slideZ_masked.attrs['MASKING_APPLIED'] = MASKING
+    ds_slideZ_masked.attrs['SUN_ELEVATION_THRESHOLD'] = SUN_ELEVATION_THRESHOLD
+    ds_slideZ_masked.attrs['CLOUD_DILATION'] = CLOUD_DILATION
+    
+    if sourceName == "LANDSAT":
+        ds_slideZ_masked.attrs['QA_REJECT_MASK'] = QA_REJECT_MASK
+        ds_slideZ_masked.attrs['RADSAT_ACCEPT_VALUE'] = RADSAT_ACCEPT_VALUE
+        ds_slideZ_masked.attrs['AEROSOL_ACCEPT_LEVEL'] = AEROSOL_ACCEPT_LEVEL
+    elif sourceName == "TANAGER":
+        ds_slideZ_masked.attrs['TANAGER_CLOUD_MASK'] = TANAGER_CLOUD_MASK
+        ds_slideZ_masked.attrs['TANAGER_UNCERTAINTY_THRESHOLD'] = TANAGER_UNCERTAINTY_THRESHOLD
+        ds_slideZ_masked.attrs['TANAGER_AEROSOL_THRESHOLD'] = TANAGER_AEROSOL_THRESHOLD
+
     h5.close()
         
 

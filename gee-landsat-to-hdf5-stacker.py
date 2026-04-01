@@ -61,7 +61,7 @@ TARGET_WRS_PATH = None#16  # Set to None to include all paths
 # Attempt sub-pixel phase correlation registration against a Master Anchor.
 AUTO_CO_REGISTER = True 
 # Strict failure threshold: If calculated shift exceeds this many pixels, the script will crash.
-MAX_ALLOWED_SHIFT = 1.0 
+MAX_ALLOWED_SHIFT = 0.0 
 
 suffix = ""
 
@@ -410,15 +410,20 @@ for idx, tif_path in enumerate(tif_files):
                         reference_mask=anchor_mask, moving_mask=structural_valid_mask
                     )
                     
+                    # --- STRICT RADIOMETRIC INTEGRITY FIX ---
+                    # Force integer translation to completely eliminate sub-pixel interpolation blur.
+                    # This ensures raw spectral energy is preserved, not distributed across boundaries.
+                    shift = np.round(shift).astype(int)
+                    
                     # Strict Failure Handling: Prevent bad warps from polluting the dataset
                     if abs(shift[0]) > MAX_ALLOWED_SHIFT or abs(shift[1]) > MAX_ALLOWED_SHIFT:
-                        print(f"WARNING: Calculated phase shift (dy={shift[0]:.2f}, dx={shift[1]:.2f}) for {filename} exceeds MAX_ALLOWED_SHIFT. Excluding frame from stack.")
+                        print(f"WARNING: Calculated phase shift (dy={shift[0]}, dx={shift[1]}) for {filename} exceeds MAX_ALLOWED_SHIFT. Excluding frame from stack.")
                         continue # Skip this frame entirely
                     
-                    if shift[0] != 0.0 or shift[1] != 0.0:
-                        # Apply Cubic Spline shift to continuous variables
+                    if shift[0] != 0 or shift[1] != 0:
+                        # Apply Nearest Neighbor (order=0) shift to continuous variables to prevent spline ringing
                         for b in range(7):
-                            temp_sr_scaled[b] = scipy_shift(temp_sr_scaled[b], shift, cval=np.nan, order=3)
+                            temp_sr_scaled[b] = scipy_shift(temp_sr_scaled[b], shift, cval=np.nan, order=0)
                         # Apply Nearest Neighbor shift to categorical variables (QA bands)
                         for b in range(3):
                             temp_qa[b] = scipy_shift(temp_qa[b], shift, cval=1 if b==0 else 0, order=0)

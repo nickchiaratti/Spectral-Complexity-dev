@@ -3,43 +3,54 @@ import h5py
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
+from matplotlib.lines import Line2D
 from datetime import datetime, timezone
-from scipy import ndimage
+from zoneinfo import ZoneInfo
+
 
 import rasterio.transform
 from pyproj import Transformer, CRS
+import SpecComplex as sc
 
 # ==========================================
 # 1. CONFIGURATION
 # ==========================================
+Location = "Tait"
+Frame_Reg = "WRS16" # "CoReg"
 
-complexity_type = 'sliding_volume_z_score' #'sliding_volume_map' 'sliding_volume_local_z_score' 'sliding_volume_z_score'
-secondary_metric =  'sliding_volume_map'#'evi_map'
-
-TS_START_DATE = datetime(2025, 1, 1, tzinfo=timezone.utc)
-TS_END_DATE = datetime(2025, 12, 31, tzinfo=timezone.utc)
+# Time Series Range
+START_YEAR = 2015
+END_YEAR = 2025
+TS_START_DATE = datetime(START_YEAR, 1, 1, tzinfo=timezone.utc)
+TS_END_DATE = datetime(END_YEAR, 12, 31, tzinfo=timezone.utc)
 
 # Combined Pixel Mask Configuration
-SUN_ELEVATION_THRESHOLD = 0
-CLOUD_DILATION = 0
+MASKING = True
+SUN_ELEVATION_THRESHOLD = 30
+CLOUD_DILATION = 2
 
 # Tanager Pixel Mask Configuration
-TANAGER_AEROSOL_DEPTH_THRESHOLD =0.3
-TANAGER_SR_UNCERTAINTY_THRESHOLD = 1
+TANAGER_AEROSOL_DEPTH_THRESHOLD = 0.3
+TANAGER_SR_UNCERTAINTY_THRESHOLD = 0.10
 
 # LANDSAT Pixel Mask Configuration
 QA_REJECT_MASK = 0b111111
 RADSAT_ACCEPT_VALUE = 0
-AEROSOL_ACCEPT_LEVEL = 'medium' # 'low' 'medium' 'high' 'all'
+AEROSOL_ACCEPT_LEVEL = 'medium' #'low' 'medium' 'high'
 
-AEROSOL_DICT = {
-    'low': [2, 4, 32, 66, 68, 96, 100],
-    'medium': [2, 4, 32, 66, 68, 96, 100, 130, 132, 160, 164],
-    'high': [2, 4, 32, 66, 68, 96, 100, 130, 132, 160, 164, 192, 194, 196, 224, 228] # Aerosol_Optical_Depth > 0.3
+# Primary & Secondary Datasets for the axes
+PRIM_METRIC = 'sliding_volume_map' # 'sliding_volume_map' 'sliding_volume_z_score'
+SEC_METRIC = 'sliding_volume_z_score_masked'
+
+COMPLEXITY_DICT = {
+    'sliding_volume_map': 'Spectral Complexity',
+    'sliding_volume_z_score': 'Spectral Complexity Z-Score',
+    'sliding_volume_z_score_masked': 'Spectral Complexity Z-Score',
+    'sliding_volume_local_z_score': 'Spectral Complexity Local Z-Score'
 }
 
-landsat_path = "C:/satelliteImagery/LANDSAT/Rochester/LANDSAT_Stack_Rochester_GEE_2015_2025_SC_EM-7_Gram-minEndmember_Norm-bandCount.h5"
-tanager_path = "C:/satelliteImagery/Tanager/Rochester/Tanager_Stack_Rochester_HDFEOS_SC_EM-7_Gram-minEndmember_Norm-bandCount.h5"
+landsat_path = f"C:/satelliteImagery/LANDSAT/{Location}/LANDSAT_Stack_{Location}_GEE_2015_2025_{Frame_Reg}_SC_EM-7_Gram-minEndmember_Norm-bandCount.h5"
+tanager_path = f"C:/satelliteImagery/Tanager/{Location}/Tanager_Stack_{Location}_HDFEOS_SC_EM-7_Gram-minEndmember_Norm-bandCount.h5"
 
 # Time Series Locations (Latitude, Longitude)
 TS_LOCATIONS = [
@@ -52,81 +63,7 @@ TS_LOCATIONS = [
 ]
 
 # ==========================================
-# 2. MASKING FUNCTIONS
-# ==========================================
-
-def get_landsat_mask(data_grp, f_idx, shape):
-    """Generates a boolean mask for LANDSAT data based on configurations."""
-    valid_mask = np.ones(shape, dtype=bool)
-    
-    sun_elev_arr = data_grp['surface_reflectance'].attrs.get('sun_elevation')
-    if sun_elev_arr is not None and f_idx < len(sun_elev_arr):
-        if sun_elev_arr[f_idx] < SUN_ELEVATION_THRESHOLD:
-            return np.zeros(shape, dtype=bool)
-
-    if 'QUALITY_L1_PIXEL' in data_grp:
-        qa_pixel = data_grp['QUALITY_L1_PIXEL'][f_idx, ...]
-        bad_qa_mask = (qa_pixel & QA_REJECT_MASK) != 0
-        if CLOUD_DILATION > 0:
-            kernel = np.ones((3, 3), dtype=bool)
-            bad_qa_mask = ndimage.binary_dilation(bad_qa_mask, structure=kernel, iterations=CLOUD_DILATION)
-        valid_mask &= ~bad_qa_mask
-
-    if 'RADIOMETRIC_SATURATION' in data_grp:
-        bad_radsat = data_grp['RADIOMETRIC_SATURATION'][f_idx, ...] != RADSAT_ACCEPT_VALUE
-        kernel = np.ones((3, 3), dtype=bool)
-        bad_radsat = ndimage.binary_dilation(bad_radsat, structure=kernel, iterations=1)
-        valid_mask &= ~bad_radsat
-
-    if 'QUALITY_L2_AEROSOL' in data_grp and AEROSOL_ACCEPT_LEVEL != 'all':
-        aerosol = data_grp['QUALITY_L2_AEROSOL'][f_idx, ...]
-        invalid_aerosol = ~np.isin(aerosol, AEROSOL_DICT[AEROSOL_ACCEPT_LEVEL])
-        kernel = np.ones((3, 3), dtype=bool)
-        invalid_aerosol = ndimage.binary_dilation(invalid_aerosol, structure=kernel, iterations=1)
-        valid_mask &= ~invalid_aerosol
-
-    return valid_mask
-
-def get_tanager_mask(data_grp, f_idx, shape):
-    """Generates a boolean mask for TANAGER data based on configurations."""
-    valid_mask = np.ones(shape, dtype=bool)
-
-
-    cloud_mask = (data_grp['beta_cloud_mask'][f_idx, ...]==1)
-    cirrus_mask = (data_grp['beta_cirrus_mask'][f_idx, ...]==1)
-    combined_cloud = cloud_mask | cirrus_mask
-    if CLOUD_DILATION > 0:
-        kernel = np.ones((3, 3), dtype=bool)
-        combined_cloud = ndimage.binary_dilation(combined_cloud, structure=kernel, iterations=CLOUD_DILATION)
-    valid_mask &= ~combined_cloud
-    
-
-    zenith = data_grp['sun_zenith'][f_idx, ...]
-    valid_mask &= (zenith != -9999.0) & ((90.0 - zenith) >= SUN_ELEVATION_THRESHOLD)
-        
-
-    aod = data_grp['aerosol_optical_depth'][f_idx, ...]
-    bad_aod_mask = (aod == -9999.0) | (aod >= TANAGER_AEROSOL_DEPTH_THRESHOLD)
-    if TANAGER_AEROSOL_DEPTH_THRESHOLD > 0:
-        kernel = np.ones((3, 3), dtype=bool)
-        bad_aod_mask = ndimage.binary_dilation(bad_aod_mask, structure=kernel, iterations=1)
-    valid_mask &= ~bad_aod_mask
-        
-
-    gw_mask = data_grp['surface_reflectance'].attrs.get('all_good_wavelengths')
-    
-    valid_bands = gw_mask[f_idx].astype(bool)
-    unc = np.nanmax(data_grp['surface_reflectance_uncertainty'][f_idx, valid_bands, ...], axis=0)
-    unc_mask = (unc == -9999.0) | (unc >= TANAGER_SR_UNCERTAINTY_THRESHOLD)
-    if TANAGER_SR_UNCERTAINTY_THRESHOLD > 0:
-        kernel = np.ones((3, 3), dtype=bool)
-        unc_mask = ndimage.binary_dilation(unc_mask, structure=kernel, iterations=1)
-    valid_mask &= ~unc_mask
-
-    return valid_mask
-
-# ==========================================
-# 3. DATA EXTRACTION
+# 2. DATA EXTRACTION
 # ==========================================
 
 def extract_data():
@@ -134,55 +71,48 @@ def extract_data():
     
     # Initialize Data Structure
     ts_data = {
-        'LANDSAT': {loc['label']: {'t': [], 'primary': [], 'secondary': []} for loc in TS_LOCATIONS},
-        'TANAGER': {loc['label']: {'t': [], 'primary': [], 'secondary': []} for loc in TS_LOCATIONS}
+        'LANDSAT': {loc['label']: {'t': [], 'prim_v': [], 'sec_v': []} for loc in TS_LOCATIONS},
+        'TANAGER': {loc['label']: {'t': [], 'prim_v': [], 'sec_v': []} for loc in TS_LOCATIONS}
     }
     
-    for filepath in files:
-        if not os.path.exists(filepath):
-            print(f"Warning: File not found: {filepath}")
+    for path in files:
+        if not os.path.exists(path):
+            print(f"Warning: File not found: {path}")
             continue
             
-        print(f"Processing {os.path.basename(filepath)}...")
-        with h5py.File(filepath, 'r') as h5:
+        with h5py.File(path, 'r') as h5:
             source_name = list(h5['/HDFEOS/GRIDS'].keys())[0]
             key = 'LANDSAT' if 'LANDSAT' in source_name.upper() else 'TANAGER'
-            data_grp = h5[f'HDFEOS/GRIDS/{source_name}/Data Fields']
+            data_grp = h5[f'/HDFEOS/GRIDS/{source_name}/Data Fields']
             
-            # 3.1 Verify Datasets Exist
-            if complexity_type not in data_grp:
-                print(f"  -> Skipping: {complexity_type} not found.")
-                continue
-            
-            prim_dset = data_grp[complexity_type]
-            sec_dset = data_grp[secondary_metric] if secondary_metric in data_grp else None
-            if sec_dset is None:
-                print(f"  -> Warning: {secondary_metric} not found in this file.")
-            
-            # 3.2 Map Geocoordinates to Pixels (using the first frame's metadata)
             sr_dset = data_grp['surface_reflectance']
-            geo_transform = sr_dset.attrs.get('GeoTransform')
-            spatial_ref = sr_dset.attrs.get('spatial_ref')
+            vis_dset = data_grp['ortho_visual']
+            prim_dset = data_grp[PRIM_METRIC]
+            sec_dset = data_grp[SEC_METRIC] if SEC_METRIC else None
+            
+            # 2.1 Map Geographic Coordinates to Pixel Coordinates
+            geo_transform = sr_dset.attrs['GeoTransform']
+            spatial_ref = sr_dset.attrs['spatial_ref']
+            if isinstance(spatial_ref, bytes): spatial_ref = spatial_ref.decode('utf-8')
+            
+            crs = CRS.from_wkt(spatial_ref)
+            transformer = Transformer.from_crs("EPSG:4326", crs, always_xy=True)
+            affine = rasterio.transform.Affine.from_gdal(*geo_transform)
+            inv_affine = ~affine
             
             mapped_locations = []
-            if geo_transform is not None and spatial_ref is not None:
-                if isinstance(spatial_ref, bytes):
-                    spatial_ref = spatial_ref.decode('utf-8')
-                crs = CRS.from_wkt(spatial_ref)
-                transformer = Transformer.from_crs("EPSG:4326", crs, always_xy=True)
-                affine = rasterio.transform.Affine(*geo_transform)
-                inv_affine = ~affine
-                
-                for loc in TS_LOCATIONS:
-                    lat, lon = loc['latlon']
-                    px, py = inv_affine * transformer.transform(lon, lat)
-                    mapped_locations.append({'label': loc['label'], 'y': int(round(py)), 'x': int(round(px))})
-            else:
-                print("  -> Error: Georeferencing metadata missing.")
-                continue
+            for loc in TS_LOCATIONS:
+                lat, lon = loc['latlon']
+                proj_x, proj_y = transformer.transform(lon, lat)
+                px, py = inv_affine * (proj_x, proj_y)
+                mapped_locations.append({
+                    'label': loc['label'], 
+                    'y': int(round(py)), 
+                    'x': int(round(px))
+                })
             
-            # 3.3 Extract Time Series
-            acq_times = sr_dset.attrs.get('acquisition_time')
+            # 2.2 Extract Time Series
+            acq_times = sr_dset.attrs['acquisition_time']
             num_frames = prim_dset.shape[0]
             
             for f_idx in range(num_frames):
@@ -191,185 +121,200 @@ def extract_data():
                     continue
                 
                 shape = prim_dset[f_idx].shape
-                mask = get_landsat_mask(data_grp, f_idx, shape) if key == 'LANDSAT' else get_tanager_mask(data_grp, f_idx, shape)
+                
+                # 1. ARD Alpha Masking: Channel 3 (index 3) is the explicit Alpha channel.
+                # Valid pixels are strictly greater than 0.
+                alpha_mask = vis_dset[f_idx, 3, ...] > 0
+                
+                # 2. Apply Strict Spatial Pixel Masking via SpecComplex
+                if not MASKING:
+                    spatial_mask = np.ones(shape, dtype=bool)
+                elif key == 'LANDSAT':
+                    spatial_mask = sc.get_landsat_mask(
+                        data_grp=data_grp,
+                        f_idx=f_idx,
+                        shape=shape,
+                        sun_elevation_threshold=SUN_ELEVATION_THRESHOLD,
+                        cloud_dilation=CLOUD_DILATION,
+                        qa_reject_mask=QA_REJECT_MASK,
+                        radsat_accept_value=RADSAT_ACCEPT_VALUE,
+                        aerosol_accept_level=AEROSOL_ACCEPT_LEVEL
+                    )
+                else:
+                    spatial_mask = sc.get_tanager_mask(
+                        data_grp=data_grp,
+                        f_idx=f_idx,
+                        shape=shape,
+                        sun_elevation_threshold=SUN_ELEVATION_THRESHOLD,
+                        cloud_dilation=CLOUD_DILATION,
+                        apply_cloud_mask=True,
+                        uncertainty_threshold=TANAGER_SR_UNCERTAINTY_THRESHOLD,
+                        aerosol_depth_threshold=TANAGER_AEROSOL_DEPTH_THRESHOLD
+                    )
+                    
+                # Combine both masks to ensure data integrity
+                combined_mask = alpha_mask & spatial_mask
                 
                 for loc in mapped_locations:
                     y, x = loc['y'], loc['x']
                     # Verify array bounds
                     if 0 <= y < shape[0] and 0 <= x < shape[1]:
-                        if mask[y, x]:
+                        if combined_mask[y, x]:
                             prim_val = prim_dset[f_idx, y, x]
                             sec_val = sec_dset[f_idx, y, x] if sec_dset is not None else np.nan
                             
                             if not np.isnan(prim_val):
                                 ts_data[key][loc['label']]['t'].append(dt)
-                                ts_data[key][loc['label']]['primary'].append(prim_val)
-                                ts_data[key][loc['label']]['secondary'].append(sec_val)
+                                ts_data[key][loc['label']]['prim_v'].append(prim_val)
+                                ts_data[key][loc['label']]['sec_v'].append(sec_val)
 
     return ts_data
 
 # ==========================================
-# 4. PLOTTING HELPER
+# 3. PLOTTING
 # ==========================================
 
-def apply_season_shading(ax):
-    """Draws background spans for meteorological seasons on a given axis."""
-    xlims = ax.get_xlim()
-    for yr in range(TS_START_DATE.year, TS_END_DATE.year + 2):
-        # Winter -> light gray
-        ax.axvspan(datetime(yr - 1, 12, 1, tzinfo=timezone.utc), datetime(yr, 3, 1, tzinfo=timezone.utc), color='lightgray', alpha=0.3, zorder=0, lw=0)
-        # Spring -> light green
-        ax.axvspan(datetime(yr, 3, 1, tzinfo=timezone.utc), datetime(yr, 6, 1, tzinfo=timezone.utc), color='lightgreen', alpha=0.2, zorder=0, lw=0)
-        # Summer -> light yellow
-        ax.axvspan(datetime(yr, 6, 1, tzinfo=timezone.utc), datetime(yr, 9, 1, tzinfo=timezone.utc), color='lightyellow', alpha=0.3, zorder=0, lw=0)
-        # Fall -> light orange
-        ax.axvspan(datetime(yr, 9, 1, tzinfo=timezone.utc), datetime(yr, 12, 1, tzinfo=timezone.utc), color='orange', alpha=0.15, zorder=0, lw=0)
-    ax.set_xlim(xlims)
+def plot_time_series(ts_data):
+    # ==========================================
+    # Figure 1: Twin Y-Axis Overlay
+    # ==========================================
+    fig, ax1 = plt.subplots(figsize=(16, 8))
+    fig.canvas.manager.set_window_title("Twin-Axis Metric Overlay")
+    ax2 = ax1.twinx() if SEC_METRIC else None
 
-def plot_static_time_series(ts_data):
-    # --- Figure 1: Twin Axis Plot ---
-    fig_twin, ax_prim = plt.subplots(figsize=(16, 8))
-    fig_twin.canvas.manager.set_window_title("Twin-Axis Comparison")
-    ax_sec = ax_prim.twinx()
-    
-    # --- Figure 2: Stacked Subplots (Trellis) ---
-    fig_split, (ax_top, ax_bot) = plt.subplots(2, 1, figsize=(16, 12), sharex=True)
-    fig_split.canvas.manager.set_window_title("Stacked Subplot Comparison")
-    fig_split.subplots_adjust(hspace=0.1) # Reduce space between plots for cohesive time-scrubbing
-    
-    # Store legend elements for both figures independently to match their styling
-    legend_elements_prim = []
-    legend_elements_sec = []
-    legend_elements_top = []
-    legend_elements_bot = []
-    
-    print("Plotting data...")
+    # Plot LANDSAT Time Series
     for loc in TS_LOCATIONS:
         label = loc['label']
-        color = loc['color']
+        data = ts_data['LANDSAT'][label]
+        if data['t']:
+            ax1.plot(data['t'], data['prim_v'], marker='^', color=loc['color'], 
+                     markersize=5, linestyle='--', linewidth=1, alpha=0.7)
+            if ax2 and SEC_METRIC:
+                ax2.plot(data['t'], data['sec_v'], marker='x', color=loc['color'], 
+                         markersize=4, linestyle=':', linewidth=1, alpha=0.4)
+
+    # Plot TANAGER Time Series
+    for loc in TS_LOCATIONS:
+        label = loc['label']
+        data = ts_data['TANAGER'][label]
+        if data['t']:
+            ax1.plot(data['t'], data['prim_v'], marker='s', color=loc['color'], 
+                     markersize=6, linestyle='-', linewidth=2, alpha=0.9)
+            if ax2 and SEC_METRIC:
+                ax2.plot(data['t'], data['sec_v'], marker='d', color=loc['color'], 
+                         markersize=5, linestyle='-.', linewidth=1.5, alpha=0.6)
+
+    if len(ax1.lines) > 0:
+        xlims = ax1.get_xlim()
+        # Seasonal background shading
+        for yr in range(START_YEAR, END_YEAR + 2):
+            ax1.axvspan(datetime(yr - 1, 12, 1, tzinfo=timezone.utc), datetime(yr, 3, 1, tzinfo=timezone.utc), color='lightgray', alpha=0.3, zorder=0, lw=0)
+            ax1.axvspan(datetime(yr, 3, 1, tzinfo=timezone.utc), datetime(yr, 6, 1, tzinfo=timezone.utc), color='lightgreen', alpha=0.2, zorder=0, lw=0)
+            ax1.axvspan(datetime(yr, 6, 1, tzinfo=timezone.utc), datetime(yr, 9, 1, tzinfo=timezone.utc), color='lightyellow', alpha=0.3, zorder=0, lw=0)
+            ax1.axvspan(datetime(yr, 9, 1, tzinfo=timezone.utc), datetime(yr, 12, 1, tzinfo=timezone.utc), color='orange', alpha=0.15, zorder=0, lw=0)
+        ax1.set_xlim(xlims)
+
+    # Styling and Formatting
+    title_suffix = f" & {COMPLEXITY_DICT[SEC_METRIC]}" if SEC_METRIC else ""
+    ax1.set_title(f"Multi-Sensor Time Series Analysis: {COMPLEXITY_DICT[PRIM_METRIC]}{title_suffix}\n[{START_YEAR}-{END_YEAR}]", fontsize=14, fontweight='bold')
+    
+    ax1.grid(True, alpha=0.4, which="both", ls="--")
+    ax1.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m'))
+    ax1.tick_params(axis='x', rotation=45)
+    
+    ax1.set_ylabel(COMPLEXITY_DICT[PRIM_METRIC], color='black', fontweight='bold', fontsize=12)
+    if PRIM_METRIC == 'sliding_volume_map':
+        ax1.set_yscale('log')
         
-        # --- Plot Landsat (Circles) ---
-        l_data = ts_data['LANDSAT'][label]
-        if l_data['t']:
-            # Primary Metric
-            # Twin Axis: Solid. Split Axis: Dashed.
-            line_p_twin, = ax_prim.plot(l_data['t'], l_data['primary'], marker='o', color=color, 
-                                   linestyle='-', linewidth=1.5, markersize=6, alpha=0.8,
-                                   label=f"L: {label} ({complexity_type})")
-            line_p_top, = ax_top.plot(l_data['t'], l_data['primary'], marker='o', color=color, 
-                        linestyle='--', linewidth=1.5, markersize=6, alpha=0.8,
-                        label=f"L: {label}")
-            legend_elements_prim.append(line_p_twin)
-            legend_elements_top.append(line_p_top)
+    if ax2:
+        ax2.set_ylabel(COMPLEXITY_DICT[SEC_METRIC], color='gray', fontweight='bold', fontsize=12)
+        if SEC_METRIC == 'sliding_volume_map':
+            ax2.set_yscale('log')
+
+    # Twin Axis Legend Construction
+    loc_handles = [Line2D([0], [0], color=loc['color'], lw=4, label=loc['label']) for loc in TS_LOCATIONS]
+    leg1 = ax1.legend(handles=loc_handles, title="Spatial Locations", loc='upper left', bbox_to_anchor=(1.05, 1), borderaxespad=0.)
+    ax1.add_artist(leg1)
+    
+    style_handles = [
+        Line2D([0], [0], color='black', marker='^', linestyle='--', linewidth=1, label=f"L: {PRIM_METRIC}"),
+        Line2D([0], [0], color='black', marker='s', linestyle='-', linewidth=2, label=f"T: {PRIM_METRIC}")
+    ]
+    if ax2 and SEC_METRIC:
+        style_handles.extend([
+            Line2D([0], [0], color='gray', marker='x', linestyle=':', linewidth=1, label=f"L: {SEC_METRIC}"),
+            Line2D([0], [0], color='gray', marker='d', linestyle='-.', linewidth=1.5, label=f"T: {SEC_METRIC}")
+        ])
+        
+    ax1.legend(handles=style_handles, title="Sensors & Metrics", loc='center left', bbox_to_anchor=(1.05, 0.4), borderaxespad=0.)
+    fig.tight_layout(rect=[0, 0, 0.82, 1])
+
+    # ==========================================
+    # Figure 2: Small Multiples (Separated Metrics)
+    # ==========================================
+    if SEC_METRIC:
+        fig2, (ax_prim, ax_sec) = plt.subplots(2, 1, figsize=(16, 12), sharex=True)
+        fig2.canvas.manager.set_window_title("Separated Metric Subplots")
+
+        # Plot LANDSAT
+        for loc in TS_LOCATIONS:
+            label = loc['label']
+            data = ts_data['LANDSAT'][label]
+            if data['t']:
+                ax_prim.plot(data['t'], data['prim_v'], marker='^', color=loc['color'], 
+                             markersize=5, linestyle='--', linewidth=1, alpha=0.7)
+                ax_sec.plot(data['t'], data['sec_v'], marker='^', color=loc['color'], 
+                             markersize=5, linestyle='--', linewidth=1, alpha=0.7)
+
+        # Plot TANAGER
+        for loc in TS_LOCATIONS:
+            label = loc['label']
+            data = ts_data['TANAGER'][label]
+            if data['t']:
+                ax_prim.plot(data['t'], data['prim_v'], marker='s', color=loc['color'], 
+                             markersize=6, linestyle='-', linewidth=2, alpha=0.9)
+                ax_sec.plot(data['t'], data['sec_v'], marker='s', color=loc['color'], 
+                             markersize=6, linestyle='-', linewidth=2, alpha=0.9)
+
+        # Formatting axes
+        for ax, metric in zip([ax_prim, ax_sec], [PRIM_METRIC, SEC_METRIC]):
+            # Background shading
+            if len(ax.lines) > 0:
+                xlims = ax.get_xlim()
+                for yr in range(START_YEAR, END_YEAR + 2):
+                    ax.axvspan(datetime(yr - 1, 12, 1, tzinfo=timezone.utc), datetime(yr, 3, 1, tzinfo=timezone.utc), color='lightgray', alpha=0.3, zorder=0, lw=0)
+                    ax.axvspan(datetime(yr, 3, 1, tzinfo=timezone.utc), datetime(yr, 6, 1, tzinfo=timezone.utc), color='lightgreen', alpha=0.2, zorder=0, lw=0)
+                    ax.axvspan(datetime(yr, 6, 1, tzinfo=timezone.utc), datetime(yr, 9, 1, tzinfo=timezone.utc), color='lightyellow', alpha=0.3, zorder=0, lw=0)
+                    ax.axvspan(datetime(yr, 9, 1, tzinfo=timezone.utc), datetime(yr, 12, 1, tzinfo=timezone.utc), color='orange', alpha=0.15, zorder=0, lw=0)
+                ax.set_xlim(xlims)
             
-            # Secondary Metric
-            # Twin Axis: Dashed. Split Axis: Dashed.
-            valid_sec = [(t, v) for t, v in zip(l_data['t'], l_data['secondary']) if not np.isnan(v)]
-            if valid_sec:
-                t_sec, v_sec = zip(*valid_sec)
-                line_s_twin, = ax_sec.plot(t_sec, v_sec, marker='o', color=color, 
-                                      linestyle='--', linewidth=1.5, markersize=6, alpha=0.6,
-                                      label=f"L: {label} ({secondary_metric})")
-                line_s_bot, = ax_bot.plot(t_sec, v_sec, marker='o', color=color, 
-                            linestyle='--', linewidth=1.5, markersize=6, alpha=0.6,
-                            label=f"L: {label}")
-                legend_elements_sec.append(line_s_twin)
-                legend_elements_bot.append(line_s_bot)
-                
-        # --- Plot Tanager (Diamonds with Outlines) ---
-        t_data = ts_data['TANAGER'][label]
-        if t_data['t']:
-            # Primary Metric
-            # Twin Axis: Solid. Split Axis: Solid.
-            line_p_twin, = ax_prim.plot(t_data['t'], t_data['primary'], marker='D', color=color, 
-                                   markeredgecolor='black', markeredgewidth=0.8,
-                                   linestyle='-', linewidth=1.5, markersize=6, alpha=0.9,
-                                   label=f"T: {label} ({complexity_type})")
-            line_p_top, = ax_top.plot(t_data['t'], t_data['primary'], marker='D', color=color, 
-                        markeredgecolor='black', markeredgewidth=0.8,
-                        linestyle='-', linewidth=1.5, markersize=6, alpha=0.9,
-                        label=f"T: {label}")
-            legend_elements_prim.append(line_p_twin)
-            legend_elements_top.append(line_p_top)
+            ax.grid(True, alpha=0.4, which="both", ls="--")
+            ax.set_ylabel(COMPLEXITY_DICT[metric], color='black', fontweight='bold', fontsize=12)
             
-            # Secondary Metric
-            # Twin Axis: Dashed. Split Axis: Solid.
-            valid_sec = [(t, v) for t, v in zip(t_data['t'], t_data['secondary']) if not np.isnan(v)]
-            if valid_sec:
-                t_sec, v_sec = zip(*valid_sec)
-                line_s_twin, = ax_sec.plot(t_sec, v_sec, marker='D', color=color, 
-                                      markeredgecolor='black', markeredgewidth=0.8,
-                                      linestyle='--', linewidth=1.5, markersize=6, alpha=0.7,
-                                      label=f"T: {label} ({secondary_metric})")
-                line_s_bot, = ax_bot.plot(t_sec, v_sec, marker='D', color=color, 
-                            markeredgecolor='black', markeredgewidth=0.8,
-                            linestyle='-', linewidth=1.5, markersize=6, alpha=0.7,
-                            label=f"T: {label}")
-                legend_elements_sec.append(line_s_twin)
-                legend_elements_bot.append(line_s_bot)
+            if metric == 'sliding_volume_map':
+                ax.set_yscale('log')
+            
+            # Independent Legends for Subplots
+            loc_handles_sep = [Line2D([0], [0], color=loc['color'], lw=4, label=loc['label']) for loc in TS_LOCATIONS]
+            leg_sep1 = ax.legend(handles=loc_handles_sep, title="Spatial Locations", loc='upper left', bbox_to_anchor=(1.01, 1), borderaxespad=0.)
+            ax.add_artist(leg_sep1)
+            
+            sensor_handles = [
+                Line2D([0], [0], color='black', marker='^', linestyle='--', linewidth=1, label="Landsat 8/9"),
+                Line2D([0], [0], color='black', marker='s', linestyle='-', linewidth=2, label="Tanager")
+            ]
+            ax.legend(handles=sensor_handles, title="Sensors", loc='center left', bbox_to_anchor=(1.01, 0.3), borderaxespad=0.)
 
-    # --- Formatting for Figure 1 (Twin Axis) ---
-    if legend_elements_prim:
-        apply_season_shading(ax_prim)
+        ax_prim.set_title(f"Separated Multi-Sensor Time Series Analysis\n[{START_YEAR}-{END_YEAR}]", fontsize=14, fontweight='bold')
+        ax_sec.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m'))
+        ax_sec.tick_params(axis='x', rotation=45)
+        
+        fig2.tight_layout(rect=[0, 0, 0.85, 1])
 
-    ax_prim.set_title(f"Twin Axis Time Series\nPrimary: {complexity_type} | Secondary: {secondary_metric}\n({TS_START_DATE.strftime('%Y-%m-%d')} to {TS_END_DATE.strftime('%Y-%m-%d')})", fontsize=14)
-    ax_prim.set_ylabel(f"Primary Metric ({complexity_type})", fontweight='bold', fontsize=11)
-    ax_sec.set_ylabel(f"Secondary Metric ({secondary_metric})", fontweight='bold', fontsize=11, color='gray')
-    
-    ax_prim.grid(True, alpha=0.4, which="major", ls="-")
-    ax_prim.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m'))
-    ax_prim.tick_params(axis='x', rotation=45, labelsize=10)
-    
-    if legend_elements_prim and legend_elements_sec:
-        ax_prim.legend(legend_elements_prim + legend_elements_sec, 
-                       [l.get_label() for l in legend_elements_prim] + [l.get_label() for l in legend_elements_sec], 
-                       loc='upper left', bbox_to_anchor=(1.05, 1), fontsize=9, title="Location & Metric Mapping")
-    elif legend_elements_prim:
-        ax_prim.legend(loc='upper left', bbox_to_anchor=(1.05, 1), fontsize=9)
-
-    fig_twin.tight_layout()
-
-    # --- Formatting for Figure 2 (Stacked Subplots) ---
-    if legend_elements_prim:
-        apply_season_shading(ax_top)
-        apply_season_shading(ax_bot)
-
-    ax_top.set_title(f"Stacked Subplot Time Series\n({TS_START_DATE.strftime('%Y-%m-%d')} to {TS_END_DATE.strftime('%Y-%m-%d')})", fontsize=14)
-    
-    ax_top.set_ylabel(f"Primary Metric\n({complexity_type})", fontweight='bold', fontsize=11)
-    ax_bot.set_ylabel(f"Secondary Metric\n({secondary_metric})", fontweight='bold', fontsize=11)
-    
-    ax_top.grid(True, alpha=0.4, which="major", ls="-")
-    ax_bot.grid(True, alpha=0.4, which="major", ls="-")
-    
-    ax_bot.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m'))
-    ax_bot.tick_params(axis='x', rotation=45, labelsize=10)
-    # Hide X-axis labels for the top plot to emphasize the shared temporal dimension
-    plt.setp(ax_top.get_xticklabels(), visible=False)
-
-    # Clean legends for split plot using the dedicated handles
-    if legend_elements_top:
-        ax_top.legend(handles=legend_elements_top, loc='upper left', bbox_to_anchor=(1.01, 1), 
-                      fontsize=9, title="Primary Metric\n(L=Dashed, T=Solid)")
-    if legend_elements_bot:
-        ax_bot.legend(handles=legend_elements_bot, loc='upper left', bbox_to_anchor=(1.01, 1), 
-                      fontsize=9, title="Secondary Metric\n(L=Dashed, T=Solid)")
-
-    # --- Save Both Figures ---
-    out_dir = "C:/satelliteImagery/MultiSensor_Analysis_Outputs"
-    os.makedirs(out_dir, exist_ok=True)
-    
-    out_path_twin = os.path.join(out_dir, f"Static_TimeSeries_Twin_{complexity_type}_vs_{secondary_metric}.png")
-    fig_twin.savefig(out_path_twin, dpi=300, bbox_inches='tight')
-    
-    out_path_split = os.path.join(out_dir, f"Static_TimeSeries_Split_{complexity_type}_vs_{secondary_metric}.png")
-    fig_split.savefig(out_path_split, dpi=300, bbox_inches='tight')
-    
-    print(f"Saved twin axis figure to: {out_path_twin}")
-    print(f"Saved split axis figure to: {out_path_split}")
-    
     plt.show()
 
 if __name__ == "__main__":
-    extracted_data = extract_data()
-    plot_static_time_series(extracted_data)
+    print(f"Extracting data from Multi-Sensor Virtual Constellation...")
+    data = extract_data()
+    print("Plotting time series...")
+    plot_time_series(data)

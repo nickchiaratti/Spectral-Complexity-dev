@@ -6,30 +6,42 @@ import matplotlib.dates as mdates
 from matplotlib.widgets import Button, TextBox, CheckButtons, RadioButtons
 from datetime import datetime, timezone
 import tkinter as tk
-from tkinter import filedialog
 from scipy.stats import pearsonr, spearmanr
-from scipy import ndimage
 from skimage import exposure
+import SpecComplex as sc
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:
+    from backports.zoneinfo import ZoneInfo # For Python < 3.9
 
 import rasterio.transform
 from pyproj import Transformer, CRS
 
 # --- Configuration ---
-complexity_type = 'sliding_volume_z_score' #'sliding_volume_map'  'sliding_volume_local_z_score'  'sliding_volume_z_score'
-# Standard Landsat 8/9 True Color Indices: [C(0), B(1), G(2), R(3), NIR(4), S1(5), S2(6)]
-LANDSAT_RGB_BANDS = (3, 2, 1) 
+Location = "Tait"
+Frame_Reg = "WRS16"# "CoReg" 
+complexity_type = 'sliding_volume_map'#'sliding_volume_z_score' #  'sliding_volume_local_z_score'  'sliding_volume_z_score'
 # Default Projection Bands for 3D Hull (Indices)
-HULL_BANDS_LANDSAT = (6, 4, 2) 
+HULL_BANDS_LANDSAT = (6, 5, 4) 
 HULL_BANDS_TANAGER = (100, 50, 20) # Example hyperspectral indices
 
-TS_START_DATE = datetime(2015, 1, 1, tzinfo=timezone.utc)
-TS_END_DATE = datetime(2025, 12, 31, tzinfo=timezone.utc)
-TWIN_Y_AXIS_DEFAULT = False
+COMPLEXITY_DICT = {
+    'sliding_volume_map': 'Spectral Complexity',
+    'sliding_volume_z_score': 'Spectral Complexity Z-Score',
+    'sliding_volume_z_score_masked': 'Spectral Complexity Z-Score',
+    'sliding_volume_local_z_score': 'Spectral Complexity Local Z-Score'
+}
+
+START_YEAR = 2024
+END_YEAR = 2025
+TS_START_DATE = datetime(START_YEAR, 1, 1, tzinfo=timezone.utc)
+TS_END_DATE = datetime(END_YEAR, 12, 31, tzinfo=timezone.utc)
+TWIN_Y_AXIS_DEFAULT = True
 
 # Combined Pixel Mask Configuration
-MASKING = False
+MASKING = True
 SUN_ELEVATION_THRESHOLD = 30
-CLOUD_DILATION = 0
+CLOUD_DILATION = 2
 
 # Tanager Pixel Mask Configuration
 TANAGER_AEROSOL_DEPTH_THRESHOLD = 0.3
@@ -40,34 +52,39 @@ QA_REJECT_MASK = 0b111111
 RADSAT_ACCEPT_VALUE = 0
 AEROSOL_ACCEPT_LEVEL = 'medium' #'low' 'medium' 'high'
 
+landsat_path = f"C:/satelliteImagery/LANDSAT/{Location}/LANDSAT_Stack_{Location}_GEE_2015_2025_{Frame_Reg}_SC_EM-7_Gram-minEndmember_Norm-bandCount.h5"
+tanager_path = f"C:/satelliteImagery/Tanager/{Location}/Tanager_Stack_{Location}_HDFEOS_SC_EM-7_Gram-minEndmember_Norm-bandCount.h5"
 
-# Mapped levels for UI Dropdown
-AEROSOL_DICT = {
-    'low': [2, 4, 32, 66, 68, 96, 100],
-    'medium': [2, 4, 32, 66, 68, 96, 100, 130, 132, 160, 164],
-    'high': [2, 4, 32, 66, 68, 96, 100, 130, 132, 160, 164, 192, 194, 196, 224, 228] # Aerosol_Optical_Depth > 0.3
-}
-landsat_path = "C:/satelliteImagery/LANDSAT/Rochester/LANDSAT_Stack_Rochester_GEE_2015_2025_SC_EM-7_Gram-minEndmember_Norm-bandCount.h5"
-tanager_path = "C:/satelliteImagery/Tanager/Rochester/Tanager_Stack_Rochester_HDFEOS_SC_EM-7_Gram-minEndmember_Norm-bandCount.h5"
-
+suffix = ''
 if complexity_type == 'sliding_volume_z_score':
     suffix = '_zscore'
+if complexity_type == 'sliding_volume_z_score_masked':
+    suffix = '_MaskedZscore'
+elif complexity_type == 'sliding_volume_map':
+    suffix = '_SpecComplex'
+if not MASKING:
+    suffix += '_unmasked'
+if START_YEAR != 2025:
+    suffix += f'_{END_YEAR-START_YEAR}yr'
 else:
-    suffix = ''
-
-SAVE_DIR = "C:/satelliteImagery/MultiSensor_Analysis_Rochester_minEndmember" + suffix
+    suffix += '_2025'
+    
+SAVE_DIR = f"C:/satelliteImagery/MultiSensor_Analysis_{Location}_{Frame_Reg}" + suffix
 
 # Time Series Locations (Latitude, Longitude)
 TS_LOCATIONS = [
     {'latlon': (43.142856, -77.508451), 'label': "West Tait Forest",     'color': 'tab:green'},
     {'latlon': (43.144861, -77.501176), 'label': "East Tait Forest",             'color': 'tab:olive'},
+    #{'latlon': (43.149077, -77.506040), 'label': "North Tait Forest",             'color': 'tab:orange'},
+    #{'latlon': (43.146627, -77.472877), 'label': "Shadow Lake Golf Course",             'color': 'tab:pink'},
     {'latlon': (43.136910, -77.469462), 'label': "Artificial turf football field",  'color': 'tab:blue'},
     {'latlon': (43.138241, -77.470873), 'label': "Recently added artificial turf",  'color': 'tab:cyan'},
     {'latlon': (43.141297, -77.506256), 'label': "Tait Parking Lot",                'color': 'tab:red'},
     {'latlon': (43.139411, -77.504005), 'label': "ROCX NITE Tarp",                  'color': 'tab:purple'},
+
 ]
 
-DISPLAY_NORMALIZATION = False
+DISPLAY_NORMALIZATION = True
 DISPLAY_REDUNDANT_FIGURE = True  # Toggle for the 2-subplot spatial/complexity redundant figure
 
 class MultiComplexityViewer:
@@ -148,7 +165,8 @@ class MultiComplexityViewer:
             crs = CRS.from_wkt(spatial_ref)
             transformer = Transformer.from_crs("EPSG:4326", crs, always_xy=True)
             
-            affine = rasterio.transform.Affine(*geo_transform)
+            # Use strict GDAL affine ordering per Interface Specification
+            affine = rasterio.transform.Affine.from_gdal(*geo_transform)
             inv_affine = ~affine
             
             print("\n--- Coordinate Mapping ---")
@@ -266,7 +284,7 @@ class MultiComplexityViewer:
         self.btn_auto = Button(ax_auto, 'Auto Save Range', color='lightblue')
         
         # Scatter Plot Controls
-        self.ax_meta.text(0.5, 0.67, "--- Sliding Volume Scatter ---", ha='center', va='center', fontsize=9)
+        self.ax_meta.text(0.5, 0.67, f"--- {COMPLEXITY_DICT[complexity_type]} Scatter ---", ha='center', va='center', fontsize=9)
         
         ax_l_frame = self.fig_controls.add_axes([0.2, 0.62, 0.15, 0.035])
         ax_t_frame = self.fig_controls.add_axes([0.5, 0.62, 0.15, 0.035])
@@ -348,18 +366,15 @@ class MultiComplexityViewer:
         self.ax_ts_main = self.fig_combined.add_subplot(2, 3, (5, 6))
 
     def _init_redundant_ui(self):
-        self.fig_redundant = plt.figure(figsize=(14, 7))
+        self.fig_redundant = plt.figure(figsize=(14, 10))
         self.fig_redundant.canvas.manager.set_window_title("Spatial and Complexity Details")
-        self.fig_redundant.subplots_adjust(top=0.85, bottom=0.05, left=0.05, right=0.95, wspace=0.2)
+        self.fig_redundant.subplots_adjust(top=0.90, bottom=0.08, left=0.05, right=0.95, hspace=0.3, wspace=0.2)
         
-        self.ax_spatial_redundant = self.fig_redundant.add_subplot(121)
-        self.ax_slide_map_redundant = self.fig_redundant.add_subplot(122)
+        self.ax_spatial_redundant = self.fig_redundant.add_subplot(221)
+        self.ax_slide_map_redundant = self.fig_redundant.add_subplot(222)
         
-        # New standalone Time Series figure
-        self.fig_ts_redundant = plt.figure(figsize=(14, 6))
-        self.fig_ts_redundant.canvas.manager.set_window_title("Time Series Detail")
-        self.fig_ts_redundant.subplots_adjust(top=0.85, bottom=0.15, left=0.05, right=0.95)
-        self.ax_ts_redundant_main = self.fig_ts_redundant.add_subplot(111)
+        # Spans the entire bottom row for the time series
+        self.ax_ts_redundant_main = self.fig_redundant.add_subplot(2, 2, (3, 4))
 
     def _init_hull_ui(self):
         self.fig_hull = plt.figure(figsize=(8, 7))
@@ -368,94 +383,45 @@ class MultiComplexityViewer:
 
     def _format_metadata(self, frame_info):
         dt = datetime.fromtimestamp(frame_info['timestamp'], tz=timezone.utc)
+        dt_et = dt.astimezone(ZoneInfo("America/New_York"))
         return (f"TIMELINE:   {self.current_idx + 1} / {self.num_total_frames}\n"
                 f"FILE IDX:   {frame_info['frame_idx']} ({frame_info['source']})\n"
                 f"SPACECRAFT: {frame_info['sat_id']}\n"
-                f"ACQUIRED:   {dt.strftime('%Y-%m-%d %H:%M:%S UTC')}")
+                f"ACQUIRED:   {dt_et.strftime('%Y-%m-%d %H:%M:%S ET')}")
 
     def _get_landsat_mask(self, data_grp, f_idx, shape):
-        """Generates a boolean mask for LANDSAT data based on active UI filters."""
-        valid_mask = np.ones(shape, dtype=bool)
-        
+        """Generates a boolean mask for LANDSAT data via SpecComplex."""
         if not MASKING:
-            return valid_mask
+            return np.ones(shape, dtype=bool)
         
-        # Sun Elevation Check
-        sun_elev_arr = data_grp['surface_reflectance'].attrs['sun_elevation']
-        if sun_elev_arr[f_idx] < self.sun_elev_thresh:
-            return np.zeros(shape, dtype=bool)
-
-        # QA Reject Mask
-        if self.mask_qa_enabled:
-            qa_pixel = data_grp['QUALITY_L1_PIXEL'][f_idx, ...]
-            # True represents BAD pixels (Clouds/Shadows)
-            bad_qa_mask = (qa_pixel & QA_REJECT_MASK) != 0
-            if self.cloud_dilation > 0:
-                kernel = np.ones((3, 3), dtype=bool)
-                bad_qa_mask = ndimage.binary_dilation(bad_qa_mask, structure=kernel, iterations=self.cloud_dilation)
-            # Valid pixels are where bad_qa_mask is False
-            valid_mask &= ~bad_qa_mask
-
-        # RADSAT Accept Value
-        if self.mask_radsat_enabled:
-            bad_radsat = data_grp['RADIOMETRIC_SATURATION'][f_idx, ...] != RADSAT_ACCEPT_VALUE
-            kernel = np.ones((3, 3), dtype=bool)
-            bad_radsat = ndimage.binary_dilation(bad_radsat, structure=kernel, iterations=1)
-            valid_mask &= ~bad_radsat
-
-        # Aerosol Accept Values
-        if self.aerosol_level != 'all':
-            aerosol = data_grp['QUALITY_L2_AEROSOL'][f_idx, ...]
-            invalid_aerosol = ~np.isin(aerosol, AEROSOL_DICT[self.aerosol_level])
-            kernel = np.ones((3, 3), dtype=bool)
-            invalid_aerosol = ndimage.binary_dilation(invalid_aerosol, structure=kernel, iterations=1)
-            valid_mask &= ~invalid_aerosol
-
-        return valid_mask
+        qa_reject = QA_REJECT_MASK if self.mask_qa_enabled else 0
+        
+        return sc.get_landsat_mask(
+            data_grp=data_grp,
+            f_idx=f_idx,
+            shape=shape,
+            sun_elevation_threshold=self.sun_elev_thresh,
+            cloud_dilation=self.cloud_dilation,
+            qa_reject_mask=qa_reject,
+            radsat_accept_value=RADSAT_ACCEPT_VALUE,
+            aerosol_accept_level=self.aerosol_level
+        )
 
     def _get_tanager_mask(self, data_grp, f_idx, shape):
-        """Generates a boolean mask for TANAGER data based on active UI filters."""
-        valid_mask = np.ones(shape, dtype=bool)
-        
+        """Generates a boolean mask for TANAGER data via SpecComplex."""
         if not MASKING:
-            return valid_mask
+            return np.ones(shape, dtype=bool)
 
-        # Cloud Mask Check
-        cloud_mask = (data_grp['beta_cloud_mask'][f_idx, ...]==1)
-        cirrus_mask = (data_grp['beta_cirrus_mask'][f_idx, ...]==1)
-        combined_cloud = cloud_mask | cirrus_mask
-        if self.cloud_dilation > 0:
-            kernel = np.ones((3, 3), dtype=bool)
-            combined_cloud = ndimage.binary_dilation(combined_cloud, structure=kernel, iterations=self.cloud_dilation)
-        valid_mask &= ~combined_cloud
-        
-        # Sun Elevation Check (Derived from Sun Zenith)
-        zenith = data_grp['sun_zenith'][f_idx, ...]
-        # Filter out fill value (-9999.0) and enforce elevation threshold
-        valid_mask &= (zenith != -9999.0) & ((90.0 - zenith) >= self.sun_elev_thresh)
-            
-        # Aerosol Optical Depth Check
-        aod = data_grp['aerosol_optical_depth'][f_idx, ...]
-        # Filter out fill value (-9999.0) and enforce AOD threshold
-        bad_aod_mask = (aod == -9999.0) | (aod <= self.t_aerosol_thresh)
-        if self.t_aerosol_thresh > 0:
-            kernel = np.ones((3, 3), dtype=bool)
-            bad_aod_mask = ndimage.binary_dilation(bad_aod_mask, structure=kernel, iterations=1)
-        valid_mask &= ~bad_aod_mask
-            
-        # Surface Reflectance Uncertainty Check
-        gw_mask = data_grp['surface_reflectance'].attrs['all_good_wavelengths']
-        valid_bands = gw_mask[f_idx].astype(bool)
-        unc = np.nanmax(data_grp['surface_reflectance_uncertainty'][f_idx, valid_bands, ...], axis=0)
-            
-        # Filter out fill value (-9999.0) and enforce uncertainty threshold
-        unc_mask = (unc == -9999.0) | (unc >= self.t_uncertainty_thresh)
-        if self.t_uncertainty_thresh > 0:
-            kernel = np.ones((3, 3), dtype=bool)
-            unc_mask = ndimage.binary_dilation(unc_mask, structure=kernel, iterations=1)
-        valid_mask &= ~unc_mask
-            
-        return valid_mask
+        return sc.get_tanager_mask(
+            data_grp=data_grp,
+            f_idx=f_idx,
+            shape=shape,
+            sun_elevation_threshold=self.sun_elev_thresh,
+            cloud_dilation=self.cloud_dilation,
+            apply_cloud_mask=True,
+            uncertainty_threshold=self.t_uncertainty_thresh,
+            aerosol_depth_threshold=self.t_aerosol_thresh
+        )
 
     def update_display(self):
         frame_info = self.all_frames[self.current_idx]
@@ -507,19 +473,21 @@ class MultiComplexityViewer:
 
         hull_bands = HULL_BANDS_LANDSAT if frame_info['source'] == 'LANDSAT' else HULL_BANDS_TANAGER
 
+        h, w = sr_data.shape[1:]
+
         # --- Row 1: Spatial & Spectral Analysis ---
         self.ax_spatial.clear()
-        self.ax_spatial.imshow(rgb)
+        self.ax_spatial.imshow(rgb, extent=[0, w, h, 0])
         em_indices = data_grp['frame_endmember_indices'][f_idx]
-        h, w = sr_data.shape[1:]
+        
         for i, flat_idx in enumerate(em_indices):
             row, col = flat_idx // w, flat_idx % w
-            self.ax_spatial.plot(col, row, 'r+', markersize=8)
-            self.ax_spatial.annotate(f'V{i}', (col, row), color='yellow', fontsize=8, fontweight='bold')
+            self.ax_spatial.plot(col + 0.5, row + 0.5, 'r+', markersize=8)
+            self.ax_spatial.annotate(f'V{i}', (col + 0.5, row + 0.5), color='yellow', fontsize=8, fontweight='bold')
         
         for loc in TS_LOCATIONS:
             y, x = loc['yx']
-            self.ax_spatial.plot(x, y, marker='s', markersize=10, markeredgecolor=loc['color'], 
+            self.ax_spatial.plot(x + 0.5, y + 0.5, marker='s', markersize=10, markeredgecolor=loc['color'], 
                                  markerfacecolor='none', markeredgewidth=1.5, linestyle='None')
 
         self.ax_spatial.set_title(f"EM Locations ({frame_info['source']})", color='black')
@@ -527,19 +495,13 @@ class MultiComplexityViewer:
 
         if DISPLAY_REDUNDANT_FIGURE:
             self.ax_spatial_redundant.clear()
-            self.ax_spatial_redundant.imshow(rgb)
-            for i, flat_idx in enumerate(em_indices):
-                row, col = flat_idx // w, flat_idx % w
-                self.ax_spatial_redundant.plot(col, row, 'r+', markersize=8)
-                self.ax_spatial_redundant.annotate(f'V{i}', (col, row), color='yellow', fontsize=8, fontweight='bold')
+            self.ax_spatial_redundant.imshow(rgb, extent=[0, w, h, 0])
             for loc in TS_LOCATIONS:
                 y, x = loc['yx']
-                self.ax_spatial_redundant.plot(x, y, marker='s', markersize=10, markeredgecolor=loc['color'], 
+                self.ax_spatial_redundant.plot(x + 0.5, y + 0.5, marker='s', markersize=10, markeredgecolor=loc['color'], 
                                      markerfacecolor='none', markeredgewidth=1.5, linestyle='None')
-            self.ax_spatial_redundant.set_title("EM Locations")
+            self.ax_spatial_redundant.set_title("Time Series Locations")
             self.ax_spatial_redundant.axis('off')
-            
-            self.fig_redundant.suptitle(f"{frame_info['sat_id']} - {curr_dt.strftime('%Y-%m-%d %H:%M:%S UTC')}\n{filter_str}", fontsize=14)
 
         self.ax_spectral.clear()
         endmembers = data_grp['frame_endmembers'][f_idx, ...]
@@ -559,13 +521,14 @@ class MultiComplexityViewer:
         self.ax_vol_curve.plot(np.arange(1, len(vols)+1), np.pad(vols[2:], (2,0), 'constant', constant_values=0), 'o-', markersize=4, color='green')
         self.ax_vol_curve.set_title("Complexity Curve")
         self.ax_vol_curve.set_xlabel("Endmember Count")
-        self.ax_vol_curve.set_ylabel("Volume")
+        self.ax_vol_curve.set_ylabel("Spectral Complexity")
         self.ax_vol_curve.grid(True, alpha=0.2)
 
         # --- Row 2: Maps and Time Series ---
 
         def update_map(ax, dset, im_attr, cbar_attr, title):
             data = dset[f_idx].copy()
+            mh, mw = data.shape
             
             # Dynamically apply UI masks for both sensors
             if frame_info['source'] == 'LANDSAT':
@@ -575,38 +538,49 @@ class MultiComplexityViewer:
                 mask = self._get_tanager_mask(data_grp, f_idx, data.shape)
                 data[~mask] = np.nan
             
-            if DISPLAY_NORMALIZATION:
-                data = percentile_normalize_array(data)
+            # Determine visual clipping bounds based on data percentiles,
+            # decoupling the contrast stretch from the true array values.
+            with np.errstate(all='ignore'):
+                if DISPLAY_NORMALIZATION and not np.all(np.isnan(data)):
+                    v_min, v_max = np.nanpercentile(data, (2, 98))
+                else:
+                    v_min, v_max = np.nanmin(data), np.nanmax(data)
+                    
+            # Fallback for degenerate bounds to prevent Matplotlib crashing
+            if np.isnan(v_min) or np.isnan(v_max):
+                v_min, v_max = 0, 1
+            elif v_min == v_max:
+                v_max = v_min + 1e-6
             
             curr_im = getattr(self, im_attr)
             curr_cbar = getattr(self, cbar_attr)
 
             if curr_im is None:
-                new_im = ax.imshow(data, cmap='viridis')
+                new_im = ax.imshow(data, cmap='viridis', extent=[0, mw, mh, 0], vmin=v_min, vmax=v_max)
                 setattr(self, im_attr, new_im)
                 
-                new_cbar = ax.figure.colorbar(new_im, ax=ax, fraction=0.046, pad=0.04)
+                if complexity_type == 'sliding_volume_map':
+                    new_cbar = ax.figure.colorbar(new_im, format='%.1e', ax=ax, fraction=0.046, pad=0.04)
+                else:
+                    new_cbar = ax.figure.colorbar(new_im, ax=ax, fraction=0.046, pad=0.04)
                 setattr(self, cbar_attr, new_cbar)
                 
                 for loc in TS_LOCATIONS:
                     y, x = loc['yx']
-                    ax.plot(x, y, marker='s', markersize=10, markeredgecolor=loc['color'], 
+                    ax.plot(x + 0.5, y + 0.5, marker='s', markersize=10, markeredgecolor=loc['color'], 
                             markerfacecolor='none', markeredgewidth=1.5, linestyle='None')
                 
                 ax.set_title(title)
                 ax.axis('off')
             else:
                 curr_im.set_data(data)
-                with np.errstate(all='ignore'):
-                    v_min, v_max = np.nanmin(data), np.nanmax(data)
-                if not np.isnan(v_min) and not np.isnan(v_max):
-                    curr_im.set_clim(vmin=v_min, vmax=v_max)
+                curr_im.set_clim(vmin=v_min, vmax=v_max)
                 curr_cbar.update_normal(curr_im)
 
-        update_map(self.ax_slide_map, data_grp[complexity_type], 'im_slide', 'cbar_slide', "Sliding Complexity")
+        update_map(self.ax_slide_map, data_grp[complexity_type], 'im_slide', 'cbar_slide', COMPLEXITY_DICT[complexity_type])
         
         if DISPLAY_REDUNDANT_FIGURE:
-            update_map(self.ax_slide_map_redundant, data_grp[complexity_type], 'im_slide_redundant', 'cbar_slide_redundant', "Sliding Complexity")
+            update_map(self.ax_slide_map_redundant, data_grp[complexity_type], 'im_slide_redundant', 'cbar_slide_redundant', COMPLEXITY_DICT[complexity_type])
         
         # --- Time Series Construction and Plotting ---
         self.ax_ts_main.clear()
@@ -701,12 +675,15 @@ class MultiComplexityViewer:
             # Format Legends and Y Labels
             lines_1, labels_1 = ax_main.get_legend_handles_labels()
             if self.use_twin_axis and ax_twin is not None:
-                ax_main.set_ylabel("Landsat Volume", color='black', fontweight='bold')
-                ax_twin.set_ylabel("Tanager Volume", color='black', fontweight='bold')
+                ax_main.set_ylabel("Landsat Spectral Complexity", color='black', fontweight='bold')
+                ax_twin.set_ylabel("Tanager Spectral Complexity", color='black', fontweight='bold')
+                if complexity_type == 'sliding_volume_map':
+                    ax_main.set_yscale('log')
+                    ax_twin.set_yscale('log')
                 lines_2, labels_2 = ax_twin.get_legend_handles_labels()
                 ax_main.legend(lines_1 + lines_2, labels_1 + labels_2, loc='upper left', fontsize=8, ncol=2)
             else:
-                ax_main.set_ylabel("Volume", fontweight='bold')
+                ax_main.set_ylabel("Spectral Complexity", fontweight='bold')
                 ax_main.legend(loc='upper left', fontsize=8, ncol=2)
 
         # Plot onto the primary layout
@@ -715,7 +692,11 @@ class MultiComplexityViewer:
         # Plot onto the new standalone redundant layout
         if DISPLAY_REDUNDANT_FIGURE:
             plot_time_series(self.ax_ts_redundant_main, self.ax_ts_redundant_twin)
-            self.fig_ts_redundant.suptitle(f"Time Series Extraction | {frame_info['sat_id']} - {curr_dt.strftime('%Y-%m-%d %H:%M:%S UTC')}\n{filter_str}", fontsize=14)
+            
+            # Apply ET formatting to the title block
+            curr_dt_et = curr_dt.astimezone(ZoneInfo("America/New_York"))
+            time_str_et = curr_dt_et.strftime('%Y-%m-%d %H:%M:%S ET')
+            self.fig_redundant.suptitle(f"Time Series Extraction | {frame_info['sat_id']} - {time_str_et}\n{filter_str}", fontsize=14)
 
         # --- 3D Parallelotope Figure ---
         self.ax_hull.clear()
@@ -811,7 +792,6 @@ class MultiComplexityViewer:
         figs_to_draw = [self.fig_controls, self.fig_combined, self.fig_hull]
         if DISPLAY_REDUNDANT_FIGURE:
             figs_to_draw.append(self.fig_redundant)
-            figs_to_draw.append(self.fig_ts_redundant)
         
         for f in figs_to_draw:
             f.canvas.draw_idle()
@@ -954,8 +934,13 @@ class MultiComplexityViewer:
         l_flat = l_data[:h, :w].flatten()
         t_flat = t_data[:h, :w].flatten()
 
-        # Remove NaNs and strict zeros
-        valid_mask = (~np.isnan(l_flat)) & (~np.isnan(t_flat)) & (l_flat > 0) & (t_flat > 0)
+        # Masking Logic Update: 
+        # Z-Scores are centered around 0 and include negative values. Masking > 0 would illegally alter ground truth.
+        if complexity_type == 'sliding_volume_z_score':
+            valid_mask = (~np.isnan(l_flat)) & (~np.isnan(t_flat))
+        else:
+            valid_mask = (~np.isnan(l_flat)) & (~np.isnan(t_flat)) & (l_flat > 0) & (t_flat > 0)
+            
         l_valid = l_flat[valid_mask]
         t_valid = t_flat[valid_mask]
         
@@ -976,29 +961,33 @@ class MultiComplexityViewer:
                                   f"Mean Ratio: {mean_ratio:.4f}\n"
                                   f"Linear Fit: T = {lin_slope:.2f}L + {lin_intercept:.2f}")
 
-            log_l = np.log10(l_valid)
-            log_t = np.log10(t_valid)
-            logRatios = log_t / log_l
-            median_logRatio = np.median(logRatios)
-            mean_logRatio = np.mean(logRatios)
-            log_pearson, _ = pearsonr(log_l, log_t)
-            log_spearman, _ = spearmanr(log_l, log_t)
-            
-            # Calculate Log-Log Fit (Exponential)
-            log_slope, log_intercept = np.polyfit(log_l, log_t, 1)
-            
-            logStats_text_scatter = (f"Tiles Analyzed: {len(l_valid)}\n"
-                                  f"Log Pearson r: {log_pearson:.4f}\n"
-                                  f"Log Spearman r: {log_spearman:.4f}\n"
-                                  f"Median Log Ratio: {median_logRatio:.4f}\n"
-                                  f"Mean Log Ratio: {mean_logRatio:.4f}\n"
-                                  f"Exp Fit: T = {10**log_intercept:.2f} * L^{log_slope:.2f}")
+            # Z-Score integrity check: taking log10 of negative values raises fatal math domain errors
+            if complexity_type != 'sliding_volume_z_score':
+                log_l = np.log10(l_valid)
+                log_t = np.log10(t_valid)
+                logRatios = log_t / log_l
+                median_logRatio = np.median(logRatios)
+                mean_logRatio = np.mean(logRatios)
+                log_pearson, _ = pearsonr(log_l, log_t)
+                log_spearman, _ = spearmanr(log_l, log_t)
+                
+                # Calculate Log-Log Fit (Exponential)
+                log_slope, log_intercept = np.polyfit(log_l, log_t, 1)
+                
+                logStats_text_scatter = (f"Tiles Analyzed: {len(l_valid)}\n"
+                                      f"Log Pearson r: {log_pearson:.4f}\n"
+                                      f"Log Spearman r: {log_spearman:.4f}\n"
+                                      f"Median Log Ratio: {median_logRatio:.4f}\n"
+                                      f"Mean Log Ratio: {mean_logRatio:.4f}\n"
+                                      f"Exp Fit: T = {10**log_intercept:.2f} * L^{log_slope:.2f}")
+            else:
+                logStats_text_scatter = "N/A (Log-scaling invalid for Z-scores)"
         else:
             stats_text_scatter = logStats_text_scatter = "N/A"
 
         if self.fig_scatter is None or not plt.fignum_exists(self.fig_scatter.number):
             self.fig_scatter = plt.figure(figsize=(12, 10))
-            self.fig_scatter.canvas.manager.set_window_title("Sliding Volume Correlation Scatter")
+            self.fig_scatter.canvas.manager.set_window_title(f"{COMPLEXITY_DICT[complexity_type]} Correlation Scatter")
             self.ax_scatter_lin = self.fig_scatter.add_subplot(221)
             self.ax_scatter_log = self.fig_scatter.add_subplot(222)
             self.ax_hist_l = self.fig_scatter.add_subplot(223)
@@ -1011,7 +1000,7 @@ class MultiComplexityViewer:
         
         if len(l_valid) > 0:
             # --- Linear Subplot ---
-            self.ax_scatter_lin.scatter(l_valid, t_valid, alpha=0.3, s=10, label='Sliding Window Tiles', color='tab:purple')
+            self.ax_scatter_lin.scatter(l_valid, t_valid, alpha=0.3, s=10, label=f'{COMPLEXITY_DICT[complexity_type]} Window Tiles', color='tab:purple')
             
             # Plot Linear Regression Line
             l_range_lin = np.array([np.min(l_valid), np.max(l_valid)])
@@ -1019,8 +1008,8 @@ class MultiComplexityViewer:
             self.ax_scatter_lin.plot(l_range_lin, t_fit_lin, color='red', linewidth=2, label='Linear Fit')
             
             self.ax_scatter_lin.set_title(f"Linear Scale\nLANDSAT ({l_date_str}) vs TANAGER ({t_date_str})")
-            self.ax_scatter_lin.set_xlabel(f"LANDSAT Volume")
-            self.ax_scatter_lin.set_ylabel(f"TANAGER Volume")
+            self.ax_scatter_lin.set_xlabel(f"LANDSAT {COMPLEXITY_DICT[complexity_type]}")
+            self.ax_scatter_lin.set_ylabel(f"TANAGER {COMPLEXITY_DICT[complexity_type]}")
             self.ax_scatter_lin.grid(True, alpha=0.3)
             if MASKING:
                 qa_val = bin(QA_REJECT_MASK) if self.mask_qa_enabled else "OFF"
@@ -1033,30 +1022,41 @@ class MultiComplexityViewer:
             self.ax_scatter_lin.legend()
 
             # --- Log-Log Subplot ---
-            self.ax_scatter_log.scatter(l_valid, t_valid, alpha=0.3, s=10, label='Sliding Window Tiles', color='tab:orange')
+            if complexity_type != 'sliding_volume_z_score':
+                self.ax_scatter_log.scatter(l_valid, t_valid, alpha=0.3, s=10, label=f'{COMPLEXITY_DICT[complexity_type]} Window Tiles', color='tab:orange')
+                
+                # Plot Log-Log Regression Line
+                l_range_log = np.array([np.min(l_valid), np.max(l_valid)])
+                t_fit_log = (10**log_intercept) * (l_range_log ** log_slope)
+                self.ax_scatter_log.plot(l_range_log, t_fit_log, color='red', linewidth=2, label='Exponential Fit')
+                
+                self.ax_scatter_log.set_title(f"Log-Log Scale\nLANDSAT ({l_date_str}) vs TANAGER ({t_date_str})")
+                self.ax_scatter_log.set_xlabel(f"LANDSAT {COMPLEXITY_DICT[complexity_type]}")
+                self.ax_scatter_log.set_ylabel(f"TANAGER {COMPLEXITY_DICT[complexity_type]}")
+                self.ax_scatter_log.set_xscale('log')
+                self.ax_scatter_log.set_yscale('log')
+                self.ax_scatter_log.grid(True, alpha=0.3, which="both", ls="--")
+                self.ax_scatter_log.text(0.95, 0.05, logStats_text_scatter, transform=self.ax_scatter_log.transAxes, 
+                                         ha='right', va='bottom', fontsize=9, bbox=dict(boxstyle='round', facecolor='white', alpha=0.5))
+                self.ax_scatter_log.legend()
+            else:
+                # Intentionally blank out the subplot to prevent false assumptions/rendering of undefined math
+                self.ax_scatter_log.set_title(f"Log-Log Scale\n(Not mathematically defined for Z-Scores)")
+                self.ax_scatter_log.axis('off')
             
-            # Plot Log-Log Regression Line
-            l_range_log = np.array([np.min(l_valid), np.max(l_valid)])
-            t_fit_log = (10**log_intercept) * (l_range_log ** log_slope)
-            self.ax_scatter_log.plot(l_range_log, t_fit_log, color='red', linewidth=2, label='Exponential Fit')
-            
-            self.ax_scatter_log.set_title(f"Log-Log Scale\nLANDSAT ({l_date_str}) vs TANAGER ({t_date_str})")
-            self.ax_scatter_log.set_xlabel(f"LANDSAT Volume")
-            self.ax_scatter_log.set_ylabel(f"TANAGER Volume")
-            self.ax_scatter_log.set_xscale('log')
-            self.ax_scatter_log.set_yscale('log')
-            self.ax_scatter_log.grid(True, alpha=0.3, which="both", ls="--")
-            self.ax_scatter_log.text(0.95, 0.05, logStats_text_scatter, transform=self.ax_scatter_log.transAxes, 
-                                     ha='right', va='bottom', fontsize=9, bbox=dict(boxstyle='round', facecolor='white', alpha=0.5))
-            self.ax_scatter_log.legend()
-            
-            # --- Landsat Histogram Subplot (Log-Scaled Bins) ---
-            # Calculate 256 bin edges equally spaced in log10 space
-            bins_l = np.logspace(np.log10(np.min(l_valid)), np.log10(np.max(l_valid)), 256)
-            self.ax_hist_l.hist(l_valid, bins=bins_l, color='tab:purple', alpha=0.7)
-            self.ax_hist_l.set_xscale('log')
-            self.ax_hist_l.set_title(f"LANDSAT Volume Distribution\n({l_date_str})")
-            self.ax_hist_l.set_xlabel("Volume (Log Scale)")
+            # --- Landsat Histogram Subplot (Conditional Binning) ---
+            if complexity_type == 'sliding_volume_z_score':
+                bins_l = np.linspace(np.min(l_valid), np.max(l_valid), 256)
+                self.ax_hist_l.hist(l_valid, bins=bins_l, color='tab:purple', alpha=0.7)
+                self.ax_hist_l.set_title(f"LANDSAT {COMPLEXITY_DICT[complexity_type]} Distribution\n({l_date_str})")
+                self.ax_hist_l.set_xlabel(f"LANDSAT {COMPLEXITY_DICT[complexity_type]} (Linear Scale)")
+            else:
+                bins_l = np.logspace(np.log10(np.min(l_valid)), np.log10(np.max(l_valid)), 256)
+                self.ax_hist_l.hist(l_valid, bins=bins_l, color='tab:purple', alpha=0.7)
+                self.ax_hist_l.set_xscale('log')
+                self.ax_hist_l.set_title(f"LANDSAT {COMPLEXITY_DICT[complexity_type]} Distribution\n({l_date_str})")
+                self.ax_hist_l.set_xlabel(f"LANDSAT {COMPLEXITY_DICT[complexity_type]} (Log Scale)")
+                
             self.ax_hist_l.set_ylabel("Frequency")
             self.ax_hist_l.grid(True, alpha=0.3, which="both", ls="--")
             
@@ -1066,12 +1066,19 @@ class MultiComplexityViewer:
             self.ax_hist_l.text(0.95, 0.95, l_stats_text, transform=self.ax_hist_l.transAxes, 
                                 ha='right', va='top', fontsize=9, bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
 
-            # --- Tanager Histogram Subplot (Log-Scaled Bins) ---
-            bins_t = np.logspace(np.log10(np.min(t_valid)), np.log10(np.max(t_valid)), 256)
-            self.ax_hist_t.hist(t_valid, bins=bins_t, color='tab:orange', alpha=0.7)
-            self.ax_hist_t.set_xscale('log')
-            self.ax_hist_t.set_title(f"TANAGER Volume Distribution\n({t_date_str})")
-            self.ax_hist_t.set_xlabel("Volume (Log Scale)")
+            # --- Tanager Histogram Subplot (Conditional Binning) ---
+            if complexity_type == 'sliding_volume_z_score':
+                bins_t = np.linspace(np.min(t_valid), np.max(t_valid), 256)
+                self.ax_hist_t.hist(t_valid, bins=bins_t, color='tab:orange', alpha=0.7)
+                self.ax_hist_t.set_title(f"TANAGER {COMPLEXITY_DICT[complexity_type]} Distribution\n({t_date_str})")
+                self.ax_hist_t.set_xlabel(f"TANAGER {COMPLEXITY_DICT[complexity_type]} (Linear Scale)")
+            else:
+                bins_t = np.logspace(np.log10(np.min(t_valid)), np.log10(np.max(t_valid)), 256)
+                self.ax_hist_t.hist(t_valid, bins=bins_t, color='tab:orange', alpha=0.7)
+                self.ax_hist_t.set_xscale('log')
+                self.ax_hist_t.set_title(f"TANAGER {COMPLEXITY_DICT[complexity_type]} Distribution\n({t_date_str})")
+                self.ax_hist_t.set_xlabel(f"TANAGER {COMPLEXITY_DICT[complexity_type]} (Log Scale)")
+                
             self.ax_hist_t.set_ylabel("Frequency")
             self.ax_hist_t.grid(True, alpha=0.3, which="both", ls="--")
             
@@ -1081,16 +1088,16 @@ class MultiComplexityViewer:
             self.ax_hist_t.text(0.95, 0.95, t_stats_text, transform=self.ax_hist_t.transAxes, 
                                 ha='right', va='top', fontsize=9, bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
             
-            self.fig_scatter.suptitle(f"Sliding Volume Correlation | LANDSAT ({l_date_str}) vs TANAGER ({t_date_str})\n{filter_str}", fontsize=14)
+            self.fig_scatter.suptitle(f"{COMPLEXITY_DICT[complexity_type]} Correlation | LANDSAT ({l_date_str}) vs TANAGER ({t_date_str})\n{filter_str}", fontsize=14)
             self.fig_scatter.tight_layout(rect=[0, 0.03, 1, 0.95]) # Prevent suptitle overlap
         else:
-            self.ax_scatter_lin.set_title(f"Sliding Volume Correlation (Linear)")
+            self.ax_scatter_lin.set_title(f"{COMPLEXITY_DICT[complexity_type]} Correlation (Linear)")
             self.ax_scatter_lin.text(0.5, 0.5, "No valid data to plot.", ha='center', va='center', transform=self.ax_scatter_lin.transAxes)
-            self.ax_scatter_log.set_title(f"Sliding Volume Correlation (Log-Log)")
+            self.ax_scatter_log.set_title(f"{COMPLEXITY_DICT[complexity_type]} Correlation (Log-Log)")
             self.ax_scatter_log.text(0.5, 0.5, "No valid data to plot.", ha='center', va='center', transform=self.ax_scatter_log.transAxes)
-            self.ax_hist_l.set_title("LANDSAT Volume Distribution")
+            self.ax_hist_l.set_title(f"LANDSAT {COMPLEXITY_DICT[complexity_type]} Distribution")
             self.ax_hist_l.text(0.5, 0.5, "No valid data to plot.", ha='center', va='center', transform=self.ax_hist_l.transAxes)
-            self.ax_hist_t.set_title("TANAGER Volume Distribution")
+            self.ax_hist_t.set_title(f"TANAGER {COMPLEXITY_DICT[complexity_type]} Distribution")
             self.ax_hist_t.text(0.5, 0.5, "No valid data to plot.", ha='center', va='center', transform=self.ax_hist_t.transAxes)
 
         self.fig_scatter.canvas.draw_idle()
@@ -1148,7 +1155,6 @@ class MultiComplexityViewer:
         figs_to_save = [(self.fig_combined, "CombinedAnalysis")]
         if DISPLAY_REDUNDANT_FIGURE:
             figs_to_save.append((self.fig_redundant, "SpatialComplexityDetails"))
-            figs_to_save.append((self.fig_ts_redundant, "TimeSeriesDetail"))
             
         for fig, name in figs_to_save:
             path = os.path.join(save_path, f"{prefix}_{name}.png")
@@ -1156,12 +1162,6 @@ class MultiComplexityViewer:
             print(f"Saved: {path}")
 
     def run(self): plt.show()
-
-def percentile_normalize_array(arr, low=2, high=98):
-    if np.all(np.isnan(arr)): return np.zeros_like(arr)
-    p_low, p_high = np.nanpercentile(arr, (low, high))
-    if p_low == p_high: return np.zeros_like(arr)
-    return exposure.rescale_intensity(arr, in_range=(p_low, p_high), out_range=(0, 1)).clip(0, 1)
 
 if __name__ == "__main__":
     root = tk.Tk(); root.withdraw()

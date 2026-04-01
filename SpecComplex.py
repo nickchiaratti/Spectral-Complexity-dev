@@ -2,7 +2,108 @@ import numpy as np
 import math
 import warnings
 from skimage import exposure
+from scipy import ndimage
 
+
+# Mapped levels for Aerosol_Optical_Depth
+AEROSOL_DICT = {
+    'low': [2, 4, 32, 66, 68, 96, 100],
+    'medium': [2, 4, 32, 66, 68, 96, 100, 130, 132, 160, 164],
+    'high': [2, 4, 32, 66, 68, 96, 100, 130, 132, 160, 164, 192, 194, 196, 224, 228] # Aerosol_Optical_Depth > 0.3
+}
+
+def get_landsat_mask(data_grp, f_idx, shape, 
+                     sun_elevation_threshold=25, 
+                     cloud_dilation=0, 
+                     qa_reject_mask=0b111111, 
+                     radsat_accept_value=0, 
+                     aerosol_accept_level='medium'):
+    """
+    Generates a boolean spatial mask for LANDSAT data using Quality Assessment (QA) bands.
+    Valid pixels return True, masked pixels return False.
+    """
+    valid_mask = np.ones(shape, dtype=bool)
+    kernel = np.ones((3, 3), dtype=bool)
+    
+    # Sun Elevation Check (Fails loudly if attribute is missing)
+    sun_elev_arr = data_grp['surface_reflectance'].attrs['sun_elevation']
+    if sun_elev_arr[f_idx] < sun_elevation_threshold:
+        return np.zeros(shape, dtype=bool)
+
+    # QA Reject Mask
+    qa_pixel = data_grp['QUALITY_L1_PIXEL'][f_idx, ...]
+    bad_qa_mask = (qa_pixel & qa_reject_mask) != 0
+    if cloud_dilation > 0:
+        bad_qa_mask = ndimage.binary_dilation(bad_qa_mask, structure=kernel, iterations=cloud_dilation)
+    valid_mask &= ~bad_qa_mask
+
+    # RADSAT Accept Value
+    bad_radsat = data_grp['RADIOMETRIC_SATURATION'][f_idx, ...] != radsat_accept_value
+    valid_mask &= ~bad_radsat
+
+    # Aerosol Accept Values
+    if aerosol_accept_level != 'all':
+        aerosol = data_grp['QUALITY_L2_AEROSOL'][f_idx, ...]
+        
+        accepted_values = AEROSOL_DICT.get(aerosol_accept_level)
+        if accepted_values is None:
+            raise ValueError(f"Invalid aerosol_accept_level: '{aerosol_accept_level}'. Must be 'low', 'medium', or 'high'.")
+            
+        invalid_aerosol = ~np.isin(aerosol, accepted_values)
+        if cloud_dilation > 0:
+            invalid_aerosol = ndimage.binary_dilation(invalid_aerosol, structure=kernel, iterations=cloud_dilation)
+        valid_mask &= ~invalid_aerosol
+
+    return valid_mask
+
+def get_tanager_mask(data_grp, f_idx, shape, 
+                     sun_elevation_threshold=25, 
+                     cloud_dilation=2, 
+                     apply_cloud_mask=True, 
+                     uncertainty_threshold=0.1, 
+                     aerosol_depth_threshold=0.3):
+    """
+    Generates a boolean spatial mask for TANAGER data using beta masks and uncertainty.
+    Valid pixels return True, masked pixels return False.
+    """
+    valid_mask = np.ones(shape, dtype=bool)
+    kernel = np.ones((3, 3), dtype=bool)
+    
+    # Cloud Mask Check
+    if apply_cloud_mask:
+        c_mask = (data_grp['beta_cloud_mask'][f_idx, ...] == 1)
+        cirrus_mask = (data_grp['beta_cirrus_mask'][f_idx, ...] == 1)
+        combined_cloud = c_mask | cirrus_mask
+        if cloud_dilation > 0:
+            combined_cloud = ndimage.binary_dilation(combined_cloud, structure=kernel, iterations=cloud_dilation)
+        valid_mask &= ~combined_cloud
+    
+    # Sun Elevation Check (Derived from Sun Zenith)
+    zenith = data_grp['sun_zenith'][f_idx, ...]
+    valid_mask &= (zenith != -9999.0) & ((90.0 - zenith) >= sun_elevation_threshold)
+        
+    # Aerosol Optical Depth Check
+    aod = data_grp['aerosol_optical_depth'][f_idx, ...]
+    bad_aod_mask = (aod == -9999.0) | (aod >= aerosol_depth_threshold) | np.isnan(aod)
+    if cloud_dilation > 0:
+        bad_aod_mask = ndimage.binary_dilation(bad_aod_mask, structure=kernel, iterations=cloud_dilation)
+    valid_mask &= ~bad_aod_mask
+        
+    # Surface Reflectance Uncertainty Check
+    gw_mask = data_grp['surface_reflectance'].attrs['all_good_wavelengths']
+    valid_bands = gw_mask[f_idx].astype(bool)
+    
+    # Suppress all-NaN slice warnings since we explicitly catch the resulting NaNs on the next line
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=RuntimeWarning)
+        unc = np.nanmax(data_grp['surface_reflectance_uncertainty'][f_idx, valid_bands, ...], axis=0)
+        
+    unc_mask = (unc == -9999.0) | (unc >= uncertainty_threshold) | np.isnan(unc)
+    if cloud_dilation > 0:
+        unc_mask = ndimage.binary_dilation(unc_mask, structure=kernel, iterations=cloud_dilation)
+    valid_mask &= ~unc_mask
+        
+    return valid_mask
 
 def maximumDistance(data, num_endmembers):
     '''
@@ -401,10 +502,12 @@ Sandbox
 
 '''
 
-def calculate_global_z_score(volume_array):
+def calculate_global_z_score(volume_array, valid_pixel_mask):
     """
     Calculates the global Z-score for an entire frame of spectral complexity volumes.
-    Uses log-transformation to enforce normality on the heavily right-skewed volume data.
+    Decouples the evaluation space from the background statistics space by strictly 
+    calculating the mean and standard deviation from radiometrically valid pixels, 
+    preventing artifacts from skewing the background model.
     """
     print("Calculating global Z-score for frame")
     height, width = volume_array.shape
@@ -413,25 +516,32 @@ def calculate_global_z_score(volume_array):
     # Identify globally valid pixels (strictly positive for log transform)
     global_valid_mask = volume_array > 0.0
     
-    if not np.any(global_valid_mask):
-        warnings.warn("No valid volumes found in frame > 0. Returning NaNs.")
+    # Intersect with radiometrically valid pixels for the statistical background model
+    stats_mask = global_valid_mask & valid_pixel_mask
+    
+    # Graceful fallback per user directive: Return NaNs for entire frame if no valid background exists.
+    if not np.any(stats_mask):
+        warnings.warn("calculate_global_z_score warning: No radiometrically valid pixels with volume > 0 found. Returning NaNs.")
         return z_scores
         
-    # Extract valid volumes and apply log transform to normalize distribution
-    valid_vols = volume_array[global_valid_mask]
-    log_vols = np.log(valid_vols)
+    # Extract subset volumes strictly for statistical estimation
+    stats_vols = volume_array[stats_mask]
+    log_stats_vols = np.log(stats_vols)
     
-    # Calculate global scene statistics
-    global_mean = np.mean(log_vols)
-    global_std = np.std(log_vols)
+    # Calculate global scene statistics (using ddof=1 for unbiased sample estimator)
+    global_mean = np.mean(log_stats_vols)
+    global_std = np.std(log_stats_vols, ddof=1)
     
-    if global_std <= 1e-6:
-        warnings.warn("Global standard deviation is zero. Returning 0 Z-scores.")
-        z_scores[global_valid_mask] = 0.0
-        return z_scores
+    # Strict failure handling: Prevent training on synthetically flat frames
+    if global_std == 0:
+        raise ValueError("calculate_global_z_score failed: Global standard deviation of the radiometrically valid subset is exactly zero.")
         
+    # Evaluate ALL geometrically valid pixels using the pure background model
+    apply_vols = volume_array[global_valid_mask]
+    log_apply_vols = np.log(apply_vols)
+    
     # Apply standard Z-score equation
-    z_scores[global_valid_mask] = (log_vols - global_mean) / global_std
+    z_scores[global_valid_mask] = (log_apply_vols - global_mean) / global_std
     
     return z_scores
 

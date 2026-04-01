@@ -4,11 +4,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 from datetime import datetime, timezone
-try:
-    from zoneinfo import ZoneInfo
-except ImportError:
-    from backports.zoneinfo import ZoneInfo # For Python < 3.9
-
+from contextlib import ExitStack
+from zoneinfo import ZoneInfo
 import rasterio.transform
 from pyproj import Transformer, CRS
 
@@ -16,30 +13,44 @@ from pyproj import Transformer, CRS
 # 1. VIDEO & EXTRACTION CONFIGURATION
 # ==========================================
 
+background_color = 'w' # Dark Slate Gray shows through transparent pixels
+text_color = 'black'
+
 # File Paths
-landsat_path = "C:/satelliteImagery/LANDSAT/Rochester/LANDSAT_Stack_Rochester_GEE_2015_2025_SC_EM-7_Gram-minEndmember_Norm-bandCount.h5"
-tanager_path = "C:/satelliteImagery/Tanager/Rochester/Tanager_Stack_Rochester_HDFEOS_SC_EM-7_Gram-minEndmember_Norm-bandCount.h5"
-OUTPUT_DIR = "C:/satelliteImagery/MultiSensor_Analysis_Videos"
-COMPLEXITY_TYPE = 'sliding_volume_z_score'
+Location = "Tait"
+Frame_Reg = "WRS16"# "CoReg" 
+landsat_path = f"C:/satelliteImagery/LANDSAT/{Location}/LANDSAT_Stack_{Location}_GEE_2015_2025_{Frame_Reg}_SC_EM-7_Gram-minEndmember_Norm-bandCount.h5"
+tanager_path = f"C:/satelliteImagery/Tanager/{Location}/Tanager_Stack_{Location}_HDFEOS_SC_EM-7_Gram-minEndmember_Norm-bandCount.h5"
+OUTPUT_DIR = f"C:/satelliteImagery/MultiSensor_Analysis_{Location}_{Frame_Reg}_Videos"
+COMPLEXITY_TYPE = 'sliding_volume_map'
 
 # Temporal Configuration
 START_DATE = datetime(2015, 1, 1, tzinfo=timezone.utc)
 END_DATE = datetime(2025, 12, 31, tzinfo=timezone.utc)
 
+# QA Filtering Configuration
+EXCLUDE_CONTAMINATED_FRAMES = True
+# Bit 0: Fill, 1: Dilated Cloud, 2: Cirrus, 3: Cloud, 4: Cloud Shadow, 5: Snow
+QA_REJECT_MASK = 0b111111 
+# Allowed percentage of cloudy/snowy pixels before dropping the entire frame (0.0 = Strict exclusion)
+MAX_CONTAMINATION_FRACTION = 0.0
+
 # Video Output Configuration
 FPS = 3  # Frames Per Second (3 FPS = 0.33 second delay between frames)
-DPI = 150
+DPI = 300
+EXPORT_GIF = True
+GIF_DPI = 100 # HIGHLY RECOMMENDED: Lower DPI for GIFs to prevent RAM exhaustion during Pillow color quantization
 SHOW_PIXEL_INDICATORS = True
 GLOBAL_COLOR_SCALE = True # HIGHLY RECOMMENDED: Prevents colormap "flickering"
 
 # Time Series Locations (Latitude, Longitude)
 TS_LOCATIONS = [
-    {'latlon': (43.142856, -77.508451), 'label': "West Tait Forest",     'color': 'white'}, 
-    {'latlon': (43.144861, -77.501176), 'label': "East Tait Forest",             'color': 'yellow'},
-    {'latlon': (43.136910, -77.469462), 'label': "Artificial turf football field",  'color': 'cyan'},
-    {'latlon': (43.138241, -77.470873), 'label': "Recently added artificial turf",  'color': 'magenta'},
-    {'latlon': (43.141297, -77.506256), 'label': "Tait Parking Lot",                'color': 'red'},
-    {'latlon': (43.139411, -77.504005), 'label': "ROCX NITE Tarp",                  'color': 'lime'},
+    {'latlon': (43.142856, -77.508451), 'label': "West Tait Forest",     'color': 'tab:green'},
+    {'latlon': (43.144861, -77.501176), 'label': "East Tait Forest",             'color': 'tab:olive'},
+    {'latlon': (43.136910, -77.469462), 'label': "Artificial turf football field",  'color': 'tab:blue'},
+    {'latlon': (43.138241, -77.470873), 'label': "Recently added artificial turf",  'color': 'tab:cyan'},
+    {'latlon': (43.141297, -77.506256), 'label': "Tait Parking Lot",                'color': 'tab:red'},
+    {'latlon': (43.139411, -77.504005), 'label': "ROCX NITE Tarp",                  'color': 'tab:purple'},
 ]
 
 # ==========================================
@@ -57,8 +68,8 @@ def map_locations(dset):
         crs = CRS.from_wkt(spatial_ref)
         transformer = Transformer.from_crs("EPSG:4326", crs, always_xy=True)
         
-        # Since both the Landsat and Tanager stackers have been standardized to the 
-        # Analysis Ready Data (ARD) Common Geographic Framework, they both strictly 
+        # Since both the Landsat and Tanager stackers have been standardized
+        # to a Common Geographic Framework, they both strictly 
         # output the OGC/GDAL compliant GeoTransform array:
         # [Origin_X, Pixel_Width, X_Rotation, Origin_Y, Y_Rotation, Pixel_Height]
         affine = rasterio.transform.Affine.from_gdal(*geo_transform)
@@ -93,16 +104,28 @@ def generate_videos():
     vol_l = grp_l[COMPLEXITY_TYPE]
     vol_t = grp_t[COMPLEXITY_TYPE]
     
+    # QA Masks references
+    qa_l = grp_l['QUALITY_L1_PIXEL'] if 'QUALITY_L1_PIXEL' in grp_l else None
+    cloud_t = grp_t['beta_cloud_mask'] if 'beta_cloud_mask' in grp_t else None
+    cirrus_t = grp_t['beta_cirrus_mask'] if 'beta_cirrus_mask' in grp_t else None
+    
     # Map spatial locations specifically for each sensor's grid
     mapped_locs_l = map_locations(sr_l)
     mapped_locs_t = map_locations(sr_t)
     
-    # 2. Extract and Interleave Temporal Metadata
+    # 2. Extract and Interleave Temporal Metadata with Strict QA Reject
     unified_frames = []
     
     for idx, ts in enumerate(sr_l.attrs.get('acquisition_time', [])):
         dt = datetime.fromtimestamp(ts, tz=timezone.utc)
         if START_DATE <= dt <= END_DATE:
+            
+            if EXCLUDE_CONTAMINATED_FRAMES and qa_l is not None:
+                qa_frame = qa_l[idx, ...]
+                bad_pixels = np.sum((qa_frame & QA_REJECT_MASK) != 0)
+                if (bad_pixels / qa_frame.size) > MAX_CONTAMINATION_FRACTION:
+                    continue # Skip this frame
+                    
             unified_frames.append({
                 'sensor': 'LANDSAT', 'idx': idx, 'dt': dt, 
                 'dt_et': dt.astimezone(ZoneInfo("America/New_York")),
@@ -112,6 +135,12 @@ def generate_videos():
     for idx, ts in enumerate(sr_t.attrs.get('acquisition_time', [])):
         dt = datetime.fromtimestamp(ts, tz=timezone.utc)
         if START_DATE <= dt <= END_DATE:
+            
+            if EXCLUDE_CONTAMINATED_FRAMES and cloud_t is not None and cirrus_t is not None:
+                bad_pixels = np.sum((cloud_t[idx, ...] == 1) | (cirrus_t[idx, ...] == 1))
+                if (bad_pixels / cloud_t[idx, ...].size) > MAX_CONTAMINATION_FRACTION:
+                    continue # Skip this frame
+                    
             unified_frames.append({
                 'sensor': 'TANAGER', 'idx': idx, 'dt': dt, 
                 'dt_et': dt.astimezone(ZoneInfo("America/New_York")),
@@ -122,10 +151,10 @@ def generate_videos():
     unified_frames.sort(key=lambda x: x['dt'])
             
     if not unified_frames:
-        print("No frames found in the specified date range.")
+        print("No valid frames found in the specified date range after QA filtering.")
         return
         
-    print(f"Processing {len(unified_frames)} interleaved frames...")
+    print(f"Processing {len(unified_frames)} interleaved frames (QA Filtering: {EXCLUDE_CONTAMINATED_FRAMES})...")
 
     # 3. Calculate Global Min/Max for Shared Complexity Colormap
     v_min, v_max = 0, 1
@@ -149,15 +178,28 @@ def generate_videos():
     writer_comp = Writer(fps=FPS, metadata=dict(artist='MultiSensor Virtual Constellation'), bitrate=1800)
     writer_side = Writer(fps=FPS, metadata=dict(artist='MultiSensor Virtual Constellation'), bitrate=2500)
     
-    prefix = f"MultiSensor_{COMPLEXITY_TYPE}_{START_DATE.strftime('%Y')}-{END_DATE.strftime('%Y')}_Unmasked"
+    if EXPORT_GIF:
+        GifWriter = animation.writers['pillow']
+        writer_rgb_gif = GifWriter(fps=FPS)
+        writer_comp_gif = GifWriter(fps=FPS)
+        writer_side_gif = GifWriter(fps=FPS)
+    
+    qa_suffix = "_QAFilt" if EXCLUDE_CONTAMINATED_FRAMES else "_Unmasked"
+    prefix = f"{Location}_MultiSensor_{COMPLEXITY_TYPE}_{START_DATE.strftime('%Y')}-{END_DATE.strftime('%Y')}{qa_suffix}_{FPS}fps"
+    
     path_rgb = os.path.join(OUTPUT_DIR, f"{prefix}_TrueColor.mp4")
     path_comp = os.path.join(OUTPUT_DIR, f"{prefix}_Complexity.mp4")
     path_side = os.path.join(OUTPUT_DIR, f"{prefix}_SideBySide.mp4")
+    
+    if EXPORT_GIF:
+        path_rgb_gif = os.path.join(OUTPUT_DIR, f"{prefix}_TrueColor.gif")
+        path_comp_gif = os.path.join(OUTPUT_DIR, f"{prefix}_Complexity.gif")
+        path_side_gif = os.path.join(OUTPUT_DIR, f"{prefix}_SideBySide.gif")
 
     # Set up Figures with Black Backgrounds
-    fig_rgb, ax_rgb = plt.subplots(figsize=(8, 8), facecolor='black')
-    fig_comp, ax_comp = plt.subplots(figsize=(8, 8), facecolor='black')
-    fig_side, (ax_s1, ax_s2) = plt.subplots(1, 2, figsize=(16, 8), facecolor='black')
+    fig_rgb, ax_rgb = plt.subplots(figsize=(8, 8), facecolor=background_color)
+    fig_comp, ax_comp = plt.subplots(figsize=(8, 8), facecolor=background_color)
+    fig_side, (ax_s1, ax_s2) = plt.subplots(1, 2, figsize=(16, 8), facecolor=background_color)
     
     # Aggressively crop out white space/margins
     # fig_side retains a top margin of 0.92 to ensure the subplot titles aren't cut off
@@ -167,7 +209,7 @@ def generate_videos():
     
     # Aesthetic background for data voids
     for ax in [ax_rgb, ax_comp, ax_s1, ax_s2]:
-        ax.set_facecolor('#2F4F4F') # Dark Slate Gray shows through transparent pixels
+        ax.set_facecolor(background_color) # Dark Slate Gray shows through transparent pixels
         ax.axis('off')
 
     # Initialize Imshow objects
@@ -179,22 +221,22 @@ def generate_videos():
     
     # Format Colorbars to contrast against the black background
     cbar_comp = fig_comp.colorbar(im_comp, ax=ax_comp, fraction=0.046, pad=0.04)
-    cbar_comp.set_label("Complexity Volume", color='white', fontweight='bold')
-    cbar_comp.ax.yaxis.set_tick_params(color='white', labelcolor='white')
-    cbar_comp.outline.set_edgecolor('white')
+    cbar_comp.set_label("Complexity Volume", color=text_color, fontweight='bold')
+    cbar_comp.ax.yaxis.set_tick_params(color=text_color, labelcolor=text_color)
+    cbar_comp.outline.set_edgecolor(text_color)
 
     cbar_side = fig_side.colorbar(im_s2, ax=ax_s2, fraction=0.046, pad=0.04)
-    cbar_side.set_label("Complexity Volume", color='white', fontweight='bold')
-    cbar_side.ax.yaxis.set_tick_params(color='white', labelcolor='white')
-    cbar_side.outline.set_edgecolor('white')
+    cbar_side.set_label("Complexity Volume", color=text_color, fontweight='bold')
+    cbar_side.ax.yaxis.set_tick_params(color=text_color, labelcolor=text_color)
+    cbar_side.outline.set_edgecolor(text_color)
 
     # Initialize Time Annotations
-    txt_rgb = ax_rgb.text(0.5, 0.02, "", transform=ax_rgb.transAxes, ha='center', va='bottom', color='white', fontsize=12, fontweight='bold', bbox=dict(facecolor='black', alpha=0.6, pad=3))
-    txt_comp = ax_comp.text(0.5, 0.02, "", transform=ax_comp.transAxes, ha='center', va='bottom', color='white', fontsize=12, fontweight='bold', bbox=dict(facecolor='black', alpha=0.6, pad=3))
-    txt_side = fig_side.text(0.5, 0.02, "", ha='center', va='bottom', color='white', fontsize=14, fontweight='bold', bbox=dict(facecolor='black', alpha=0.6, pad=5))
+    txt_rgb = ax_rgb.text(0.5, 0.02, "", transform=ax_rgb.transAxes, ha='center', va='bottom', color=text_color, fontsize=12, fontweight='bold', bbox=dict(facecolor=background_color, alpha=0.6, pad=3))
+    txt_comp = ax_comp.text(0.5, 0.02, "", transform=ax_comp.transAxes, ha='center', va='bottom', color=text_color, fontsize=12, fontweight='bold', bbox=dict(facecolor=background_color, alpha=0.6, pad=3))
+    txt_side = fig_side.text(0.5, 0.02, "", ha='center', va='bottom', color=text_color, fontsize=14, fontweight='bold', bbox=dict(facecolor=background_color, alpha=0.6, pad=5))
     
-    ax_s1.set_title("Ortho Visual", color='white', fontweight='bold')
-    ax_s2.set_title(f"Complexity ({COMPLEXITY_TYPE})", color='white', fontweight='bold')
+    ax_s1.set_title("Ortho Visual", color=text_color, fontweight='bold')
+    ax_s2.set_title(f"Complexity ({COMPLEXITY_TYPE})", color=text_color, fontweight='bold')
 
     # Initialize Pixel Indicators (Empty lists to be updated per frame)
     inds_rgb, inds_comp, inds_s1, inds_s2 = [], [], [], []
@@ -207,9 +249,17 @@ def generate_videos():
 
     # 5. Execution Block
     print("Writing video streams...")
-    with writer_rgb.saving(fig_rgb, path_rgb, DPI), \
-         writer_comp.saving(fig_comp, path_comp, DPI), \
-         writer_side.saving(fig_side, path_side, DPI):
+    with ExitStack() as stack:
+        # Enter MP4 context managers
+        stack.enter_context(writer_rgb.saving(fig_rgb, path_rgb, DPI))
+        stack.enter_context(writer_comp.saving(fig_comp, path_comp, DPI))
+        stack.enter_context(writer_side.saving(fig_side, path_side, DPI))
+        
+        # Enter GIF context managers if enabled
+        if EXPORT_GIF:
+            stack.enter_context(writer_rgb_gif.saving(fig_rgb, path_rgb_gif, GIF_DPI))
+            stack.enter_context(writer_comp_gif.saving(fig_comp, path_comp_gif, GIF_DPI))
+            stack.enter_context(writer_side_gif.saving(fig_side, path_side_gif, GIF_DPI))
         
         for i, frame in enumerate(unified_frames):
             idx = frame['idx']
@@ -286,7 +336,8 @@ def generate_videos():
                 current_locs = mapped_locs_l if sensor == 'LANDSAT' else mapped_locs_t
                 for loc_idx, loc in enumerate(current_locs):
                     for ind_list in [inds_rgb, inds_comp, inds_s1, inds_s2]:
-                        ind_list[loc_idx].set_data([loc['x']], [loc['y']])
+                        # Add 0.5 offset to perfectly center the marker within the extent=[0, w, h, 0] grid boundaries
+                        ind_list[loc_idx].set_data([loc['x'] + 0.5], [loc['y'] + 0.5])
                         ind_list[loc_idx].set_markeredgecolor(loc['color'])
 
             # Update Text
@@ -294,10 +345,15 @@ def generate_videos():
             txt_comp.set_text(time_str)
             txt_side.set_text(time_str)
             
-            # Write to video
+            # Write to video streams
             writer_rgb.grab_frame()
             writer_comp.grab_frame()
             writer_side.grab_frame()
+            
+            if EXPORT_GIF:
+                writer_rgb_gif.grab_frame()
+                writer_comp_gif.grab_frame()
+                writer_side_gif.grab_frame()
 
     plt.close('all')
     h5_l.close()
