@@ -13,19 +13,15 @@ Z_SCORE_WINDOW_SIZE = 11
 # --- Parameters for Maximum-Distance ---
 num_endmembers = 7
 MAX_DIST_P2 = 0
-#gram_type = 'datasetMean' # 'general
-#SC_Param_Norm = 'bandCount' #'bandCount' None 
 
-# Pixel Mask Configuration
+# Pixel Mask Configuration for Masked Z-score
 MASKING = True
 SUN_ELEVATION_THRESHOLD = 30
 CLOUD_DILATION = 2
-
 # LANDSAT Specific Configuration
 QA_REJECT_MASK = 0b111111
 RADSAT_ACCEPT_VALUE = 0
 AEROSOL_ACCEPT_LEVEL = 'medium' #'low' 'medium' 'high'
-
 # TANAGER Specific Configuration
 TANAGER_CLOUD_MASK = True
 TANAGER_UNCERTAINTY_THRESHOLD = 0.1
@@ -76,11 +72,10 @@ def process_image_stack(h5, sourceName, norm_param, gram_type):
     ds_endmembers = overwrite_dset(h5, base_fields_path, 'frame_endmembers', (num_frames, num_bands, num_endmembers))
     ds_endmember_indices = overwrite_dset(h5, base_fields_path, 'frame_endmember_indices', (num_frames, num_endmembers), dtype='int32')
     ds_vol_curve = overwrite_dset(h5, base_fields_path, 'frame_endmember_volumes', (num_frames, num_endmembers))
-    ds_tile = overwrite_dset(h5, base_fields_path, 'tile_volume_map', (num_frames, height, width))
     ds_slide = overwrite_dset(h5, base_fields_path, 'sliding_volume_map', (num_frames, height, width))
-    ds_evi = overwrite_dset(h5, base_fields_path, 'evi_map', (num_frames, height, width))
+    ds_ndvi = overwrite_dset(h5, base_fields_path, 'ndvi_map', (num_frames, height, width))
+    ds_ndbi = overwrite_dset(h5, base_fields_path, 'ndbi_map', (num_frames, height, width))
     ds_msd = overwrite_dset(h5, base_fields_path, 'msd_map', (num_frames, height, width))
-    ds_slideZ = overwrite_dset(h5, base_fields_path, 'sliding_volume_z_score', (num_frames, height, width))
     ds_slideZ_masked = overwrite_dset(h5, base_fields_path, 'sliding_volume_z_score_masked', (num_frames, height, width))
 
 
@@ -117,22 +112,17 @@ def process_image_stack(h5, sourceName, norm_param, gram_type):
             em_full = np.full((num_bands, num_endmembers), np.nan, dtype=np.float32)
             em_full[gw_mask[t]==1, :] = endmembers
             ds_endmembers[t, ...] = em_full
+            ds_ndvi[t, ...] = sc.calc_ndvi_frame(frame_sr, red_idx=59, nir_idx=97)
+            ds_ndbi[t, ...] = sc.calc_ndbi_frame(frame_sr, swir_idx=244, nir_idx=97)
         else:
             ds_endmembers[t, ...] = endmembers
+            ds_ndvi[t, ...] = sc.calc_ndvi_frame(frame_sr)
+            ds_ndbi[t, ...] = sc.calc_ndbi_frame(frame_sr)
 
         ds_endmember_indices[t, ...] = endmember_idx
         ds_vol_curve[t, ...] = vol_curve
-        print(f"Calculating Tile Volume for frame {t+1}/{num_frames}")
-        ds_tile[t, ...] = sc.process_volume_tiles(frame_sr, TILE_SIZE, num_endmembers, gram_type, norm_param)
-        print(f"Calculating Sliding Tile Volume for frame {t+1}/{num_frames}")
         ds_slide[t, ...] = sc.process_volume_sliding_tile(frame_sr, TILE_SIZE, SLIDING_STRIDE, num_endmembers, gram_type, norm_param)
-        ds_evi[t, ...] = sc.calc_evi_frame(frame_sr)
         ds_msd[t, ...] = sc.process_msd_sliding_tile(frame_sr, TILE_SIZE, SLIDING_STRIDE)
-        
-        # Standard Z-Score (Background calculated on entire valid frame > 0.0)
-        ds_slideZ[t,...] = sc.calculate_global_z_score(ds_slide[t, ...], np.ones((height, width), dtype=bool))
-        
-        # Masked Z-Score (Background cleanly calculated from sensor-valid pixels only)
         ds_slideZ_masked[t,...] = sc.calculate_global_z_score(ds_slide[t, ...], valid_mask)
             
     ds_vol_curve.attrs['description'] = "Full volume curve (Volume vs Endmember Count) for entire frame"
@@ -145,42 +135,44 @@ def process_image_stack(h5, sourceName, norm_param, gram_type):
     if norm_param:
         ds_endmembers.attrs['Normalization'] = norm_param
         ds_vol_curve.attrs['Normalization'] = norm_param
-        ds_tile.attrs['Normalization'] = norm_param
         ds_slide.attrs['Normalization'] = norm_param
     else:
         ds_endmembers.attrs['Normalization'] = "None"
         ds_vol_curve.attrs['Normalization'] = "None"
-        ds_tile.attrs['Normalization'] = "None"
         ds_slide.attrs['Normalization'] = "None"
     
-    ds_tile.attrs['description'] = "Volume of convex hull of spectral data within each NxN tile"
     ds_slide.attrs['description'] = "Volume of convex hull of spectral data within each sliding NxN tile"
-    ds_tile.attrs['tile_size'] = TILE_SIZE
     ds_slide.attrs['tile_size'] = TILE_SIZE
-    ds_evi.attrs['description'] = "EVI for each pixel"
     ds_msd.attrs['description'] = "MSD for each pixel"
     ds_msd.attrs['tile_size'] = TILE_SIZE
     ds_msd.attrs['sliding_stride'] = SLIDING_STRIDE
     ds_slide.attrs['sliding_stride'] = SLIDING_STRIDE
-    ds_tile.attrs['gram_type'] = gram_type
     ds_slide.attrs['gram_type'] = gram_type
-    ds_tile.attrs['num_endmembers'] = num_endmembers
     ds_slide.attrs['num_endmembers'] = num_endmembers
-    ds_slideZ.attrs['description'] = "Global Spectral Complexity Z-score. (Log(volume)-Log(mean_volume))/Std(Log(volume))"
     
     ds_slideZ_masked.attrs['description'] = "Global Spectral Complexity Z-score. Sensor-masked pixels excluded from background stats."
     ds_slideZ_masked.attrs['MASKING_APPLIED'] = MASKING
     ds_slideZ_masked.attrs['SUN_ELEVATION_THRESHOLD'] = SUN_ELEVATION_THRESHOLD
     ds_slideZ_masked.attrs['CLOUD_DILATION'] = CLOUD_DILATION
+    ds_ndvi.attrs['description'] = "NDVI for each pixel"
+    ds_ndbi.attrs['description'] = "NDBI for each pixel"
     
     if sourceName == "LANDSAT":
         ds_slideZ_masked.attrs['QA_REJECT_MASK'] = QA_REJECT_MASK
         ds_slideZ_masked.attrs['RADSAT_ACCEPT_VALUE'] = RADSAT_ACCEPT_VALUE
         ds_slideZ_masked.attrs['AEROSOL_ACCEPT_LEVEL'] = AEROSOL_ACCEPT_LEVEL
+        ds_ndvi.attrs['red_idx'] = 3
+        ds_ndvi.attrs['nir_idx'] = 4
+        ds_ndbi.attrs['swir_idx'] = 5
+        ds_ndbi.attrs['nir_idx'] = 4
     elif sourceName == "TANAGER":
         ds_slideZ_masked.attrs['TANAGER_CLOUD_MASK'] = TANAGER_CLOUD_MASK
         ds_slideZ_masked.attrs['TANAGER_UNCERTAINTY_THRESHOLD'] = TANAGER_UNCERTAINTY_THRESHOLD
         ds_slideZ_masked.attrs['TANAGER_AEROSOL_THRESHOLD'] = TANAGER_AEROSOL_THRESHOLD
+        ds_ndvi.attrs['red_idx'] = 59
+        ds_ndvi.attrs['nir_idx'] = 97
+        ds_ndbi.attrs['swir_idx'] = 244
+        ds_ndbi.attrs['nir_idx'] = 97
 
     h5.close()
         

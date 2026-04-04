@@ -720,6 +720,100 @@ def process_msd_sliding_tile(frame_data, tile_size, stride):
     output_map = np.where(count_map > 0, sum_map / count_map, np.nan)
     return output_map
 
+def calc_ndvi_frame(frame_data, red_idx=3, nir_idx=4):
+    """
+    Calculates the Normalized Difference Vegetation Index (NDVI) per pixel.
+    
+    Formula: NDVI = (NIR - Red) / (NIR + Red)
+    
+    Args:
+        frame_data (np.ndarray): 3D image cube [bands, height, width]
+        red_idx (int): Index of the Red band. Defaults to 3 (Landsat 8/9 Band 4).
+        nir_idx (int): Index of the Near-Infrared (NIR) band. Defaults to 4 (Landsat 8/9 Band 5).
+                       For hyperspectral data (Tanager), these indices must be explicitly 
+                       provided by matching wavelengths to ~670nm (Red) and ~860nm (NIR).
+                       
+    Returns:
+        ndvi (np.ndarray): 2D array [height, width] containing NDVI values bound between [-1.0, 1.0].
+                           Invalid pixels (0/0) evaluate strictly to np.nan.
+    """
+    bands, height, width = frame_data.shape
+    
+    # Ensure indices exist within the provided data cube
+    if max(red_idx, nir_idx) >= bands:
+        warnings.warn(f"Insufficient bands to calculate NDVI. Requires bands at indices {red_idx} and {nir_idx}. Returning NaNs.")
+        return np.full((height, width), np.nan, dtype=np.float32)
+        
+    red = frame_data[red_idx, :, :]
+    nir = frame_data[nir_idx, :, :]
+    
+    # Calculate denominator
+    denominator = nir + red
+    
+    # Safely calculate NDVI avoiding division by zero or invalid (0/0) operations.
+    # NumPy will natively assign np.nan to 0/0, adhering to strict failure-handling directives.
+    with np.errstate(divide='ignore', invalid='ignore'):
+        ndvi = (nir - red) / denominator
+        
+    # Mask out infinity caused by extreme outliers (x/0)
+    ndvi[np.isinf(ndvi)] = np.nan
+    
+    # Atmospheric over-correction can occasionally push surface reflectance < 0.0, 
+    # which can violate the physical boundaries of the NDVI index. 
+    # Clip back to the strict physical domain to prevent NN feature contamination.
+    # Note: np.clip safely ignores np.nan values.
+    ndvi = np.clip(ndvi, -1.0, 1.0)
+    
+    return ndvi
+
+def calc_ndbi_frame(frame_data, swir_idx=5, nir_idx=4):
+    """
+    Calculates the Normalized Difference Built-up Index (NDBI) per pixel.
+    
+    Formula: NDBI = (SWIR - NIR) / (SWIR + NIR)
+    (Reference: Zha, Y., Gao, J., & Ni, S., 2003. International Journal of Remote Sensing)
+    
+    Args:
+        frame_data (np.ndarray): 3D image cube [bands, height, width]
+        swir_idx (int): Index of the Shortwave Infrared (SWIR) band. 
+                        Defaults to 5 (Landsat 8/9 Band 6, ~1.6 µm).
+        nir_idx (int): Index of the Near-Infrared (NIR) band. 
+                       Defaults to 4 (Landsat 8/9 Band 5, ~0.86 µm).
+                       For hyperspectral data (Tanager), these indices must be explicitly 
+                       provided by matching wavelengths to ~1.6µm (SWIR) and ~0.86µm (NIR).
+                       
+    Returns:
+        ndbi (np.ndarray): 2D array [height, width] containing NDBI values bound between [-1.0, 1.0].
+                           Invalid pixels (0/0) evaluate strictly to np.nan.
+    """
+    bands, height, width = frame_data.shape
+    
+    # Ensure indices exist within the provided data cube
+    if max(swir_idx, nir_idx) >= bands:
+        warnings.warn(f"Insufficient bands to calculate NDBI. Requires bands at indices {swir_idx} and {nir_idx}. Returning NaNs.")
+        return np.full((height, width), np.nan, dtype=np.float32)
+        
+    swir = frame_data[swir_idx, :, :]
+    nir = frame_data[nir_idx, :, :]
+    
+    # Calculate denominator
+    denominator = swir + nir
+    
+    # Safely calculate NDBI avoiding division by zero or invalid (0/0) operations.
+    # NumPy will natively assign np.nan to 0/0, adhering to strict failure-handling directives.
+    with np.errstate(divide='ignore', invalid='ignore'):
+        ndbi = (swir - nir) / denominator
+        
+    # Mask out infinity caused by extreme outliers (x/0)
+    ndbi[np.isinf(ndbi)] = np.nan
+    
+    # Atmospheric over-correction can occasionally push surface reflectance < 0.0, 
+    # which can mathematically violate the physical boundaries of the index. 
+    # Clip back to the strict physical domain to prevent NN feature contamination.
+    # Note: np.clip safely ignores np.nan values.
+    ndbi = np.clip(ndbi, -1.0, 1.0)
+    
+    return ndbi
 
 def calc_evi_frame(frame_data):
     """
