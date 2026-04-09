@@ -22,7 +22,8 @@ NORM_PARAM = 'bandCount'
 # --- Pixel Mask Configuration ---
 MASKING = True
 SUN_ELEVATION_THRESHOLD = 30
-CLOUD_DILATION = 0
+TANAGER_CLOUD_DILATION = 2
+HLS_CLOUD_DILATION =0
 
 # HLS Specific Configuration (Unified Fmask for both S30 and L30)
 # Bits 0-5: cirrus, cloud, adj cloud/shadow, cloud shadow, snow/ice, water
@@ -136,13 +137,13 @@ def process_grid_stack(h5, grid_name):
             if sensor_type == "HLS":
                 valid_mask = sc.get_hls_mask(data_grp, t, 
                                           sun_elevation_threshold=SUN_ELEVATION_THRESHOLD,
-                                          cloud_dilation=CLOUD_DILATION,
+                                          cloud_dilation=HLS_CLOUD_DILATION,
                                           qa_reject_mask=QA_REJECT_MASK,
                                           aerosol_accept_level=AEROSOL_ACCEPT_LEVEL)
             elif sensor_type == "TANAGER":
                 valid_mask = sc.get_tanager_mask(data_grp, t, (height, width),
                                                  sun_elevation_threshold=SUN_ELEVATION_THRESHOLD,
-                                                 cloud_dilation=CLOUD_DILATION,
+                                                 cloud_dilation=TANAGER_CLOUD_DILATION,
                                                  apply_cloud_mask=TANAGER_CLOUD_MASK,
                                                  uncertainty_threshold=TANAGER_UNCERTAINTY_THRESHOLD,
                                                  aerosol_depth_threshold=TANAGER_AEROSOL_THRESHOLD)
@@ -199,7 +200,10 @@ def process_grid_stack(h5, grid_name):
     ds_slideZ.attrs['description'] = "Global Spectral Complexity Z-score. Sensor-masked pixels excluded from background stats."
     ds_slideZ.attrs['MASKING_APPLIED'] = MASKING
     ds_slideZ.attrs['SUN_ELEVATION_THRESHOLD'] = SUN_ELEVATION_THRESHOLD
-    ds_slideZ.attrs['CLOUD_DILATION'] = CLOUD_DILATION
+    if sensor_type == "HLS":
+        ds_slideZ.attrs['CLOUD_DILATION'] = HLS_CLOUD_DILATION
+    elif sensor_type == "TANAGER":
+        ds_slideZ.attrs['CLOUD_DILATION'] = TANAGER_CLOUD_DILATION
     
     ds_ndvi.attrs['description'] = "NDVI for each pixel"
     ds_ndvi.attrs['red_idx'] = red_idx

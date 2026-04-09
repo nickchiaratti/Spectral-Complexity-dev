@@ -19,7 +19,7 @@ import re
 # ==========================================
 # 1. CONFIGURATION & AUTHENTICATION
 # ==========================================
-cloud_threshold = 80
+cloud_threshold = 50
 
 print("Authenticating with NASA Earthdata...")
 earthaccess.login(strategy="all", persist=True)
@@ -28,8 +28,8 @@ Location = "Rochesterv2"
 SOURCE_CACHE = "Rochesterv2" 
 
 if Location == "Rochesterv2":
-    ROI_LON_MIN = -77.716163; ROI_LON_MAX = -77.751438
-    ROI_LAT_MIN = 42.961035; ROI_LAT_MAX = 43.333724
+    ROI_LON_MIN = -77.770166; ROI_LON_MAX = -77.376776
+    ROI_LAT_MIN = 42.961778; ROI_LAT_MAX = 43.342135
     START_DATE = '2025-01-01'
     END_DATE = '2025-12-31'
 
@@ -73,6 +73,11 @@ def stac_native_window_read(collection_id, assets_list, temp_dir):
     search = catalog.search(collections=[collection_id], bbox=safe_bbox, datetime=f"{START_DATE}/{END_DATE}", limit=500)
     filtered_items = [i for i in list(search.items()) if i.properties.get('eo:cloud_cover', 100) < cloud_threshold]
     
+    # EVIDENCE-BASED FIX: Pipeline Telemetry
+    # Establishes the total payload expectation before any I/O operations begin.
+    total_items = len(filtered_items)
+    print(f"Identified {total_items} STAC items for {collection_id} within temporal bounds and cloud thresholds.")
+    
     tile_collections = {}
     gdal_env = {
         'GDAL_HTTP_COOKIEFILE': os.path.expanduser('~/.urs_cookies'),
@@ -94,12 +99,15 @@ def stac_native_window_read(collection_id, assets_list, temp_dir):
         return idx, data
 
     with rasterio.Env(**gdal_env):
-        for item in filtered_items:
+        # Tracking sequence progress through the generator
+        for i, item in enumerate(filtered_items, 1):
             img_id = item.id 
             parsed_mgrs_tile = img_id.split('.')[2] 
             cloud_cov = item.properties.get('eo:cloud_cover')
             
-            if cloud_cov is None: continue
+            if cloud_cov is None: 
+                print(f"  [{i}/{total_items}] [{img_id}] WARNING: STAC metadata is null. Excluding frame.")
+                continue
             
             if parsed_mgrs_tile not in tile_collections:
                 tile_collections[parsed_mgrs_tile] = {'items': {}, 'transform': None, 'crs': None, 'width': None, 'height': None, 'zone': None}
@@ -115,6 +123,7 @@ def stac_native_window_read(collection_id, assets_list, temp_dir):
             }
             
             if os.path.exists(out_tif) and os.path.getsize(out_tif) > 0:
+                print(f"  [{i}/{total_items}] [{img_id}] Valid cache located. Skipping STAC download.")
                 if tile_data['transform'] is None:
                     with rasterio.open(out_tif) as cached_src:
                         tile_data['transform'] = cached_src.transform
@@ -123,7 +132,8 @@ def stac_native_window_read(collection_id, assets_list, temp_dir):
                         tile_data['height'] = cached_src.height
                         tile_data['zone'] = CRS.from_user_input(cached_src.crs).to_epsg() - 32600
                 continue
-                
+            
+            print(f"  [{i}/{total_items}] [{img_id}] Downloading {len(assets_list)} STAC assets via Concurrent Window Read...")    
             try:
                 asset_key_ref = assets_list[0]
                 with rasterio.open(item.assets[asset_key_ref].href) as src:
@@ -158,7 +168,7 @@ def stac_native_window_read(collection_id, assets_list, temp_dir):
                 with rasterio.open(out_tif, 'w', **profile) as dst: dst.write(compiled_array)
                     
             except Exception as e:
-                print(f"Failed retrieval for {img_id}: {e}")
+                print(f"  [{i}/{total_items}] Failed retrieval for {img_id}: {e}")
                 del tile_data['items'][img_id]
                 
     return tile_collections

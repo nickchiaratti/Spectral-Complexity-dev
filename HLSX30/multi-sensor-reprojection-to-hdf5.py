@@ -19,14 +19,14 @@ import SpecComplex as sc
 Location = "Rochesterv2"
 
 if Location == "Rochesterv2":
-    ROI_LON_MIN = -77.716163; ROI_LON_MAX = -77.751438
-    ROI_LAT_MIN = 42.961035; ROI_LAT_MAX = 43.333724
+    ROI_LON_MIN = -77.770166; ROI_LON_MAX = -77.376776
+    ROI_LAT_MIN = 42.961778; ROI_LAT_MAX = 43.342135
     
 COMBINED_OUTPUT_DIR = r"C:\satelliteImagery\HLSX30"
 TANAGER_SOURCE_DIR = r"C:\satelliteImagery\Tanager\SourceData"
 
 INPUT_NATIVE_HDF5 = os.path.join(COMBINED_OUTPUT_DIR, f"HLS_Combined_Stack_{Location}_STAC_Native_2025.h5")
-OUTPUT_MASTER_HDF5 = os.path.join(COMBINED_OUTPUT_DIR, f"ARD_Cube_{Location}_MasterGrid_2025.h5")
+OUTPUT_MASTER_HDF5 = os.path.join(COMBINED_OUTPUT_DIR, f"ARD_Cube_{Location}_2025.h5")
 
 S30_WAVELENGTHS = [0.443, 0.490, 0.560, 0.665, 0.705, 0.740, 0.783, 0.842, 0.865, 0.945, 1.375, 1.610, 2.190]
 L30_SR_WAVELENGTHS = [0.443, 0.482, 0.561, 0.655, 0.865, 1.609, 2.201, 1.373] 
