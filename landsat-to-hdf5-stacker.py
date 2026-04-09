@@ -343,7 +343,7 @@ def process_landsat_stack(root_dir, output_path):
                         temp_uint = np.zeros((h_30, w_30), dtype='uint16')
                         reproject(rasterio.band(src, 1), temp_uint, src_transform=src.transform, src_crs=src.crs,
                                   dst_transform=tf_30, dst_crs=dst_crs, 
-                                  resampling=Resampling.cubic_spline, 
+                                  resampling=Resampling.cubic, 
                                   src_nodata=0, dst_nodata=0,)
                         
                         # Apply scaling and convert to float

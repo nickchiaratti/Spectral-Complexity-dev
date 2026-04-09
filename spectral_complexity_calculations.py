@@ -73,6 +73,8 @@ def process_image_stack(h5, sourceName, norm_param, gram_type):
     ds_endmember_indices = overwrite_dset(h5, base_fields_path, 'frame_endmember_indices', (num_frames, num_endmembers), dtype='int32')
     ds_vol_curve = overwrite_dset(h5, base_fields_path, 'frame_endmember_volumes', (num_frames, num_endmembers))
     ds_slide = overwrite_dset(h5, base_fields_path, 'sliding_volume_map', (num_frames, height, width))
+    ds_slide5 = overwrite_dset(h5, base_fields_path, 'sliding_volume_map_5x5', (num_frames, height, width))
+    ds_slide7 = overwrite_dset(h5, base_fields_path, 'sliding_volume_map_7x7', (num_frames, height, width))
     ds_ndvi = overwrite_dset(h5, base_fields_path, 'ndvi_map', (num_frames, height, width))
     ds_ndbi = overwrite_dset(h5, base_fields_path, 'ndbi_map', (num_frames, height, width))
     ds_msd = overwrite_dset(h5, base_fields_path, 'msd_map', (num_frames, height, width))
@@ -122,6 +124,8 @@ def process_image_stack(h5, sourceName, norm_param, gram_type):
         ds_endmember_indices[t, ...] = endmember_idx
         ds_vol_curve[t, ...] = vol_curve
         ds_slide[t, ...] = sc.process_volume_sliding_tile(frame_sr, TILE_SIZE, SLIDING_STRIDE, num_endmembers, gram_type, norm_param)
+        ds_slide5[t, ...] = sc.process_volume_sliding_tile(frame_sr, 5, SLIDING_STRIDE, num_endmembers, gram_type, norm_param)
+        ds_slide7[t, ...] = sc.process_volume_sliding_tile(frame_sr, 7, SLIDING_STRIDE, num_endmembers, gram_type, norm_param)
         ds_msd[t, ...] = sc.process_msd_sliding_tile(frame_sr, TILE_SIZE, SLIDING_STRIDE)
         ds_slideZ_masked[t,...] = sc.calculate_global_z_score(ds_slide[t, ...], valid_mask)
             
@@ -141,8 +145,12 @@ def process_image_stack(h5, sourceName, norm_param, gram_type):
         ds_vol_curve.attrs['Normalization'] = "None"
         ds_slide.attrs['Normalization'] = "None"
     
-    ds_slide.attrs['description'] = "Volume of convex hull of spectral data within each sliding NxN tile"
+    ds_slide.attrs['description'] = f"Volume of convex hull of spectral data within each sliding {TILE_SIZE}x{TILE_SIZE} tile"
     ds_slide.attrs['tile_size'] = TILE_SIZE
+    ds_slide5.attrs['description'] = "Volume of convex hull of spectral data within each sliding 5x5 tile"
+    ds_slide5.attrs['tile_size'] = 5
+    ds_slide7.attrs['description'] = "Volume of convex hull of spectral data within each sliding 7x7 tile"
+    ds_slide7.attrs['tile_size'] = 7
     ds_msd.attrs['description'] = "MSD for each pixel"
     ds_msd.attrs['tile_size'] = TILE_SIZE
     ds_msd.attrs['sliding_stride'] = SLIDING_STRIDE

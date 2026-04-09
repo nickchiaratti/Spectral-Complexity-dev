@@ -17,7 +17,7 @@ import SpecComplex as sc
 # ==========================================
 # 1. CONFIGURATION
 # ==========================================
-cloud_threshold = 60
+cloud_threshold = 80
 try:
     ee.Initialize(project="project-ee18dbee-cd7e-4d08-812")
 except Exception as e:
@@ -56,10 +56,10 @@ TARGET_RESOLUTION = 30.0
 
 # --- Artifact Correction & Alignment ---
 # Enforce a single orbital path to prevent 1-pixel stereoscopic parallax shifting.
-TARGET_WRS_PATH = None#16  # Set to None to include all paths
+TARGET_WRS_PATH = 16#16  # Set to None to include all paths
 
 # Attempt sub-pixel phase correlation registration against a Master Anchor.
-AUTO_CO_REGISTER = True 
+AUTO_CO_REGISTER = False 
 # Strict failure threshold: If calculated shift exceeds this many pixels, the script will crash.
 MAX_ALLOWED_SHIFT = 0.0 
 
@@ -353,7 +353,7 @@ for idx, tif_path in enumerate(tif_files):
         temp_sr_scaled = np.full((7, grid_height, grid_width), np.nan, dtype=np.float32)
         temp_qa = np.zeros((3, grid_height, grid_width), dtype=np.float32)
         
-        # 1. Reproject Continuous SR Bands (Cubic Spline on raw DNs to preserve gradients)
+        # 1. Reproject Continuous SR Bands
         reproject(
             source=rasterio.band(src, list(range(1, 8))), # Bands 1-7 in rasterio
             destination=temp_sr_raw,
@@ -361,7 +361,7 @@ for idx, tif_path in enumerate(tif_files):
             src_crs=src.crs,
             dst_transform=tf_target,
             dst_crs=dst_crs,
-            resampling=Resampling.cubic_spline,
+            resampling=Resampling.cubic,
             src_nodata=nodata_val,
             dst_nodata=0
         )

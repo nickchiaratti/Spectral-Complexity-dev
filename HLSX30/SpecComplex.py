@@ -101,6 +101,52 @@ def get_tanager_mask(data_grp, f_idx, shape,
         
     return valid_mask
 
+def get_hls_mask(data_grp, t, sun_elevation_threshold, cloud_dilation, qa_reject_mask, aerosol_accept_level):
+    """
+    Derives a strict validity mask based on HLS Fmask bits and Solar angles.
+    Reference: HLS Product User Guide V2.0, Table 9.
+    """
+    # EVIDENCE-BASED FIX: Dimensionality Alignment
+    # Fmask is stored in the ARD cube as a 3D array (Time, YDim, XDim) to eliminate 
+    # the singleton band dimension. We slice it with 3 indices accordingly.
+    fmask = data_grp["Fmask"][t, :, :]
+    
+    # Angles are stored as 4D (Time, AngleBands, YDim, XDim)
+    angles = data_grp["solar_view_angles"][t, :, :, :]
+    
+    # 1. QA Bitwise Rejection (Bits 0-5)
+    # Reject conditions (e.g., if bit 1 (cloud) is 1, and it's in the reject mask, result > 0)
+    qa_valid = (fmask & qa_reject_mask) == 0
+    
+    # 2. Aerosol Level Rejection (Bits 6-7)
+    # Extract bits 6 & 7 as a 2-bit integer (0=Climatology, 1=Low, 2=Moderate, 3=High)
+    aerosol_bits = (fmask >> 6) & 0b11
+    
+    if aerosol_accept_level == 'low':
+        aerosol_valid = aerosol_bits <= 1
+    elif aerosol_accept_level == 'medium':
+        aerosol_valid = aerosol_bits <= 2
+    else: # 'high'
+        aerosol_valid = aerosol_bits <= 3
+        
+    # 3. Sun Elevation Threshold
+    # Angles array band order: ["SZA", "SAA", "VZA", "VAA"]
+    sza = angles[0, :, :]
+    sun_elev = 90.0 - sza
+    # Note: np.nan values natively evaluate to False, perfectly rejecting nodata margins
+    sun_valid = sun_elev >= sun_elevation_threshold
+    
+    # Combine valid masks
+    valid_mask = qa_valid & aerosol_valid & sun_valid
+    
+    # 4. Custom Morphological Dilation
+    if cloud_dilation > 0:
+        invalid_mask = ~valid_mask
+        dilated_invalid = binary_dilation(invalid_mask, iterations=cloud_dilation)
+        valid_mask = ~dilated_invalid
+        
+    return valid_mask
+
 def maximumDistance(data, num_endmembers):
     '''
     Args:
@@ -124,7 +170,7 @@ def maximumDistance(data, num_endmembers):
     valid_mask = ~np.isnan(image2D).any(axis=1)
     
     if np.sum(valid_mask) < num_endmembers:
-        print(f"Not enough valid pixels (no NaNs) to find {num_endmembers} endmembers. Found {np.sum(valid_mask)} valid pixels.")
+        #print(f"Not enough valid pixels (no NaNs) to find {num_endmembers} endmembers. Found {np.sum(valid_mask)} valid pixels.")
         return np.full((image2D.shape[1], num_endmembers), np.nan), np.full((1, num_endmembers), np.nan)
 
     valid_data = image2D[valid_mask]

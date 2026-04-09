@@ -18,14 +18,16 @@ import rasterio.transform
 from pyproj import Transformer, CRS
 
 # --- Configuration ---
-Location = "Tait"
+Location = "Rochester"
 Frame_Reg = "WRS16"# "CoReg" 
-complexity_type = 'sliding_volume_map'#'sliding_volume_z_score' #  'sliding_volume_local_z_score'  'sliding_volume_z_score'
+complexity_type = 'sliding_volume_map_5x5'#'sliding_volume_z_score' #  'sliding_volume_local_z_score'  'sliding_volume_z_score'
 # Default Projection Bands for 3D Hull (Indices)
 HULL_BANDS_LANDSAT = (6, 5, 4) 
 HULL_BANDS_TANAGER = (100, 50, 20) # Example hyperspectral indices
 
 COMPLEXITY_DICT = {
+    'sliding_volume_map_5x5': 'Spectral Complexity 5x5 window',
+    'sliding_volume_map_7x7': 'Spectral Complexity 7x7 window',
     'sliding_volume_map': 'Spectral Complexity',
     'sliding_volume_z_score': 'Spectral Complexity Z-Score',
     'sliding_volume_z_score_masked': 'Spectral Complexity Z-Score',
@@ -44,7 +46,7 @@ SUN_ELEVATION_THRESHOLD = 30
 CLOUD_DILATION = 2
 
 # Tanager Pixel Mask Configuration
-TANAGER_AEROSOL_DEPTH_THRESHOLD = 0.3
+TANAGER_AEROSOL_DEPTH_THRESHOLD = 0.5
 TANAGER_SR_UNCERTAINTY_THRESHOLD = 0.10
 
 # LANDSAT Pixel Mask Configuration
@@ -52,8 +54,8 @@ QA_REJECT_MASK = 0b111111
 RADSAT_ACCEPT_VALUE = 0
 AEROSOL_ACCEPT_LEVEL = 'medium' #'low' 'medium' 'high'
 
-landsat_path = f"C:/satelliteImagery/LANDSAT/{Location}/LANDSAT_Stack_{Location}_GEE_2015_2025_{Frame_Reg}_SC_EM-7_Gram-minEndmember_Norm-bandCount.h5"
-tanager_path = f"C:/satelliteImagery/Tanager/{Location}/Tanager_Stack_{Location}_HDFEOS_SC_EM-7_Gram-minEndmember_Norm-bandCount.h5"
+landsat_path = f"C:/satelliteImagery/LANDSAT/{Location}/QE-LANDSAT_Stack_{Location}_GEE_2015_2025_{Frame_Reg}_SC_EM-7_Gram-minEndmember_Norm-bandCount.h5"
+tanager_path = f"C:/satelliteImagery/Tanager/{Location}/QE-Tanager_Stack_{Location}_HDFEOS_SC_EM-7_Gram-minEndmember_Norm-bandCount.h5"
 
 suffix = ''
 if complexity_type == 'sliding_volume_z_score':
@@ -936,10 +938,10 @@ class MultiComplexityViewer:
 
         # Masking Logic Update: 
         # Z-Scores are centered around 0 and include negative values. Masking > 0 would illegally alter ground truth.
-        if complexity_type == 'sliding_volume_z_score':
-            valid_mask = (~np.isnan(l_flat)) & (~np.isnan(t_flat))
-        else:
+        if complexity_type == 'sliding_volume_map':
             valid_mask = (~np.isnan(l_flat)) & (~np.isnan(t_flat)) & (l_flat > 0) & (t_flat > 0)
+        else:
+            valid_mask = (~np.isnan(l_flat)) & (~np.isnan(t_flat))
             
         l_valid = l_flat[valid_mask]
         t_valid = t_flat[valid_mask]
@@ -954,7 +956,7 @@ class MultiComplexityViewer:
             # Calculate Linear Fit
             lin_slope, lin_intercept = np.polyfit(l_valid, t_valid, 1)
             
-            stats_text_scatter = (f"Tiles Analyzed: {len(l_valid)}\n"
+            stats_text_scatter = (f"Pixels Analyzed: {len(l_valid)}\n"
                                   f"Pearson r: {pearsonFit:.4f}\n"
                                   f"Spearman r: {spearmanFit:.4f}\n"
                                   f"Median Ratio: {median_ratio:.4f}\n"
@@ -962,7 +964,7 @@ class MultiComplexityViewer:
                                   f"Linear Fit: T = {lin_slope:.2f}L + {lin_intercept:.2f}")
 
             # Z-Score integrity check: taking log10 of negative values raises fatal math domain errors
-            if complexity_type != 'sliding_volume_z_score':
+            if complexity_type == 'sliding_volume_map':
                 log_l = np.log10(l_valid)
                 log_t = np.log10(t_valid)
                 logRatios = log_t / log_l
@@ -974,7 +976,7 @@ class MultiComplexityViewer:
                 # Calculate Log-Log Fit (Exponential)
                 log_slope, log_intercept = np.polyfit(log_l, log_t, 1)
                 
-                logStats_text_scatter = (f"Tiles Analyzed: {len(l_valid)}\n"
+                logStats_text_scatter = (f"Pixels Analyzed: {len(l_valid)}\n"
                                       f"Log Pearson r: {log_pearson:.4f}\n"
                                       f"Log Spearman r: {log_spearman:.4f}\n"
                                       f"Median Log Ratio: {median_logRatio:.4f}\n"
@@ -1022,7 +1024,7 @@ class MultiComplexityViewer:
             self.ax_scatter_lin.legend()
 
             # --- Log-Log Subplot ---
-            if complexity_type != 'sliding_volume_z_score':
+            if complexity_type == 'sliding_volume_map':
                 self.ax_scatter_log.scatter(l_valid, t_valid, alpha=0.3, s=10, label=f'{COMPLEXITY_DICT[complexity_type]} Window Tiles', color='tab:orange')
                 
                 # Plot Log-Log Regression Line
@@ -1045,17 +1047,17 @@ class MultiComplexityViewer:
                 self.ax_scatter_log.axis('off')
             
             # --- Landsat Histogram Subplot (Conditional Binning) ---
-            if complexity_type == 'sliding_volume_z_score':
-                bins_l = np.linspace(np.min(l_valid), np.max(l_valid), 256)
-                self.ax_hist_l.hist(l_valid, bins=bins_l, color='tab:purple', alpha=0.7)
-                self.ax_hist_l.set_title(f"LANDSAT {COMPLEXITY_DICT[complexity_type]} Distribution\n({l_date_str})")
-                self.ax_hist_l.set_xlabel(f"LANDSAT {COMPLEXITY_DICT[complexity_type]} (Linear Scale)")
-            else:
+            if complexity_type == 'sliding_volume_map':
                 bins_l = np.logspace(np.log10(np.min(l_valid)), np.log10(np.max(l_valid)), 256)
                 self.ax_hist_l.hist(l_valid, bins=bins_l, color='tab:purple', alpha=0.7)
                 self.ax_hist_l.set_xscale('log')
                 self.ax_hist_l.set_title(f"LANDSAT {COMPLEXITY_DICT[complexity_type]} Distribution\n({l_date_str})")
                 self.ax_hist_l.set_xlabel(f"LANDSAT {COMPLEXITY_DICT[complexity_type]} (Log Scale)")
+            else:
+                bins_l = np.linspace(np.min(l_valid), np.max(l_valid), 256)
+                self.ax_hist_l.hist(l_valid, bins=bins_l, color='tab:purple', alpha=0.7)
+                self.ax_hist_l.set_title(f"LANDSAT {COMPLEXITY_DICT[complexity_type]} Distribution\n({l_date_str})")
+                self.ax_hist_l.set_xlabel(f"LANDSAT {COMPLEXITY_DICT[complexity_type]} (Linear Scale)")
                 
             self.ax_hist_l.set_ylabel("Frequency")
             self.ax_hist_l.grid(True, alpha=0.3, which="both", ls="--")
@@ -1067,17 +1069,17 @@ class MultiComplexityViewer:
                                 ha='right', va='top', fontsize=9, bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
 
             # --- Tanager Histogram Subplot (Conditional Binning) ---
-            if complexity_type == 'sliding_volume_z_score':
-                bins_t = np.linspace(np.min(t_valid), np.max(t_valid), 256)
-                self.ax_hist_t.hist(t_valid, bins=bins_t, color='tab:orange', alpha=0.7)
-                self.ax_hist_t.set_title(f"TANAGER {COMPLEXITY_DICT[complexity_type]} Distribution\n({t_date_str})")
-                self.ax_hist_t.set_xlabel(f"TANAGER {COMPLEXITY_DICT[complexity_type]} (Linear Scale)")
-            else:
+            if complexity_type == 'sliding_volume_map':
                 bins_t = np.logspace(np.log10(np.min(t_valid)), np.log10(np.max(t_valid)), 256)
                 self.ax_hist_t.hist(t_valid, bins=bins_t, color='tab:orange', alpha=0.7)
                 self.ax_hist_t.set_xscale('log')
                 self.ax_hist_t.set_title(f"TANAGER {COMPLEXITY_DICT[complexity_type]} Distribution\n({t_date_str})")
                 self.ax_hist_t.set_xlabel(f"TANAGER {COMPLEXITY_DICT[complexity_type]} (Log Scale)")
+            else:
+                bins_t = np.linspace(np.min(t_valid), np.max(t_valid), 256)
+                self.ax_hist_t.hist(t_valid, bins=bins_t, color='tab:orange', alpha=0.7)
+                self.ax_hist_t.set_title(f"TANAGER {COMPLEXITY_DICT[complexity_type]} Distribution\n({t_date_str})")
+                self.ax_hist_t.set_xlabel(f"TANAGER {COMPLEXITY_DICT[complexity_type]} (Linear Scale)")
                 
             self.ax_hist_t.set_ylabel("Frequency")
             self.ax_hist_t.grid(True, alpha=0.3, which="both", ls="--")

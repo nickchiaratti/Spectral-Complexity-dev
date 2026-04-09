@@ -33,7 +33,7 @@ SOURCE_DIR = "C:/satelliteImagery/Tanager/SourceData"
 OUTPUT_DIR = f"C:/satelliteImagery/Tanager/{Location}"
 if not os.path.exists(OUTPUT_DIR):
     os.makedirs(OUTPUT_DIR)
-OUTPUT_FILE = os.path.join(OUTPUT_DIR, f"Tanager_Stack_{Location}_HDFEOS.h5")
+OUTPUT_FILE = os.path.join(OUTPUT_DIR, f"TestTanager_Stack_{Location}_HDFEOS.h5")
 
 def calculate_target_grid(lon_min, lon_max, lat_min, lat_max, resolution):
     """
@@ -257,13 +257,13 @@ def process_tanager_stack():
                     fpath = scene["h5_file"].replace("\\", "/")
                     src_tf, src_crs_info = extract_georeferencing_from_h5(fpath)
 
-                    handle = rasterio.open(f'HDF5:"{fpath}"://{d_info["h5_path"].replace(" ", "_")}')
+                    handle = rasterio.open(fpath)
                     if handle:
                         try:
                             incoming = np.full(out_shape[1:], d_info['fill'], dtype=d_info['dtype'])
                             reproject(rasterio.band(handle, list(range(1, handle.count + 1))), incoming, 
                                       src_transform=src_tf, src_crs=src_crs_info, dst_transform=tf_target, dst_crs=dst_crs,
-                                      resampling=Resampling.nearest if (d_info['dtype'].name == 'uint8') else Resampling.cubic_spline,
+                                      resampling=Resampling.nearest if (d_info['dtype'].name == 'uint8') else Resampling.cubic,
                                       src_nodata=d_info['fill'], dst_nodata=d_info['fill'])
                             
                             mask = (incoming != d_info['fill'])
@@ -331,7 +331,7 @@ def process_tanager_stack():
                 with rasterio.open(scene['vis_file']) as src:
                     incoming = np.zeros((4, height, width), dtype='uint8')
                     reproject(rasterio.band(src, [1, 2, 3, 4]), incoming, src_transform=src.transform, 
-                              src_crs=src.crs, dst_transform=tf_target, dst_crs=dst_crs, resampling=Resampling.cubic_spline)
+                              src_crs=src.crs, dst_transform=tf_target, dst_crs=dst_crs, resampling=Resampling.cubic)
                     mask = (incoming[3] > 0); pass_vis[:, mask] = incoming[:, mask]
             vis_dset[t_idx, ...] = pass_vis
 
