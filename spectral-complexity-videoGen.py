@@ -17,7 +17,7 @@ background_color = 'w' # Dark Slate Gray shows through transparent pixels
 text_color = 'black'
 
 # File Paths
-Location = "Tait"
+Location = "Rochester"
 Frame_Reg = "WRS16"# "CoReg" 
 landsat_path = f"C:/satelliteImagery/LANDSAT/{Location}/LANDSAT_Stack_{Location}_GEE_2015_2025_{Frame_Reg}_SC_EM-7_Gram-minEndmember_Norm-bandCount.h5"
 tanager_path = f"C:/satelliteImagery/Tanager/{Location}/Tanager_Stack_{Location}_HDFEOS_SC_EM-7_Gram-minEndmember_Norm-bandCount.h5"
@@ -33,12 +33,12 @@ EXCLUDE_CONTAMINATED_FRAMES = True
 # Bit 0: Fill, 1: Dilated Cloud, 2: Cirrus, 3: Cloud, 4: Cloud Shadow, 5: Snow
 QA_REJECT_MASK = 0b111111 
 # Allowed percentage of cloudy/snowy pixels before dropping the entire frame (0.0 = Strict exclusion)
-MAX_CONTAMINATION_FRACTION = 0.0
+MAX_CONTAMINATION_FRACTION = 5.0
 
 # Video Output Configuration
 FPS = 3  # Frames Per Second (3 FPS = 0.33 second delay between frames)
 DPI = 300
-EXPORT_GIF = True
+EXPORT_GIF = False
 GIF_DPI = 100 # HIGHLY RECOMMENDED: Lower DPI for GIFs to prevent RAM exhaustion during Pillow color quantization
 SHOW_PIXEL_INDICATORS = True
 GLOBAL_COLOR_SCALE = True # HIGHLY RECOMMENDED: Prevents colormap "flickering"

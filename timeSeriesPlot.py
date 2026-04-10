@@ -30,7 +30,7 @@ SUN_ELEVATION_THRESHOLD = 30
 CLOUD_DILATION = 2
 
 # Tanager Pixel Mask Configuration
-TANAGER_AEROSOL_DEPTH_THRESHOLD = 0.3
+TANAGER_AEROSOL_DEPTH_THRESHOLD = 0.35
 TANAGER_SR_UNCERTAINTY_THRESHOLD = 0.10
 
 # LANDSAT Pixel Mask Configuration
@@ -40,13 +40,15 @@ AEROSOL_ACCEPT_LEVEL = 'medium' #'low' 'medium' 'high'
 
 # Primary & Secondary Datasets for the axes
 PRIM_METRIC = 'sliding_volume_map' # 'sliding_volume_map' 'sliding_volume_z_score'
-SEC_METRIC = 'sliding_volume_z_score_masked'
+SEC_METRIC = 'sliding_volume_map_5x5'
 
 COMPLEXITY_DICT = {
     'sliding_volume_map': 'Spectral Complexity',
     'sliding_volume_z_score': 'Spectral Complexity Z-Score',
     'sliding_volume_z_score_masked': 'Spectral Complexity Z-Score',
-    'sliding_volume_local_z_score': 'Spectral Complexity Local Z-Score'
+    'sliding_volume_local_z_score': 'Spectral Complexity Local Z-Score',
+    'sliding_volume_map_5x5': 'Spectral Complexity 5x5 window',
+    'sliding_volume_map_7x7': 'Spectral Complexity 7x7 window',
 }
 
 landsat_path = f"C:/satelliteImagery/LANDSAT/{Location}/LANDSAT_Stack_{Location}_GEE_2015_2025_{Frame_Reg}_SC_EM-7_Gram-minEndmember_Norm-bandCount.h5"
@@ -223,12 +225,12 @@ def plot_time_series(ts_data):
     ax1.tick_params(axis='x', rotation=45)
     
     ax1.set_ylabel(COMPLEXITY_DICT[PRIM_METRIC], color='black', fontweight='bold', fontsize=12)
-    if PRIM_METRIC == 'sliding_volume_map':
+    if PRIM_METRIC in ['sliding_volume_map', 'sliding_volume_map_5x5', 'sliding_volume_map_7x7']:
         ax1.set_yscale('log')
         
     if ax2:
         ax2.set_ylabel(COMPLEXITY_DICT[SEC_METRIC], color='gray', fontweight='bold', fontsize=12)
-        if SEC_METRIC == 'sliding_volume_map':
+        if SEC_METRIC in ['sliding_volume_map', 'sliding_volume_map_5x5', 'sliding_volume_map_7x7']:
             ax2.set_yscale('log')
 
     # Twin Axis Legend Construction
