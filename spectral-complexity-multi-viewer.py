@@ -4,6 +4,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 from matplotlib.widgets import Button, TextBox, CheckButtons, RadioButtons
+import matplotlib.gridspec as gridspec
 from datetime import datetime, timezone
 import tkinter as tk
 from scipy.stats import pearsonr, spearmanr, norm, skew, kurtosis
@@ -18,7 +19,7 @@ import rasterio.transform
 from pyproj import Transformer, CRS
 
 # --- Configuration ---
-Location = "Rochester"
+Location = "Tait"
 Frame_Reg = "WRS16"# "CoReg" 
 complexity_type = 'sliding_volume_z_score_masked'#'sliding_volume_z_score' #  'sliding_volume_local_z_score'  'sliding_volume_z_score'
 # Default Projection Bands for 3D Hull (Indices)
@@ -37,11 +38,11 @@ if 'map' in complexity_type:
     LOG_SCALE = True
 else:
     LOG_SCALE = False
-START_YEAR = 2024
+START_YEAR = 2025
 END_YEAR = 2025
 TS_START_DATE = datetime(START_YEAR, 1, 1, tzinfo=timezone.utc)
 TS_END_DATE = datetime(END_YEAR, 12, 31, tzinfo=timezone.utc)
-TWIN_Y_AXIS_DEFAULT = True
+TWIN_Y_AXIS_DEFAULT = False
 
 # Combined Pixel Mask Configuration
 MASKING = True
@@ -82,14 +83,18 @@ SAVE_DIR = f"C:/satelliteImagery/MultiSensor_Analysis_{Location}_{Frame_Reg}" + 
 
 # Time Series Locations (Latitude, Longitude)
 TS_LOCATIONS = [
-    {'latlon': (43.142856, -77.508451), 'label': "West Tait Forest",     'color': 'tab:green'},
-    {'latlon': (43.144861, -77.501176), 'label': "East Tait Forest",             'color': 'tab:olive'},
-    #{'latlon': (43.149077, -77.506040), 'label': "North Tait Forest",             'color': 'tab:orange'},
-    #{'latlon': (43.146627, -77.472877), 'label': "Shadow Lake Golf Course",             'color': 'tab:pink'},
+    
+    {'latlon': (43.139423, -77.503825), 'label': "ROCX NITE Tarp",                  'color': 'tab:purple'},
+    #{'latlon': (43.139411, -77.504005), 'label': "ROCX NITE Tarp",                  'color': 'tab:purple'},
+    #{'latlon': (43.139038, -77.503505), 'label': "ROCX NITE Tarp",                  'color': 'tab:purple'},
+    {'latlon': (43.142856, -77.508451), 'label': "West Tait Forest",                'color': 'tab:green'},
+    {'latlon': (43.144861, -77.501176), 'label': "East Tait Forest",                'color': 'tab:olive'},
+    #{'latlon': (43.149077, -77.506040), 'label': "North Tait Forest",              'color': 'tab:orange'},
+    #{'latlon': (43.146627, -77.472877), 'label': "Shadow Lake Golf Course",        'color': 'tab:pink'},
     {'latlon': (43.136910, -77.469462), 'label': "Artificial turf football field",  'color': 'tab:blue'},
     {'latlon': (43.138241, -77.470873), 'label': "Recently added artificial turf",  'color': 'tab:cyan'},
     {'latlon': (43.141297, -77.506256), 'label': "Tait Parking Lot",                'color': 'tab:red'},
-    {'latlon': (43.139411, -77.504005), 'label': "ROCX NITE Tarp",                  'color': 'tab:purple'},
+    
 
 ]
 
@@ -211,6 +216,7 @@ class MultiComplexityViewer:
         self._init_combined_ui()
         if DISPLAY_REDUNDANT_FIGURE:
             self._init_redundant_ui()
+            self._init_transect_ui()
         self._init_hull_ui()
         
         self.update_display()
@@ -282,7 +288,7 @@ class MultiComplexityViewer:
         self.btn_save = Button(ax_save, 'Save Current', color='lightgreen')
 
         # Auto Save Row
-        self.ax_meta.text(0.5, 0.81, "--- Batch Processing ---", ha='center', va='center', fontsize=9)
+        self.ax_meta.text(0.5, 0.81, "--- Batch Processing ---", ha='center', va='center', fontsize=10)
         
         ax_start = self.fig_controls.add_axes([0.2, 0.76, 0.15, 0.035])
         ax_end = self.fig_controls.add_axes([0.5, 0.76, 0.15, 0.035])
@@ -293,7 +299,7 @@ class MultiComplexityViewer:
         self.btn_auto = Button(ax_auto, 'Auto Save Range', color='lightblue')
         
         # Scatter Plot Controls
-        self.ax_meta.text(0.5, 0.67, f"--- {COMPLEXITY_DICT[complexity_type]} Scatter ---", ha='center', va='center', fontsize=9)
+        self.ax_meta.text(0.5, 0.67, f"--- {COMPLEXITY_DICT[complexity_type]} Scatter ---", ha='center', va='center', fontsize=10)
         
         ax_l_frame = self.fig_controls.add_axes([0.2, 0.62, 0.15, 0.035])
         ax_t_frame = self.fig_controls.add_axes([0.5, 0.62, 0.15, 0.035])
@@ -304,18 +310,18 @@ class MultiComplexityViewer:
         self.btn_scatter = Button(ax_scatter_btn, 'Update Scatter', color='lightyellow')
         
         # --- Parallelotope Localization Controls ---
-        self.ax_meta.text(0.5, 0.53, "--- Parallelotope Localization ---", ha='center', va='center', fontsize=9)
+        self.ax_meta.text(0.5, 0.53, "--- Parallelotope Localization ---", ha='center', va='center', fontsize=10)
         ax_rad_loc = self.fig_controls.add_axes([0.3, 0.43, 0.4, 0.08])
         self.rad_localization = RadioButtons(ax_rad_loc, ('general', 'datasetMean', 'minEndmember'), active=0)
 
         # --- Pixel Filters Controls ---
-        self.ax_meta.text(0.5, 0.40, "--- Pixel Filters ---", ha='center', va='center', fontsize=9)
+        self.ax_meta.text(0.5, 0.40, "--- Pixel Filters ---", ha='center', va='center', fontsize=10)
         
         ax_chk = self.fig_controls.add_axes([0.1, 0.30, 0.4, 0.08])
         self.chk_masks = CheckButtons(ax_chk, ['L: QA Rej', 'L: RADSAT Acpt'], [self.mask_qa_enabled, self.mask_radsat_enabled])
         
         ax_rad = self.fig_controls.add_axes([0.55, 0.30, 0.35, 0.08])
-        ax_rad.set_title("L: Aerosol", fontsize=8)
+        ax_rad.set_title("L: Aerosol", fontsize=10)
         active_idx = ['low', 'medium', 'high', 'all'].index(self.aerosol_level)
         self.rad_aerosol = RadioButtons(ax_rad, ('low', 'medium', 'high', 'all'), active=active_idx)
         
@@ -333,7 +339,7 @@ class MultiComplexityViewer:
         self.txt_t_unc = TextBox(ax_t_unc, 'T-Unc < ', initial=str(self.t_uncertainty_thresh))
 
         # --- Time Series Display Controls ---
-        self.ax_meta.text(0.5, 0.16, "--- Time Series Range ---", ha='center', va='center', fontsize=9)
+        self.ax_meta.text(0.5, 0.16, "--- Time Series Range ---", ha='center', va='center', fontsize=10)
         
         ax_ts_start = self.fig_controls.add_axes([0.15, 0.11, 0.3, 0.035])
         ax_ts_end = self.fig_controls.add_axes([0.55, 0.11, 0.3, 0.035])
@@ -365,7 +371,7 @@ class MultiComplexityViewer:
         self.fig_combined.canvas.manager.set_window_title("Comprehensive Complexity Analysis")
         self.fig_combined.subplots_adjust(top=0.9, bottom=0.05, left=0.05, right=0.95, hspace=0.25, wspace=0.2)
         
-        self.combined_hud = self.fig_combined.text(0.5, 0.98, "", ha='center', va='top', fontsize=11, 
+        self.combined_hud = self.fig_combined.text(0.5, 0.98, "", ha='center', va='top', fontsize=10, 
                                                   bbox=dict(facecolor='white', alpha=0.8, edgecolor='lightgray'))
         
         self.ax_spatial = self.fig_combined.add_subplot(231)
@@ -379,11 +385,28 @@ class MultiComplexityViewer:
         self.fig_redundant.canvas.manager.set_window_title("Spatial and Complexity Details")
         self.fig_redundant.subplots_adjust(top=0.90, bottom=0.08, left=0.05, right=0.95, hspace=0.3, wspace=0.2)
         
-        self.ax_spatial_redundant = self.fig_redundant.add_subplot(221)
-        self.ax_slide_map_redundant = self.fig_redundant.add_subplot(222)
+        self.ax_spatial_redundant = self.fig_redundant.add_subplot(2, 2, 1)
+        self.ax_slide_map_redundant = self.fig_redundant.add_subplot(2, 2, 2)
         
         # Spans the entire bottom row for the time series
         self.ax_ts_redundant_main = self.fig_redundant.add_subplot(2, 2, (3, 4))
+
+    def _init_transect_ui(self):
+        self.fig_transect = plt.figure(figsize=(16, 10))
+        self.fig_transect.canvas.manager.set_window_title("1D Spatial and Temporal Profiles")
+        self.fig_transect.subplots_adjust(top=0.90, bottom=0.10, left=0.05, right=0.95, hspace=0.35, wspace=0.3)
+        
+        gs = gridspec.GridSpec(2, 4, figure=self.fig_transect)
+        
+        # Row 1: Spatial Transects (span 2 columns each)
+        self.ax_transect_h = self.fig_transect.add_subplot(gs[0, :2])
+        self.ax_transect_v = self.fig_transect.add_subplot(gs[0, 2:])
+        
+        # Row 2: Local 2D Image Chips (1 column each) and Temporal Transect (spans remaining 2 columns)
+        self.ax_chip_rgb = self.fig_transect.add_subplot(gs[1, 0])
+        self.ax_chip_comp = self.fig_transect.add_subplot(gs[1, 1])
+        self.ax_transect_t = self.fig_transect.add_subplot(gs[1, 2:])
+        self.ax_transect_t_twin = None
 
     def _init_hull_ui(self):
         self.fig_hull = plt.figure(figsize=(8, 7))
@@ -492,7 +515,7 @@ class MultiComplexityViewer:
         for i, flat_idx in enumerate(em_indices):
             row, col = flat_idx // w, flat_idx % w
             self.ax_spatial.plot(col + 0.5, row + 0.5, 'r+', markersize=8)
-            self.ax_spatial.annotate(f'V{i}', (col + 0.5, row + 0.5), color='yellow', fontsize=8, fontweight='bold')
+            self.ax_spatial.annotate(f'V{i}', (col + 0.5, row + 0.5), color='yellow', fontsize=10, fontweight='bold')
         
         for loc in TS_LOCATIONS:
             y, x = loc['yx']
@@ -535,7 +558,7 @@ class MultiComplexityViewer:
 
         # --- Row 2: Maps and Time Series ---
 
-        def update_map(ax, dset, im_attr, cbar_attr, title):
+        def update_map(ax, dset, im_attr, cbar_attr, title, draw_crosshair=False):
             data = dset[f_idx].copy()
             mh, mw = data.shape
             
@@ -579,6 +602,13 @@ class MultiComplexityViewer:
                     ax.plot(x + 0.5, y + 0.5, marker='s', markersize=10, markeredgecolor=loc['color'], 
                             markerfacecolor='none', markeredgewidth=1.5, linestyle='None')
                 
+                if draw_crosshair:
+                    # Anchor visual crosshairs to visually link the maps to the 1D transects below
+                    t_y, t_x = TS_LOCATIONS[0]['yx']
+                    c_color = TS_LOCATIONS[0]['color']
+                    ax.axhline(t_y + 0.5, color=c_color, linestyle=':', linewidth=1.5, alpha=0.7)
+                    ax.axvline(t_x + 0.5, color=c_color, linestyle=':', linewidth=1.5, alpha=0.7)
+
                 ax.set_title(title)
                 ax.axis('off')
             else:
@@ -589,7 +619,172 @@ class MultiComplexityViewer:
         update_map(self.ax_slide_map, data_grp[complexity_type], 'im_slide', 'cbar_slide', COMPLEXITY_DICT[complexity_type])
         
         if DISPLAY_REDUNDANT_FIGURE:
-            update_map(self.ax_slide_map_redundant, data_grp[complexity_type], 'im_slide_redundant', 'cbar_slide_redundant', COMPLEXITY_DICT[complexity_type])
+            update_map(self.ax_slide_map_redundant, data_grp[complexity_type], 'im_slide_redundant', 'cbar_slide_redundant', COMPLEXITY_DICT[complexity_type], draw_crosshair=True)
+            
+            # --- 1D Spatial Transects (Isolated to new window) ---
+            # Extract and mask strictly for profiling without fabricating fill values
+            transect_data = data_grp[complexity_type][f_idx].copy()
+            if frame_info['source'] == 'LANDSAT':
+                t_mask = self._get_landsat_mask(data_grp, f_idx, transect_data.shape)
+            else:
+                t_mask = self._get_tanager_mask(data_grp, f_idx, transect_data.shape)
+            transect_data[~t_mask] = np.nan
+            
+            target_loc = TS_LOCATIONS[0]
+            t_y, t_x = target_loc['yx']
+            c_color = target_loc['color']
+            
+            self.ax_transect_h.clear()
+            self.ax_transect_v.clear()
+            
+            # Limit span to exactly 15 pixels to isolate Point Spread Function (PSF) and local spatial autocorrelation
+            span = 15
+            half_span = span // 2
+            
+            # Match Line Style & Marker to Sensor for Pre-Attentive Visual Consistency
+            s_style = '--' if frame_info['source'] == 'LANDSAT' else '-'
+            s_marker = '^' if frame_info['source'] == 'LANDSAT' else 's'
+            s_width = 1.5 if frame_info['source'] == 'LANDSAT' else 2.0
+            
+            # Horizontal (Fixed Y, varying X) - Offset by 0.5 to rigorously align with extent grids
+            x_start, x_end = max(0, t_x - half_span), min(w, t_x + half_span + 1)
+            x_indices = np.arange(x_start, x_end) + 0.5
+            h_data = transect_data[t_y, x_start:x_end]
+            
+            self.ax_transect_h.plot(x_indices, h_data, color=c_color, marker=s_marker, linestyle=s_style, linewidth=s_width, markersize=5, alpha=0.8)
+            self.ax_transect_h.axvline(t_x + 0.5, color='red', linestyle='--', linewidth=1.5, label='Target Focus')
+            self.ax_transect_h.set_title(f"Horizontal Spatial Profile (Row/Y = {t_y})", fontsize=10)
+            self.ax_transect_h.set_xlabel("X Pixel Coordinate (Longitude)", fontsize=10)
+            self.ax_transect_h.set_ylabel(COMPLEXITY_DICT[complexity_type], fontsize=10)
+            self.ax_transect_h.grid(True, alpha=0.3, linestyle='--')
+            if LOG_SCALE: self.ax_transect_h.set_yscale('log')
+            self.ax_transect_h.legend(loc='best', fontsize=8)
+            self.ax_transect_h.set_xlim(x_start, x_end)
+            
+            # Vertical (Fixed X, varying Y)
+            y_start, y_end = max(0, t_y - half_span), min(h, t_y + half_span + 1)
+            y_indices = np.arange(y_start, y_end) + 0.5
+            v_data = transect_data[y_start:y_end, t_x]
+            
+            self.ax_transect_v.plot(y_indices, v_data, color=c_color, marker=s_marker, linestyle=s_style, linewidth=s_width, markersize=5, alpha=0.8)
+            self.ax_transect_v.axvline(t_y + 0.5, color='red', linestyle='--', linewidth=1.5, label='Target Focus')
+            self.ax_transect_v.set_title(f"Vertical Spatial Profile (Col/X = {t_x})", fontsize=10)
+            self.ax_transect_v.set_xlabel("Y Pixel Coordinate (Latitude)", fontsize=10)
+            self.ax_transect_v.set_ylabel(COMPLEXITY_DICT[complexity_type], fontsize=10)
+            self.ax_transect_v.grid(True, alpha=0.3, linestyle='--')
+            if LOG_SCALE: self.ax_transect_v.set_yscale('log')
+            self.ax_transect_v.legend(loc='best', fontsize=10)
+            self.ax_transect_v.set_xlim(y_start, y_end)
+            
+            # --- 2D Local Image Chips (15x15 pixels) ---
+            self.ax_chip_rgb.clear()
+            self.ax_chip_comp.clear()
+            
+            # Extract exactly the same bounds for the local chips
+            rgb_chip = rgb[y_start:y_end, x_start:x_end, :]
+            comp_chip = transect_data[y_start:y_end, x_start:x_end]
+            
+            # Relative pixel coordinates within the 15x15 chip
+            rel_y = t_y - y_start
+            rel_x = t_x - x_start
+            
+            self.ax_chip_rgb.imshow(rgb_chip)
+            self.ax_chip_rgb.axhline(rel_y, color='red', linestyle='--', linewidth=1.5, alpha=0.8)
+            self.ax_chip_rgb.axvline(rel_x, color='red', linestyle='--', linewidth=1.5, alpha=0.8)
+            self.ax_chip_rgb.set_title("True Color Context", fontsize=10)
+            self.ax_chip_rgb.axis('off')
+            
+            # Auto-scale the local subset to strictly emphasize the Point Spread Function (PSF) and local contrast
+            with np.errstate(all='ignore'):
+                valid_chip = comp_chip[~np.isnan(comp_chip)]
+                if len(valid_chip) > 0:
+                    c_min, c_max = np.nanmin(valid_chip), np.nanmax(valid_chip)
+                else:
+                    c_min, c_max = 0, 1
+                    
+            self.ax_chip_comp.imshow(comp_chip, cmap='viridis', vmin=c_min, vmax=c_max)
+            self.ax_chip_comp.axhline(rel_y, color='red', linestyle='--', linewidth=1.5, alpha=0.8)
+            self.ax_chip_comp.axvline(rel_x, color='red', linestyle='--', linewidth=1.5, alpha=0.8)
+            self.ax_chip_comp.set_title(f"{COMPLEXITY_DICT[complexity_type]}", fontsize=10)
+            self.ax_chip_comp.axis('off')
+            
+            # --- Temporal Transect (Fixed X, Fixed Y, varying Time) ---
+            self.ax_transect_t.clear()
+            if getattr(self, 'ax_transect_t_twin', None) is not None:
+                try:
+                    self.ax_transect_t_twin.remove()
+                except Exception:
+                    pass
+                self.ax_transect_t_twin = None
+                
+            if self.use_twin_axis:
+                self.ax_transect_t_twin = self.ax_transect_t.twinx()
+                
+            t_ax = self.ax_transect_t_twin if self.use_twin_axis else self.ax_transect_t
+            
+            label = target_loc['label']
+            l_data = self.ts_data['LANDSAT'][label]
+            t_data = self.ts_data['TANAGER'][label]
+            
+            # Filter temporal data strictly to the UI active date constraints without injecting fill values
+            filt_t_l, filt_v_l = [], []
+            if l_data['t']:
+                for i in range(len(l_data['t'])):
+                    if self.ts_start_date <= l_data['t'][i] <= self.ts_end_date:
+                        filt_t_l.append(l_data['t'][i])
+                        filt_v_l.append(l_data['v'][i])
+                        
+            filt_t_t, filt_v_t = [], []
+            if t_data['t']:
+                for i in range(len(t_data['t'])):
+                    if self.ts_start_date <= t_data['t'][i] <= self.ts_end_date:
+                        filt_t_t.append(t_data['t'][i])
+                        filt_v_t.append(t_data['v'][i])
+
+            if filt_t_l:
+                self.ax_transect_t.plot(filt_t_l, filt_v_l, marker='^', color=c_color, label=f"L: {label}",
+                                        markersize=5, linestyle='--', linewidth=1.5, alpha=0.7)
+            if filt_t_t:
+                t_ax.plot(filt_t_t, filt_v_t, marker='s', color=c_color, label=f"T: {label}",
+                                  markersize=6, linestyle='-', linewidth=2, alpha=0.9)
+            
+            self.ax_transect_t.set_title(f"Temporal Profile (Row/Y = {t_y}, Col/X = {t_x})", fontsize=10, fontweight='bold')
+            self.ax_transect_t.grid(True, alpha=0.3, which="both", ls="--")
+            self.ax_transect_t.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m'))
+            self.ax_transect_t.tick_params(axis='x', rotation=45, labelsize=9)
+            
+            # Mark the exact temporal position of the active frame on the timeline
+            self.ax_transect_t.axvline(curr_dt, color='red', linestyle=':', alpha=0.8, linewidth=2, label='Current Frame')
+            
+            # Seasonal Shading (constrained to data limits)
+            if len(self.ax_transect_t.lines) > 0 or (self.ax_transect_t_twin and len(self.ax_transect_t_twin.lines) > 0):
+                xlims = self.ax_transect_t.get_xlim()
+                for yr in range(self.ts_start_date.year, self.ts_end_date.year + 2):
+                    self.ax_transect_t.axvspan(datetime(yr - 1, 12, 1, tzinfo=timezone.utc), datetime(yr, 3, 1, tzinfo=timezone.utc), color='lightgray', alpha=0.3, zorder=0, lw=0)
+                    self.ax_transect_t.axvspan(datetime(yr, 3, 1, tzinfo=timezone.utc), datetime(yr, 6, 1, tzinfo=timezone.utc), color='lightgreen', alpha=0.2, zorder=0, lw=0)
+                    self.ax_transect_t.axvspan(datetime(yr, 6, 1, tzinfo=timezone.utc), datetime(yr, 9, 1, tzinfo=timezone.utc), color='lightyellow', alpha=0.3, zorder=0, lw=0)
+                    self.ax_transect_t.axvspan(datetime(yr, 9, 1, tzinfo=timezone.utc), datetime(yr, 12, 1, tzinfo=timezone.utc), color='orange', alpha=0.15, zorder=0, lw=0)
+                self.ax_transect_t.set_xlim(xlims)
+
+            # Independent Legend and Scaled Y-Axes handling
+            lines_1, labels_1 = self.ax_transect_t.get_legend_handles_labels()
+            if self.use_twin_axis and self.ax_transect_t_twin is not None:
+                self.ax_transect_t.set_ylabel(f"Landsat {COMPLEXITY_DICT[complexity_type]}", color='black', fontsize=10)
+                self.ax_transect_t_twin.set_ylabel(f"Tanager {COMPLEXITY_DICT[complexity_type]}", color='black', fontsize=10)
+                if LOG_SCALE:
+                    self.ax_transect_t.set_yscale('log')
+                    self.ax_transect_t_twin.set_yscale('log')
+                lines_2, labels_2 = self.ax_transect_t_twin.get_legend_handles_labels()
+                self.ax_transect_t.legend(lines_1 + lines_2, labels_1 + labels_2, loc='best', fontsize=10)
+            else:
+                self.ax_transect_t.set_ylabel(COMPLEXITY_DICT[complexity_type], fontsize=10)
+                if LOG_SCALE: self.ax_transect_t.set_yscale('log')
+                self.ax_transect_t.legend(loc='best', fontsize=10)
+
+            # Apply ET formatting to the transect window title
+            curr_dt_et = curr_dt.astimezone(ZoneInfo("America/New_York"))
+            time_str_et = curr_dt_et.strftime('%Y-%m-%d %H:%M:%S ET')
+            self.fig_transect.suptitle(f"Orthogonal Voxel Profiles & Local PSF (X, Y, Time) | {frame_info['sat_id']} - {time_str_et}\n{filter_str}", fontsize=10)
         
         # --- Time Series Construction and Plotting ---
         self.ax_ts_main.clear()
@@ -684,15 +879,15 @@ class MultiComplexityViewer:
             # Format Legends and Y Labels
             lines_1, labels_1 = ax_main.get_legend_handles_labels()
             if self.use_twin_axis and ax_twin is not None:
-                ax_main.set_ylabel("Landsat Spectral Complexity", color='black', fontweight='bold')
-                ax_twin.set_ylabel("Tanager Spectral Complexity", color='black', fontweight='bold')
+                ax_main.set_ylabel(f"Landsat {COMPLEXITY_DICT[complexity_type]}", color='black', fontweight='bold')
+                ax_twin.set_ylabel(f"Tanager {COMPLEXITY_DICT[complexity_type]}", color='black', fontweight='bold')
                 if LOG_SCALE:
                     ax_main.set_yscale('log')
                     ax_twin.set_yscale('log')
                 lines_2, labels_2 = ax_twin.get_legend_handles_labels()
                 ax_main.legend(lines_1 + lines_2, labels_1 + labels_2, loc='upper left', fontsize=8, ncol=2)
             else:
-                ax_main.set_ylabel("Spectral Complexity", fontweight='bold')
+                ax_main.set_ylabel(f"{COMPLEXITY_DICT[complexity_type]}", fontweight='bold')
                 ax_main.legend(loc='upper left', fontsize=8, ncol=2)
 
         # Plot onto the primary layout
@@ -801,6 +996,7 @@ class MultiComplexityViewer:
         figs_to_draw = [self.fig_controls, self.fig_combined, self.fig_hull]
         if DISPLAY_REDUNDANT_FIGURE:
             figs_to_draw.append(self.fig_redundant)
+            figs_to_draw.append(self.fig_transect)
         
         for f in figs_to_draw:
             f.canvas.draw_idle()
@@ -1025,7 +1221,7 @@ class MultiComplexityViewer:
                 filter_str = "Filters: Unmasked"
                 
             self.ax_scatter_lin.text(0.95, 0.05, stats_text_scatter, transform=self.ax_scatter_lin.transAxes, 
-                                     ha='right', va='bottom', fontsize=9, bbox=dict(boxstyle='round', facecolor='white', alpha=0.5))
+                                     ha='right', va='bottom', fontsize=10, bbox=dict(boxstyle='round', facecolor='white', alpha=0.5))
             self.ax_scatter_lin.legend()
 
             # --- Log-Log Subplot ---
@@ -1044,7 +1240,7 @@ class MultiComplexityViewer:
                 self.ax_scatter_log.set_yscale('log')
                 self.ax_scatter_log.grid(True, alpha=0.3, which="both", ls="--")
                 self.ax_scatter_log.text(0.95, 0.05, logStats_text_scatter, transform=self.ax_scatter_log.transAxes, 
-                                         ha='right', va='bottom', fontsize=9, bbox=dict(boxstyle='round', facecolor='white', alpha=0.5))
+                                         ha='right', va='bottom', fontsize=10, bbox=dict(boxstyle='round', facecolor='white', alpha=0.5))
                 self.ax_scatter_log.legend()
             else:
                 # Intentionally blank out the subplot to prevent false assumptions/rendering of undefined math
@@ -1099,7 +1295,7 @@ class MultiComplexityViewer:
                 
             self.ax_hist_l.set_ylabel("Probability Density")
             self.ax_hist_l.grid(True, alpha=0.3, which="both", ls="--")
-            self.ax_hist_l.legend(loc='upper left', fontsize=9)
+            self.ax_hist_l.legend(loc='upper left', fontsize=10)
             
             self.ax_hist_l.text(0.95, 0.95, l_stats_text, transform=self.ax_hist_l.transAxes, 
                                 ha='right', va='top', fontsize=10, bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
@@ -1152,12 +1348,12 @@ class MultiComplexityViewer:
                 
             self.ax_hist_t.set_ylabel("Probability Density")
             self.ax_hist_t.grid(True, alpha=0.3, which="both", ls="--")
-            self.ax_hist_t.legend(loc='upper left', fontsize=9)
+            self.ax_hist_t.legend(loc='upper left', fontsize=10)
             
             self.ax_hist_t.text(0.95, 0.95, t_stats_text, transform=self.ax_hist_t.transAxes, 
                                 ha='right', va='top', fontsize=10, bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
             
-            self.fig_scatter.suptitle(f"{COMPLEXITY_DICT[complexity_type]} Correlation | LANDSAT ({l_date_str}) vs TANAGER ({t_date_str})\n{filter_str}", fontsize=14)
+            self.fig_scatter.suptitle(f"{COMPLEXITY_DICT[complexity_type]} Correlation | LANDSAT ({l_date_str}) vs TANAGER ({t_date_str})\n{filter_str}", fontsize=10)
             self.fig_scatter.tight_layout(rect=[0, 0.03, 1, 0.95]) # Prevent suptitle overlap
         else:
             self.ax_scatter_lin.set_title(f"{COMPLEXITY_DICT[complexity_type]} Correlation (Linear)")
@@ -1224,6 +1420,7 @@ class MultiComplexityViewer:
         figs_to_save = [(self.fig_combined, "CombinedAnalysis")]
         if DISPLAY_REDUNDANT_FIGURE:
             figs_to_save.append((self.fig_redundant, "SpatialComplexityDetails"))
+            figs_to_save.append((self.fig_transect, "SpatialTransects"))
             
         for fig, name in figs_to_save:
             path = os.path.join(save_path, f"{prefix}_{name}.png")
