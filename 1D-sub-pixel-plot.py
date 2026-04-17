@@ -18,7 +18,7 @@ from pyproj import Transformer, CRS
 # ==========================================
 # 1. CONFIGURATION
 # ==========================================
-Location = "Tait"
+Location = "Rochester"
 Frame_Reg = "WRS16" 
 complexity_type = 'sliding_volume_z_score_masked'
 LOG_SCALE = False # Z-Scores cannot be log-scaled

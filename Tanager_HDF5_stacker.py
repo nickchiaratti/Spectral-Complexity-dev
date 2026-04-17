@@ -13,6 +13,11 @@ from datetime import datetime
 from tqdm import tqdm
 import warnings
 
+# Target wavelengths for True Color composite (in nanometers)
+TARGET_RED_NM = 670.0
+TARGET_GREEN_NM = 550.0
+TARGET_BLUE_NM = 480.0
+
 # --- Configuration & ROI Definitions ---
 TIME_THRESHOLD_SECONDS = 60  # Group frames taken within 1 minute
 TARGET_RESOLUTION = 30.0     # Meters (Standard Tanager Product Spec)
@@ -27,13 +32,16 @@ elif Location == "Tait":
 elif Location == "RIT":
     ROI_LON_MIN = -77.688990; ROI_LON_MAX = -77.660365
     ROI_LAT_MIN = 43.072486; ROI_LAT_MAX = 43.093298
+elif Location == "Tait-I-490":
+    ROI_LON_MIN = -77.516127; ROI_LON_MAX = -77.4450
+    ROI_LAT_MIN = 43.0450; ROI_LAT_MAX = 43.159168
 
 # Main directory
 SOURCE_DIR = "C:/satelliteImagery/Tanager/SourceData"
 OUTPUT_DIR = f"C:/satelliteImagery/Tanager/{Location}"
 if not os.path.exists(OUTPUT_DIR):
     os.makedirs(OUTPUT_DIR)
-OUTPUT_FILE = os.path.join(OUTPUT_DIR, f"TestTanager_Stack_{Location}_HDFEOS.h5")
+OUTPUT_FILE = os.path.join(OUTPUT_DIR, f"Tanager_Stack_{Location}_HDFEOS.h5")
 
 def calculate_target_grid(lon_min, lon_max, lat_min, lat_max, resolution):
     """
@@ -80,7 +88,7 @@ def extract_georeferencing_from_h5(h5_path):
             
             meta_data = f[meta_path][()]
             if isinstance(meta_data, (np.ndarray, list)): meta_data = meta_data[0]
-            odl = meta_data.decode('ascii') if isinstance(meta_data, bytes) else str(meta_data)
+            odl = str(meta_data)
             
             ul_match = re.search(r'UpperLeftPointMtrs=\(\s*(-?[\d\.]+)\s*,\s*(-?[\d\.]+)\s*\)', odl)
             lr_match = re.search(r'LowerRightMtrs=\(\s*(-?[\d\.]+)\s*,\s*(-?[\d\.]+)\s*\)', odl)
@@ -95,7 +103,7 @@ def extract_georeferencing_from_h5(h5_path):
                 y_dim = int(y_match.group(1))
                 
                 src_transform = from_bounds(ul_x, lr_y, lr_x, ul_y, x_dim, y_dim)
-                zone = int(zone_match.group(1)) if zone_match else 18
+                zone = int(zone_match.group(1))
                 src_crs = CRS.from_dict({'proj': 'utm', 'zone': zone, 'datum': 'WGS84'})
                 
                 return src_transform, src_crs
@@ -162,8 +170,8 @@ GROUP=GridStructure
                 Size={width}
             END_OBJECT=Dimension_4
             OBJECT=Dimension_5
-                DimensionName="VisBand"
-                Size=4
+                DimensionName="RGBBand"
+                Size=3
             END_OBJECT=Dimension_5
         END_GROUP=Dimension
 
@@ -183,6 +191,24 @@ END
 """
     return odl
 
+def percentile_stretch(band_data, fill_value=-9999.0, lower_pct=2, upper_pct=98):
+    """
+    Applies a robust linear contrast stretch based on data percentiles.
+    Performs no synthetic fallback for empty or zero-variance data to ensure
+    data integrity issues raise explicit exceptions.
+    """
+    valid_mask = (band_data != fill_value) & (band_data >= 0)
+    valid_data = band_data[valid_mask]
+    
+    p_low, p_high = np.percentile(valid_data, (lower_pct, upper_pct))
+        
+    stretched = (band_data.astype(np.float32) - p_low) / (p_high - p_low)
+    stretched = np.clip(stretched, 0, 1) * 255
+    
+    result = np.zeros_like(band_data, dtype=np.uint8)
+    result[valid_mask] = stretched[valid_mask].astype(np.uint8)
+    return result
+
 def process_tanager_stack():
     print(f"Starting Rasterio-based Processing for: {Location}")
     
@@ -192,12 +218,12 @@ def process_tanager_stack():
         if not subfolder.is_dir(): continue
         json_path = list(subfolder.glob("*.json"))
         h5_path = list(subfolder.glob("*_ortho_sr_hdf5.h5"))
-        vis_path = list(subfolder.glob("*_ortho_visual.tif"))
+        
         if json_path and h5_path:
             is_overlap, stac_data = is_roi_intersecting(json_path[0])
             if is_overlap:
                 dt = datetime.fromisoformat(stac_data['properties']['datetime'].replace('Z', '+00:00'))
-                raw_scenes.append({'h5_file': str(h5_path[0]), 'vis_file': str(vis_path[0]) if vis_path else None, 'time': dt, 'json': stac_data})
+                raw_scenes.append({'h5_file': str(h5_path[0]), 'time': dt, 'json': stac_data})
 
     if not raw_scenes: return
     raw_scenes.sort(key=lambda x: x['time'])
@@ -257,7 +283,7 @@ def process_tanager_stack():
                     fpath = scene["h5_file"].replace("\\", "/")
                     src_tf, src_crs_info = extract_georeferencing_from_h5(fpath)
 
-                    handle = rasterio.open(fpath)
+                    handle = rasterio.open(f'HDF5:"{fpath}"://{d_info["h5_path"].replace(" ", "_")}')
                     if handle:
                         try:
                             incoming = np.full(out_shape[1:], d_info['fill'], dtype=d_info['dtype'])
@@ -275,10 +301,12 @@ def process_tanager_stack():
                 # Write final pass canvas
                 out_dset[t_idx, ...] = pass_canvas
                 
-                # Save center timestamp value if this is the 'time' dataset
+                # Save representative timestamp value if this is the 'time' dataset
                 if name == 'time':
-                    center_y, center_x = height // 2, width // 2
-                    acqTime_attr[t_idx] = pass_canvas[center_y, center_x]
+                    valid_times = pass_canvas[pass_canvas != d_info['fill']]
+                    if valid_times.size == 0:
+                        raise ValueError(f"Frame {t_idx} contains no valid 'time' data. Cannot compute acquisition time.")
+                    acqTime_attr[t_idx] = np.median(valid_times)
                 
                 # Compute sr_invalid mask if processing reflectance
                 if name == "surface_reflectance" and ds_invalid is not None:
@@ -316,25 +344,42 @@ def process_tanager_stack():
             grp_tanager["surface_reflectance"].attrs["acquisition_time"] = acqTime_attr
             grp_tanager["surface_reflectance"].attrs["spacecraft_id"] = ['Tanager-1']*len(grouped_scenes)
 
-        # Visuals
-        vis_dset = grp_tanager.create_dataset("ortho_visual", shape=(len(grouped_scenes), 4, height, width), dtype='uint8', compression="gzip", fillvalue=0)
+        # --- Visuals: Generated ortho_visual from surface_reflectance ---
+        ortho_vis_dset = grp_tanager.create_dataset("ortho_visual", shape=(len(grouped_scenes), 3, height, width), dtype='uint8', compression="gzip", fillvalue=0)
         
-        # --- Standardized Spatial Metadata ---
-        vis_dset.attrs['spatial_ref'] = dst_crs.to_wkt()
-        gdal_transform = [tf_target.c, tf_target.a, tf_target.b, tf_target.f, tf_target.d, tf_target.e]
-        vis_dset.attrs['GeoTransform'] = np.array(gdal_transform, dtype='float64')
+        ortho_vis_dset.attrs['spatial_ref'] = dst_crs.to_wkt()
+        ortho_vis_dset.attrs['GeoTransform'] = np.array(gdal_transform, dtype='float64')
+        datasets_created_info.append(("ortho_visual", np.uint8, 3, ["Time", "RGBBand", "YDim", "XDim"]))
         
-        datasets_created_info.append(("ortho_visual", np.uint8, 4, ["Time", "VisBand", "YDim", "XDim"]))
-        for t_idx, group in enumerate(grouped_scenes):
-            pass_vis = np.zeros((4, height, width), dtype='uint8')
-            for scene in group:
-                with rasterio.open(scene['vis_file']) as src:
-                    incoming = np.zeros((4, height, width), dtype='uint8')
-                    reproject(rasterio.band(src, [1, 2, 3, 4]), incoming, src_transform=src.transform, 
-                              src_crs=src.crs, dst_transform=tf_target, dst_crs=dst_crs, resampling=Resampling.cubic)
-                    mask = (incoming[3] > 0); pass_vis[:, mask] = incoming[:, mask]
-            vis_dset[t_idx, ...] = pass_vis
+        # Dynamically determine the RGB indices from the first dataset's wavelengths
+        sr_path_in_first = [d['h5_path'] for d in dataset_info_list if d['name'] == 'surface_reflectance'][0]
+        with h5py.File(first_h5, 'r') as f0:
+            wavelengths = f0[sr_path_in_first].attrs['wavelengths']
+            r_idx = int(np.argmin(np.abs(wavelengths - TARGET_RED_NM)))
+            g_idx = int(np.argmin(np.abs(wavelengths - TARGET_GREEN_NM)))
+            b_idx = int(np.argmin(np.abs(wavelengths - TARGET_BLUE_NM)))
+            
+        print(f"  Generating 'ortho_visual' RGB composite directly from SR (Indices: {r_idx}, {g_idx}, {b_idx})")
+        sr_dset_ref = grp_tanager["surface_reflectance"]
+        
+        # Extract the background fill value to ignore during stretching
+        sr_fill = -9999.0
+        for d_info in dataset_info_list:
+            if d_info['name'] == 'surface_reflectance':
+                if d_info['fill'] is not None:
+                    sr_fill = d_info['fill']
+                break
 
+        for t_idx in range(len(grouped_scenes)):
+            r_band = sr_dset_ref[t_idx, r_idx, :, :]
+            g_band = sr_dset_ref[t_idx, g_idx, :, :]
+            b_band = sr_dset_ref[t_idx, b_idx, :, :]
+            
+            ortho_vis_dset[t_idx, 0, :, :] = percentile_stretch(r_band, sr_fill)
+            ortho_vis_dset[t_idx, 1, :, :] = percentile_stretch(g_band, sr_fill)
+            ortho_vis_dset[t_idx, 2, :, :] = percentile_stretch(b_band, sr_fill)
+
+        # Write struct metadata
         struct_meta = generate_struct_metadata("TANAGER", width, height, ul_coords, lr_coords, datasets_created_info, len(grouped_scenes), band_count, utm_zone)
         dt_str = h5py.string_dtype(encoding='ascii')
         info_grp.create_dataset("StructMetadata.0", (1,), dtype=dt_str, data=struct_meta)

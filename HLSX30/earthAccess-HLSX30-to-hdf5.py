@@ -19,7 +19,7 @@ import re
 # ==========================================
 # 1. CONFIGURATION & AUTHENTICATION
 # ==========================================
-cloud_threshold = 50
+cloud_threshold = 30
 
 print("Authenticating with NASA Earthdata...")
 earthaccess.login(strategy="all", persist=True)
@@ -130,7 +130,19 @@ def stac_native_window_read(collection_id, assets_list, temp_dir):
                         tile_data['crs'] = cached_src.crs
                         tile_data['width'] = cached_src.width
                         tile_data['height'] = cached_src.height
-                        tile_data['zone'] = CRS.from_user_input(cached_src.crs).to_epsg() - 32600
+                        
+                        # EVIDENCE-BASED FIX: Robust UTM Zone Parsing
+                        # Handles COGs missing strict EPSG codes and fixes the Northern Hemisphere math bias.
+                        epsg_code = CRS.from_user_input(cached_src.crs).to_epsg()
+                        if epsg_code is not None:
+                            tile_data['zone'] = epsg_code % 100 # Modulo safely handles both North (326xx) and South (327xx)
+                        else:
+                            # Fallback: Extract absolute provenance from the MGRS Tile ID directly
+                            zone_match = re.search(r'T(\d+)', parsed_mgrs_tile)
+                            if zone_match:
+                                tile_data['zone'] = int(zone_match.group(1))
+                            else:
+                                tile_data['zone'] = cached_src.crs.to_dict().get('zone')
                 continue
             
             print(f"  [{i}/{total_items}] [{img_id}] Downloading {len(assets_list)} STAC assets via Concurrent Window Read...")    
@@ -147,7 +159,18 @@ def stac_native_window_read(collection_id, assets_list, temp_dir):
                         tile_data['crs'] = src.crs
                         tile_data['width'] = window.width
                         tile_data['height'] = window.height
-                        tile_data['zone'] = CRS.from_user_input(src.crs).to_epsg() - 32600
+                        
+                        # EVIDENCE-BASED FIX: Robust UTM Zone Parsing (Download Block)
+                        epsg_code = CRS.from_user_input(src.crs).to_epsg()
+                        if epsg_code is not None:
+                            tile_data['zone'] = epsg_code % 100
+                        else:
+                            zone_match = re.search(r'T(\d+)', parsed_mgrs_tile)
+                            if zone_match:
+                                tile_data['zone'] = int(zone_match.group(1))
+                            else:
+                                tile_data['zone'] = src.crs.to_dict().get('zone')
+                                
                         tile_data['window'] = window
                     
                     window = tile_data['window']
@@ -177,78 +200,9 @@ s30_collections = stac_native_window_read("HLSS30.v2.0", ASSETS_S30, S30_TEMP_DI
 l30_collections = stac_native_window_read("HLSL30.v2.0", ASSETS_L30, L30_TEMP_DIR)
 
 # ==========================================
-# 4. LOCAL DATASET PARSING & SUBSETTING (TANAGER)
+# 3. HDFEOS5 ODL GENERATOR
 # ==========================================
-def is_roi_intersecting(json_path):
-    with open(json_path, 'r') as f: data = json.load(f)
-    s_min_lon, s_min_lat, s_max_lon, s_max_lat = data['bbox']
-    overlap = not (safe_bbox[2] < s_min_lon or safe_bbox[0] > s_max_lon or safe_bbox[3] < s_min_lat or safe_bbox[1] > s_max_lat)
-    return overlap, data
-
-def extract_georeferencing_from_h5(h5_path):
-    """Extracts internal georeferencing. Fails hard if ODL is missing or malformed."""
-    with h5py.File(h5_path, 'r') as f:
-        meta_path = "HDFEOS INFORMATION/StructMetadata.0"
-        if meta_path not in f:
-            raise ValueError(f"CRITICAL ERROR: StructMetadata.0 missing in {h5_path}")
-        
-        meta_data = f[meta_path][()]
-        if isinstance(meta_data, (np.ndarray, list)): meta_data = meta_data[0]
-        odl = meta_data.decode('ascii') if isinstance(meta_data, bytes) else str(meta_data)
-        
-        ul_match = re.search(r'UpperLeftPointMtrs=\(\s*(-?[\d\.]+)\s*,\s*(-?[\d\.]+)\s*\)', odl)
-        lr_match = re.search(r'LowerRightMtrs=\(\s*(-?[\d\.]+)\s*,\s*(-?[\d\.]+)\s*\)', odl)
-        x_match = re.search(r'XDim=(\d+)', odl)
-        y_match = re.search(r'YDim=(\d+)', odl)
-        zone_match = re.search(r'ZoneCode=(\d+)', odl)
-        
-        if all([ul_match, lr_match, x_match, y_match]):
-            ul_x, ul_y = float(ul_match.group(1)), float(ul_match.group(2))
-            lr_x, lr_y = float(lr_match.group(1)), float(lr_match.group(2))
-            x_dim, y_dim = int(x_match.group(1)), int(y_match.group(1))
-            zone = int(zone_match.group(1)) if zone_match else 18
-            return from_bounds(ul_x, lr_y, lr_x, ul_y, x_dim, y_dim), CRS.from_dict({'proj': 'utm', 'zone': zone, 'datum': 'WGS84'})
-        else:
-            raise ValueError(f"CRITICAL ERROR: Incomplete ODL bounding geometry in {h5_path}")
-
-def group_tanager_scenes():
-    print(f"\nLocating Tanager Hyperspectral Data in: {TANAGER_SOURCE_DIR}")
-    root_path = Path(TANAGER_SOURCE_DIR)
-    raw_scenes = []
-    
-    if not root_path.exists():
-        print("WARNING: Tanager source directory not found. Skipping Tanager ingestion.")
-        return []
-
-    for subfolder in root_path.iterdir():
-        if not subfolder.is_dir(): continue
-        json_path = list(subfolder.glob("*.json"))
-        h5_path = list(subfolder.glob("*_ortho_sr_hdf5.h5"))
-        vis_path = list(subfolder.glob("*_ortho_visual.tif"))
-        
-        if json_path and h5_path:
-            is_overlap, stac_data = is_roi_intersecting(json_path[0])
-            if is_overlap:
-                dt = datetime.fromisoformat(stac_data['properties']['datetime'].replace('Z', '+00:00'))
-                raw_scenes.append({'h5_file': str(h5_path[0]), 'vis_file': str(vis_path[0]) if vis_path else None, 'time': dt, 'json': stac_data})
-
-    if not raw_scenes: return []
-    raw_scenes.sort(key=lambda x: x['time'])
-
-    grouped_scenes, current_group = [], [raw_scenes[0]]
-    for i in range(1, len(raw_scenes)):
-        if (raw_scenes[i]['time'] - current_group[-1]['time']).total_seconds() <= TANAGER_TIME_THRESHOLD:
-            current_group.append(raw_scenes[i])
-        else:
-            grouped_scenes.append(current_group); current_group = [raw_scenes[i]]
-    grouped_scenes.append(current_group)
-    print(f"Found {len(raw_scenes)} valid Tanager frames, grouped into {len(grouped_scenes)} temporal mosaics.")
-    return grouped_scenes
-
-# ==========================================
-# 5. HDFEOS5 ODL UTILITIES (MULTI-SENSOR)
-# ==========================================
-def generate_odl_grid_string(grid_name, width, height, transform, proj_code, zone, proj_params, num_sr_bands, num_frames, has_thermal, has_tile_mask=False):
+def generate_odl_grid_string(grid_name, width, height, transform, proj_code, zone, proj_params, num_sr_bands, num_frames, has_thermal):
     ul_x, ul_y = transform.c, transform.f
     lr_x = transform.c + (transform.a * width)
     lr_y = transform.f + (transform.e * height)
@@ -258,9 +212,6 @@ def generate_odl_grid_string(grid_name, width, height, transform, proj_code, zon
     thermal_field = f"""            OBJECT=DataField_2\n                DataFieldName="thermal_infrared"\n                DataType=HDF5T_NATIVE_FLOAT\n                DimList=("Time","ThermalBands","YDim","XDim")\n            END_OBJECT=DataField_2""" if has_thermal else ""
     fmask_idx = 3 if has_thermal else 2
     ang_idx = 4 if has_thermal else 3
-    tm_idx = 5 if has_thermal else 4
-    
-    tile_mask_field = f"""            OBJECT=DataField_{tm_idx}\n                DataFieldName="source_tile_mask"\n                DataType=HDF5T_NATIVE_UINT8\n                DimList=("Time","YDim","XDim")\n            END_OBJECT=DataField_{tm_idx}""" if has_tile_mask else ""
     
     return f"""    GROUP={grid_name}
         GridName="{grid_name}"
@@ -312,153 +263,123 @@ def generate_odl_grid_string(grid_name, width, height, transform, proj_code, zon
                 DataType=HDF5T_NATIVE_FLOAT
                 DimList=("Time","AngleBands","YDim","XDim")
             END_OBJECT=DataField_{ang_idx}
-{tile_mask_field}
         END_GROUP=DataField
         GROUP=MergedFields
         END_GROUP=MergedFields
     END_GROUP={grid_name}"""
-
-def generate_tanager_odl_string(grid_name, width, height, transform, proj_code, zone, proj_params, datasets_info, n_times, n_bands):
-    """Dynamically generates ODL for Tanager's hyperspectral dimensionality."""
-    ul_x, ul_y = transform.c, transform.f
-    lr_x = transform.c + (transform.a * width)
-    lr_y = transform.f + (transform.e * height)
-    p_str = str(tuple(proj_params)).replace(' ', '').replace('(', '').replace(')', '')
-    
-    data_fields_blocks = []
-    for i, (name, dtype, rank, dim_names) in enumerate(datasets_info):
-        eos_type = "HDF5T_NATIVE_FLOAT"
-        if "uint8" in str(dtype): eos_type = "HDF5T_NATIVE_UINT8"
-        elif "uint16" in str(dtype): eos_type = "HDF5T_NATIVE_UINT16"
-        elif "uint" in str(dtype): eos_type = "HDF5T_NATIVE_UINT"
-        elif "int" in str(dtype): eos_type = "HDF5T_NATIVE_INT"
-        elif "float64" in str(dtype) or "double" in str(dtype): eos_type = "HDF5T_NATIVE_DOUBLE"
-        
-        dims_list = ",".join([f"\"{d}\"" for d in dim_names])
-        block = f"""            OBJECT=DataField_{i+1}
-                DataFieldName="{name}"
-                DataType={eos_type}
-                DimList=({dims_list})
-            END_OBJECT=DataField_{i+1}"""
-        data_fields_blocks.append(block)
-        
-    return f"""    GROUP={grid_name}
-        GridName="{grid_name}"
-        XDim={width}
-        YDim={height}
-        UpperLeftPointMtrs=({ul_x:.6f},{ul_y:.6f})
-        LowerRightMtrs=({lr_x:.6f},{lr_y:.6f})
-        Projection={proj_code}
-        ZoneCode={zone}
-        SphereCode=12
-        ProjParams={p_str}
-        GROUP=Dimension
-            OBJECT=Dimension_1
-                DimensionName="Time"
-                Size={n_times}
-            END_OBJECT=Dimension_1
-            OBJECT=Dimension_2
-                DimensionName="Band"
-                Size={n_bands}
-            END_OBJECT=Dimension_2
-            OBJECT=Dimension_3
-                DimensionName="YDim"
-                Size={height}
-            END_OBJECT=Dimension_3
-            OBJECT=Dimension_4
-                DimensionName="XDim"
-                Size={width}
-            END_OBJECT=Dimension_4
-            OBJECT=Dimension_5
-                DimensionName="VisBand"
-                Size=4
-            END_OBJECT=Dimension_5
-        END_GROUP=Dimension
-        GROUP=DataField
-{"\n".join(data_fields_blocks)}
-        END_GROUP=DataField
-        GROUP=MergedFields
-        END_GROUP=MergedFields
-    END_GROUP={grid_name}"""
-
-def write_hdf_sensor_group(h5f, group_path, data_dict, wavelengths, crs, transform, thermal_wavelengths=None, tile_name=None, tile_mapping_json=None):
-    if not data_dict or data_dict['count'] == 0: return
-    grp = h5f.create_group(group_path)
-    gdal_transform = np.array([transform.c, transform.a, transform.b, transform.f, transform.d, transform.e], dtype='float64')
-    dt = h5py.string_dtype(encoding='ascii')
-    
-    sr_ds = grp.create_dataset('surface_reflectance', data=data_dict['sr'], compression='gzip', compression_opts=6)
-    sr_ds.attrs['units'] = "Reflectance"; sr_ds.attrs['_FillValue'] = np.nan; sr_ds.attrs['wavelengths'] = wavelengths
-    sr_ds.attrs['spatial_ref'] = crs.to_wkt(); sr_ds.attrs['GeoTransform'] = gdal_transform
-    
-    if thermal_wavelengths and data_dict['th'] is not None:
-        th_ds = grp.create_dataset('thermal_infrared', data=data_dict['th'], compression='gzip', compression_opts=6)
-        th_ds.attrs['units'] = "Kelvin/Celsius Apparent"; th_ds.attrs['_FillValue'] = np.nan; th_ds.attrs['wavelengths'] = thermal_wavelengths
-        
-    fmask_ds = grp.create_dataset('Fmask', data=data_dict['fm'][:, 0, :, :], dtype='uint8', compression='gzip', compression_opts=6)
-    fmask_ds.attrs['_FillValue'] = 255
-    ang_ds = grp.create_dataset('solar_view_angles', data=data_dict['ag'], compression='gzip', compression_opts=6)
-    ang_ds.attrs['_FillValue'] = np.nan; ang_ds.attrs['band_order'] = ["SZA", "SAA", "VZA", "VAA"]
-    
-    if 'tm' in data_dict and data_dict['tm'] is not None:
-        tm_ds = grp.create_dataset('source_tile_mask', data=data_dict['tm'][:, 0, :, :], dtype='uint8', compression='gzip', compression_opts=6)
-        tm_ds.attrs['_FillValue'] = 0
-        tm_ds.attrs['description'] = "Integer mapping to source MGRS tile to track radiometric provenance."
-        if tile_mapping_json: tm_ds.attrs['tile_mapping'] = tile_mapping_json
-            
-    sr_ds.attrs.create('spacecraft_id', data=data_dict['meta']['space'], dtype=dt)
-    if tile_name: sr_ds.attrs.create('mgrs_tile', data=tile_name, dtype=dt)
-    sr_ds.attrs['acquisition_time'] = np.array(data_dict['meta']['acq'], dtype='float64') 
-    sr_ds.attrs['sun_azimuth'] = np.array(data_dict['meta']['saz'], dtype='float32')
-    sr_ds.attrs['sun_elevation'] = np.array(data_dict['meta']['sel'], dtype='float32')
-    sr_ds.attrs['cloud_cover'] = np.array(data_dict['meta']['cc'], dtype='float32')
 
 # ==========================================
-# 6. PHASE 1: BUILD NATIVE HDF5 (HLS UNPROJECTED TRUTH)
+# 4. PHASE 1: BUILD NATIVE HDF5 (OUT-OF-CORE STREAMING)
 # ==========================================
 print(f"\nBuilding Native Truth Data HDF5 (HLS Only): {OUTPUT_NATIVE_HDF5}")
 
-def process_native_stack(tile_data, expected_sr, expected_thermal, expected_fmask_idx, expect_thermal_flag=False):
+def stream_native_stack_to_hdf5(h5f, group_path, tile_data, expected_sr, expected_thermal, expected_fmask_idx, wavelengths, thermal_wavelengths=None, tile_name=None):
+    """
+    EVIDENCE-BASED OPTIMIZATION: Spatial Chunking & Fast Compression
+    Bypasses I/O Thrashing by aligning the HDF5 chunks with the chronological 
+    write-pattern (Frame-by-Frame). Uses gzip level 4 to balance size and speed.
+    """
     items = tile_data['items']
     sorted_ids = sorted(items.keys(), key=lambda k: items[k]['acquisition_time'])
     num_frames = len(sorted_ids)
-    if num_frames == 0: return None
-    
+    if num_frames == 0: return 0
+
     w, h = tile_data['width'], tile_data['height']
-    stk_sr = np.zeros((num_frames, expected_sr, h, w), dtype=np.float32)
-    stk_th = np.zeros((num_frames, expected_thermal, h, w), dtype=np.float32) if expect_thermal_flag else None
-    stk_fm = np.zeros((num_frames, 1, h, w), dtype=np.uint8)
-    stk_ag = np.zeros((num_frames, 4, h, w), dtype=np.float32)
-    meta_arrays = {'acq': [], 'space': [], 'saz': [], 'sel': [], 'cc': []}
+    grp = h5f.create_group(group_path)
+
+    # 1. Pre-allocate HDF5 Datasets directly on the physical disk
+    # Reverted to Spatial Chunking: (1 frame, all bands, 256x256 pixels)
+    # This prevents the B-Tree index from rewriting identical blocks 175 times.
+    chunk_h, chunk_w = min(h, 256), min(w, 256)
     
-    valid_idx = 0
-    for img_id in sorted_ids:
+    sr_ds = grp.create_dataset('surface_reflectance', shape=(num_frames, expected_sr, h, w), 
+                               chunks=(1, expected_sr, chunk_h, chunk_w),
+                               dtype=np.float32, compression='gzip', compression_opts=4)
+    
+    fm_ds = grp.create_dataset('Fmask', shape=(num_frames, 1, h, w), 
+                               chunks=(1, 1, chunk_h, chunk_w),
+                               dtype=np.uint8, compression='gzip', compression_opts=4)
+                               
+    ag_ds = grp.create_dataset('solar_view_angles', shape=(num_frames, 4, h, w), 
+                               chunks=(1, 4, chunk_h, chunk_w),
+                               dtype=np.float32, compression='gzip', compression_opts=4)
+
+    th_ds = None
+    if expected_thermal > 0:
+        th_ds = grp.create_dataset('thermal_infrared', shape=(num_frames, expected_thermal, h, w), 
+                                   chunks=(1, expected_thermal, chunk_h, chunk_w),
+                                   dtype=np.float32, compression='gzip', compression_opts=4)
+
+    meta_arrays = {'acq': [], 'space': [], 'saz': [], 'sel': [], 'cc': []}
+
+    # 2. Stream Data to Disk Frame-by-Frame
+    for idx, img_id in enumerate(sorted_ids):
         meta = items[img_id]
+
+        # Strict Failure Directive: Halt if catalog metadata is missing.
+        for k, v in meta.items():
+            if v is None and k != 'filepath': 
+                raise ValueError(f"CRITICAL ERROR: Metadata '{k}' for '{img_id}' is null. Halting pipeline to prevent data assumptions.")
+
         with rasterio.open(meta['filepath']) as src:
             t_sr = src.read(list(range(1, expected_sr+1)))
-            stk_sr[valid_idx] = np.where(t_sr != -9999, t_sr.astype(np.float32) * 0.0001, np.nan)
-            if expect_thermal_flag:
+            sr_ds[idx, ...] = np.where(t_sr != -9999, t_sr.astype(np.float32) * 0.0001, np.nan)
+            
+            if expected_thermal > 0:
                 off = expected_sr + 1
                 t_th = src.read(list(range(off, off+expected_thermal)))
-                stk_th[valid_idx] = np.where(t_th != -9999, t_th.astype(np.float32) * 0.01, np.nan)
-            stk_fm[valid_idx] = src.read(expected_fmask_idx).astype(np.uint8)[np.newaxis, ...]
+                th_ds[idx, ...] = np.where(t_th != -9999, t_th.astype(np.float32) * 0.01, np.nan)
+                
+            fm_ds[idx, ...] = src.read(expected_fmask_idx).astype(np.uint8)[np.newaxis, ...]
+            
             t_ag = src.read(list(range(expected_fmask_idx+1, expected_fmask_idx+5)))
-            stk_ag[valid_idx] = np.where(t_ag != -9999, t_ag.astype(np.float32) * 0.01, np.nan)
+            ag_mapped = np.where(t_ag != -9999, t_ag.astype(np.float32) * 0.01, np.nan)
+            ag_ds[idx, ...] = ag_mapped
 
-            for k, v in meta.items():
-                if v is None and k != 'filepath': raise ValueError(f"CRITICAL ERROR: Metadata '{k}' for '{img_id}' is null.")
-
+            # Derive global angles strictly from valid real data
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore", category=RuntimeWarning)
-                mean_sza = np.nanmean(stk_ag[valid_idx, 0])
-                mean_saa = np.nanmean(stk_ag[valid_idx, 1])
+                mean_sza = np.nanmean(ag_mapped[0])
+                mean_saa = np.nanmean(ag_mapped[1])
 
-            meta_arrays['acq'].append(meta['acquisition_time']); meta_arrays['space'].append(meta['spacecraft_id'])
-            meta_arrays['saz'].append(mean_saa); meta_arrays['sel'].append(90.0 - mean_sza)
+            # Strict Failure Directive: Halt if array yields NaN angles.
+            if np.isnan(mean_sza) or np.isnan(mean_saa):
+                raise ValueError(f"CRITICAL ERROR: Raster-derived mean sun angles are NaN for '{img_id}'. Halting pipeline.")
+
+            meta_arrays['acq'].append(meta['acquisition_time'])
+            meta_arrays['space'].append(meta['spacecraft_id'])
+            meta_arrays['saz'].append(mean_saa)
+            meta_arrays['sel'].append(90.0 - mean_sza)
             meta_arrays['cc'].append(meta['cloud_cover'])
-            valid_idx += 1
 
-    return {'sr': stk_sr[:valid_idx], 'th': stk_th[:valid_idx] if expect_thermal_flag else None, 'fm': stk_fm[:valid_idx], 'ag': stk_ag[:valid_idx], 'meta': meta_arrays, 'count': valid_idx}
+    # 3. Apply Mandatory ARD Attributes
+    dt_str = h5py.string_dtype(encoding='ascii')
+    gdal_transform = np.array([tile_data['transform'].c, tile_data['transform'].a, tile_data['transform'].b, 
+                               tile_data['transform'].f, tile_data['transform'].d, tile_data['transform'].e], dtype='float64')
+                               
+    sr_ds.attrs['units'] = "Reflectance"
+    sr_ds.attrs['_FillValue'] = np.nan
+    sr_ds.attrs['wavelengths'] = wavelengths
+    sr_ds.attrs['spatial_ref'] = tile_data['crs'].to_wkt()
+    sr_ds.attrs['GeoTransform'] = gdal_transform
+    
+    if th_ds:
+        th_ds.attrs['units'] = "Kelvin/Celsius Apparent"
+        th_ds.attrs['_FillValue'] = np.nan
+        th_ds.attrs['wavelengths'] = thermal_wavelengths
+        
+    fm_ds.attrs['_FillValue'] = 255
+    ag_ds.attrs['_FillValue'] = np.nan
+    ag_ds.attrs['band_order'] = ["SZA", "SAA", "VZA", "VAA"]
+    
+    sr_ds.attrs.create('spacecraft_id', data=meta_arrays['space'], dtype=dt_str)
+    if tile_name: sr_ds.attrs.create('mgrs_tile', data=tile_name, dtype=dt_str)
+    sr_ds.attrs['acquisition_time'] = np.array(meta_arrays['acq'], dtype='float64') 
+    sr_ds.attrs['sun_azimuth'] = np.array(meta_arrays['saz'], dtype='float32')
+    sr_ds.attrs['sun_elevation'] = np.array(meta_arrays['sel'], dtype='float32')
+    sr_ds.attrs['cloud_cover'] = np.array(meta_arrays['cc'], dtype='float32')
+    
+    return num_frames
 
 with h5py.File(OUTPUT_NATIVE_HDF5, 'w') as h5f:
     info_grp = h5f.create_group("HDFEOS INFORMATION")
@@ -466,16 +387,14 @@ with h5py.File(OUTPUT_NATIVE_HDF5, 'w') as h5f:
     odl_blocks = []
     
     for mgrs_tile, tile_meta in s30_collections.items():
-        p_data = process_native_stack(tile_meta, 13, 0, 14, False)
-        if p_data:
-            write_hdf_sensor_group(h5f, f'/HDFEOS/GRIDS/HLSS30_{mgrs_tile}/Data Fields', p_data, S30_WAVELENGTHS, tile_meta['crs'], tile_meta['transform'], tile_name=mgrs_tile)
-            odl_blocks.append(generate_odl_grid_string(f"HLSS30_{mgrs_tile}", tile_meta['width'], tile_meta['height'], tile_meta['transform'], "GCTP_UTM", tile_meta['zone'], [0.0]*13, 13, p_data['count'], False))
+        num_f = stream_native_stack_to_hdf5(h5f, f'/HDFEOS/GRIDS/HLSS30_{mgrs_tile}/Data Fields', tile_meta, 13, 0, 14, S30_WAVELENGTHS, tile_name=mgrs_tile)
+        if num_f > 0:
+            odl_blocks.append(generate_odl_grid_string(f"HLSS30_{mgrs_tile}", tile_meta['width'], tile_meta['height'], tile_meta['transform'], "GCTP_UTM", tile_meta['zone'], [0.0]*13, 13, num_f, False))
 
     for mgrs_tile, tile_meta in l30_collections.items():
-        p_data = process_native_stack(tile_meta, 8, 2, 11, True)
-        if p_data:
-            write_hdf_sensor_group(h5f, f'/HDFEOS/GRIDS/HLSL30_{mgrs_tile}/Data Fields', p_data, L30_SR_WAVELENGTHS, tile_meta['crs'], tile_meta['transform'], L30_TIRS_WAVELENGTHS, tile_name=mgrs_tile)
-            odl_blocks.append(generate_odl_grid_string(f"HLSL30_{mgrs_tile}", tile_meta['width'], tile_meta['height'], tile_meta['transform'], "GCTP_UTM", tile_meta['zone'], [0.0]*13, 8, p_data['count'], True))
+        num_f = stream_native_stack_to_hdf5(h5f, f'/HDFEOS/GRIDS/HLSL30_{mgrs_tile}/Data Fields', tile_meta, 8, 2, 11, L30_SR_WAVELENGTHS, thermal_wavelengths=L30_TIRS_WAVELENGTHS, tile_name=mgrs_tile)
+        if num_f > 0:
+            odl_blocks.append(generate_odl_grid_string(f"HLSL30_{mgrs_tile}", tile_meta['width'], tile_meta['height'], tile_meta['transform'], "GCTP_UTM", tile_meta['zone'], [0.0]*13, 8, num_f, True))
 
     full_odl = "GROUP=SwathStructure\nEND_GROUP=SwathStructure\nGROUP=GridStructure\n" + "\n".join(odl_blocks) + "\nEND_GROUP=GridStructure\nGROUP=PointStructure\nEND_GROUP=PointStructure\nGROUP=ZaStructure\nEND_GROUP=ZaStructure\nEND\n"
     info_grp.create_dataset("StructMetadata.0", shape=(1,), dtype=h5py.string_dtype(encoding='ascii'), data=full_odl)

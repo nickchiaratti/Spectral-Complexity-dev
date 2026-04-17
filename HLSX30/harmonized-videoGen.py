@@ -19,24 +19,22 @@ text_color = 'black'
 # File Paths
 Location = "Rochesterv2"
 # Point directly to the finalized ARD Master Cube that includes the Spectral Complexity datasets
-ARD_CUBE_PATH = r"C:\satelliteImagery\HLSX30\ARD_Cube_Rochesterv2_MasterGrid_2025_SC_EM-7_Norm-bandCount.h5"
-OUTPUT_DIR = f"C:/satelliteImagery/HLSX30/MultiSensor_Analysis_{Location}_ARD_Videos"
+ARD_CUBE_PATH = f"C:/satelliteImagery/HLSX30/HLS-Tanager_{Location}_Harmonized_2025_SC_EM-7_Norm-bandCount.h5"
+OUTPUT_DIR = f"C:/satelliteImagery/MultiSensor_Analysis_{Location}_ARD_Videos"
 
 COMPLEXITY_TYPE = 'sliding_volume_map'
 
 # Temporal Configuration
-START_DATE = datetime(2025, 1, 1, tzinfo=timezone.utc)
+START_DATE = datetime(2020, 1, 1, tzinfo=timezone.utc)
 END_DATE = datetime(2025, 12, 31, tzinfo=timezone.utc)
 
 # QA Filtering Configuration
 EXCLUDE_CONTAMINATED_FRAMES = False
-# HLS Fmask Bits: 0:Cirrus, 1:Cloud, 2:Adj Cloud/Shadow, 3:Cloud Shadow, 4:Snow/Ice, 5:Water
-QA_REJECT_MASK = 0b111111 
 # Allowed percentage of cloudy/invalid pixels before dropping the entire frame (0.0 = Strict exclusion)
 MAX_CONTAMINATION_FRACTION = 0.0
 
 # Video Output Configuration
-FPS = 2
+FPS = 3  
 DPI = 300
 EXPORT_GIF = False
 GIF_DPI = 100 # Prevents RAM exhaustion during Pillow color quantization
@@ -80,6 +78,10 @@ def map_locations(dset):
         
     return mapped
 
+def decode_h5_string(raw_str):
+    """Safely handles h5py byte-string vs native string anomalies."""
+    return raw_str.decode('utf-8') if isinstance(raw_str, bytes) else str(raw_str)
+
 # ==========================================
 # 3. MAIN VIDEO GENERATOR
 # ==========================================
@@ -89,83 +91,88 @@ def generate_videos():
     print(f"Opening ARD Master Cube: {ARD_CUBE_PATH}")
     
     with h5py.File(ARD_CUBE_PATH, 'r') as h5_ard:
-        if '/HDFEOS/GRIDS' not in h5_ard:
-            raise ValueError("CRITICAL ERROR: Invalid ARD Cube structure. Missing /HDFEOS/GRIDS.")
+        
+        # EVIDENCE-BASED FIX: Timeline Indexing via Provenance Attributes
+        # The script now explicitly targets the HARMONIZED group as the primary driver,
+        # using its embedded metadata to hunt for the required visual arrays in the native grids.
+        harm_path = '/HDFEOS/GRIDS/HARMONIZED/Data Fields'
+        if harm_path not in h5_ard:
+            raise ValueError(f"CRITICAL ERROR: '{harm_path}' missing. Ensure Spectral Complexity script was run.")
             
-        available_grids = list(h5_ard['/HDFEOS/GRIDS'].keys())
-        print(f"Discovered {len(available_grids)} Harmonized Grids: {available_grids}")
+        harm_grp = h5_ard[harm_path]
         
-        # 1. Establish Unified Geometric Provenance
-        # Because all sensors share the USGS CONUS Albers grid, we only need to map locations once.
-        ref_path = f'/HDFEOS/GRIDS/{available_grids[0]}/Data Fields/surface_reflectance'
-        mapped_locs = map_locations(h5_ard[ref_path])
+        if COMPLEXITY_TYPE not in harm_grp:
+            raise ValueError(f"CRITICAL ERROR: '{COMPLEXITY_TYPE}' missing in HARMONIZED group.")
+            
+        vol_ds = harm_grp[COMPLEXITY_TYPE]
+        qa_ds = harm_grp.get('common_mask')
         
-        # 2. Interleave Temporal Frames across all sensors
+        if qa_ds is None and EXCLUDE_CONTAMINATED_FRAMES:
+            raise ValueError("CRITICAL ERROR: 'common_mask' missing from HARMONIZED group for QA filtering.")
+            
+        # Establish Unified Geometric Provenance from the HARMONIZED dataset
+        mapped_locs = map_locations(vol_ds)
+        
+        # Extract Absolute Data Provenance Arrays
+        try:
+            prov_grids = vol_ds.attrs['source_grid']
+            prov_spaces = vol_ds.attrs['source_spacecraft']
+            prov_times = vol_ds.attrs['acquisition_time']
+            prov_indices = vol_ds.attrs['source_frame_index']
+        except KeyError as e:
+            raise ValueError(f"CRITICAL ERROR: Missing provenance attribute {e} on HARMONIZED dataset.")
+            
         unified_frames = []
         
-        for grid_name in available_grids:
-            grp = h5_ard[f'/HDFEOS/GRIDS/{grid_name}/Data Fields']
+        # Drive the loop using the harmonized timeline
+        for global_idx in range(len(prov_times)):
+            ts = prov_times[global_idx]
+            dt = datetime.fromtimestamp(ts, tz=timezone.utc)
             
-            if COMPLEXITY_TYPE not in grp or 'surface_reflectance' not in grp:
-                print(f"  -> Skipping {grid_name}: Missing required datasets.")
-                continue
-                
-            sr_ds = grp['surface_reflectance']
-            vol_ds = grp[COMPLEXITY_TYPE]
-            ortho_ds = grp['ortho_visual'] if 'ortho_visual' in grp else None
-            
-            if ortho_ds is None:
-                raise ValueError(f"CRITICAL ERROR: 'ortho_visual' missing from {grid_name}. Cannot render video.")
-
-            # Identify sensor type for QA logic
-            is_hls = "HLS" in grid_name
-            qa_ds = grp['Fmask'] if is_hls else grp.get('sr_invalid')
-
-            acq_times = sr_ds.attrs.get('acquisition_time', [])
-            
-            for idx, ts in enumerate(acq_times):
-                dt = datetime.fromtimestamp(ts, tz=timezone.utc)
-                
-                if START_DATE <= dt <= END_DATE:
-                    # Strict QA Enforcement
-                    if EXCLUDE_CONTAMINATED_FRAMES:
-                        if qa_ds is None:
-                            raise ValueError(f"CRITICAL ERROR: QA dataset missing for {grid_name}. Cannot perform requested QA filtering.")
+            if START_DATE <= dt <= END_DATE:
+                # Strict QA Enforcement using the harmonized mask
+                if EXCLUDE_CONTAMINATED_FRAMES:
+                    qa_frame = qa_ds[global_idx, ...]
+                    bad_pixels = np.sum(qa_frame == 0)
                         
-                        if is_hls:
-                            # HLS Unified Fmask (2D slice due to dimensionality fix)
-                            qa_frame = qa_ds[idx, ...]
-                            bad_pixels = np.sum((qa_frame & QA_REJECT_MASK) != 0)
-                        else:
-                            # Tanager Invalid Mask
-                            qa_frame = qa_ds[idx, ...]
-                            bad_pixels = np.sum(qa_frame > 0)
-                            
-                        if (bad_pixels / qa_frame.size) > MAX_CONTAMINATION_FRACTION:
-                            continue # Exclude frame
-                            
-                    unified_frames.append({
-                        'sensor': grid_name, 'idx': idx, 'dt': dt, 
-                        'dt_et': dt.astimezone(ZoneInfo("America/New_York")),
-                        'vol_dset': vol_ds, 'ortho_dset': ortho_ds
-                    })
+                    if (bad_pixels / qa_frame.size) > MAX_CONTAMINATION_FRACTION:
+                        continue # Exclude frame
+                        
+                # Extract relational pointers
+                source_grid = decode_h5_string(prov_grids[global_idx])
+                source_spacecraft = decode_h5_string(prov_spaces[global_idx])
+                local_idx = int(prov_indices[global_idx])
+                
+                # Retrieve the sensor-specific ortho visual
+                ortho_path = f'/HDFEOS/GRIDS/{source_grid}/Data Fields/ortho_visual'
+                if ortho_path not in h5_ard:
+                    raise ValueError(f"CRITICAL ERROR: '{ortho_path}' missing for frame {global_idx}.")
                     
-        # Sort the virtual constellation chronologically
-        unified_frames.sort(key=lambda x: x['dt'])
+                ortho_ds = h5_ard[ortho_path]
+                
+                unified_frames.append({
+                    'sensor': source_spacecraft,
+                    'dt': dt, 
+                    'dt_et': dt.astimezone(ZoneInfo("America/New_York")),
+                    'vol_dset': vol_ds,        # Points to HARMONIZED array
+                    'vol_idx': global_idx,     # Index in HARMONIZED array
+                    'ortho_dset': ortho_ds,    # Points to NATIVE array
+                    'ortho_idx': local_idx     # Index in NATIVE array
+                })
                 
         if not unified_frames:
             print("No valid frames found in the specified date range after strict QA filtering.")
             return
             
-        print(f"Processing {len(unified_frames)} strictly interleaved frames...")
+        print(f"Processing {len(unified_frames)} strictly interleaved frames based on HARMONIZED provenance...")
 
         # 3. Calculate Global Min/Max for Shared Complexity Colormap
         v_min, v_max = 0, 1
         if GLOBAL_COLOR_SCALE:
-            print("Calculating mathematically shared global color scale percentiles across all sensors...")
+            print("Calculating mathematically shared global color scale percentiles across the timeline...")
             all_vols = []
             for frame in unified_frames:
-                data = frame['vol_dset'][frame['idx'], ...]
+                data = frame['vol_dset'][frame['vol_idx'], ...]
                 valid_data = data[~np.isnan(data)]
                 if len(valid_data) > 0:
                     all_vols.append(valid_data)
@@ -257,7 +264,6 @@ def generate_videos():
                 stack.enter_context(writer_side_gif.saving(fig_side, path_side_gif, GIF_DPI))
             
             for i, frame in enumerate(unified_frames):
-                idx = frame['idx']
                 sensor = frame['sensor']
                 
                 time_str = f"[{sensor}] Acquired: {frame['dt_et'].strftime('%Y-%m-%d %H:%M:%S ET')}"
@@ -265,8 +271,8 @@ def generate_videos():
                 if i % 10 == 0:
                     print(f"  Rendering frame {i}/{len(unified_frames)}...")
                 
-                # --- 1. Process Ortho Visual (RGB + Alpha) ---
-                raw_ortho = frame['ortho_dset'][idx, ...]
+                # --- 1. Process Ortho Visual (RGB + Alpha) from NATIVE dataset ---
+                raw_ortho = frame['ortho_dset'][frame['ortho_idx'], ...]
                 
                 if raw_ortho.shape[0] in [3, 4]:
                     raw_ortho = np.transpose(raw_ortho, (1, 2, 0))
@@ -284,8 +290,8 @@ def generate_videos():
                 rgba[invalid_rgb_mask, 3] = 0.0
                 rgba = np.nan_to_num(rgba, nan=0.0)
                 
-                # --- 2. Extract Complexity Map ---
-                comp_data = frame['vol_dset'][idx, ...].copy()
+                # --- 2. Extract Complexity Map from HARMONIZED dataset ---
+                comp_data = frame['vol_dset'][frame['vol_idx'], ...].copy()
                 
                 if raw_ortho.shape[-1] == 4:
                     comp_data[rgba[..., 3] == 0.0] = np.nan
@@ -313,7 +319,7 @@ def generate_videos():
                     ax.set_xlim(0, w)
                     ax.set_ylim(h, 0)
                 
-                # Single Unified Coordinate Transform applies perfectly to all frames
+                # Coordinate mapping applies universally across the ARD framework
                 if SHOW_PIXEL_INDICATORS:
                     for loc_idx, loc in enumerate(mapped_locs):
                         for ind_list in [inds_rgb, inds_comp, inds_s1, inds_s2]:

@@ -4,7 +4,7 @@ import re
 import folium
 
 KMZ_PATH = r"C:\satelliteImagery\ground_truth\GPS_ROCX_ALL_METADATA_NOTFINAL.kmz"
-TARGET_LAT, TARGET_LON = 43.13927, -77.50340
+TARGET_LAT, TARGET_LON = 43.13944, -77.50354
 
 
 def extract_kmz_points(kmz_file_path: str) -> dict:

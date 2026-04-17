@@ -25,7 +25,7 @@ OUTPUT_DIR = f"C:/satelliteImagery/MultiSensor_Analysis_{Location}_{Frame_Reg}_V
 COMPLEXITY_TYPE = 'sliding_volume_map'
 
 # Temporal Configuration
-START_DATE = datetime(2015, 1, 1, tzinfo=timezone.utc)
+START_DATE = datetime(2025, 1, 1, tzinfo=timezone.utc)
 END_DATE = datetime(2025, 12, 31, tzinfo=timezone.utc)
 
 # QA Filtering Configuration
@@ -33,11 +33,11 @@ EXCLUDE_CONTAMINATED_FRAMES = True
 # Bit 0: Fill, 1: Dilated Cloud, 2: Cirrus, 3: Cloud, 4: Cloud Shadow, 5: Snow
 QA_REJECT_MASK = 0b111111 
 # Allowed percentage of cloudy/snowy pixels before dropping the entire frame (0.0 = Strict exclusion)
-MAX_CONTAMINATION_FRACTION = 5.0
+MAX_CONTAMINATION_FRACTION = 1.0
 
 # Video Output Configuration
-FPS = 3  # Frames Per Second (3 FPS = 0.33 second delay between frames)
-DPI = 300
+FPS = 1  # Frames Per Second (3 FPS = 0.33 second delay between frames)
+DPI = 500
 EXPORT_GIF = False
 GIF_DPI = 100 # HIGHLY RECOMMENDED: Lower DPI for GIFs to prevent RAM exhaustion during Pillow color quantization
 SHOW_PIXEL_INDICATORS = True

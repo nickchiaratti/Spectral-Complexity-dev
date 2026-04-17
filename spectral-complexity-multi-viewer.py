@@ -10,11 +10,7 @@ import tkinter as tk
 from scipy.stats import pearsonr, spearmanr, norm, skew, kurtosis
 from skimage import exposure
 import SpecComplex as sc
-try:
-    from zoneinfo import ZoneInfo
-except ImportError:
-    from backports.zoneinfo import ZoneInfo # For Python < 3.9
-
+from zoneinfo import ZoneInfo
 import rasterio.transform
 from pyproj import Transformer, CRS
 
@@ -45,7 +41,7 @@ TS_END_DATE = datetime(END_YEAR, 12, 31, tzinfo=timezone.utc)
 TWIN_Y_AXIS_DEFAULT = False
 
 # Combined Pixel Mask Configuration
-MASKING = True
+MASKING = False
 SUN_ELEVATION_THRESHOLD = 30
 CLOUD_DILATION = 2
 
@@ -83,10 +79,10 @@ SAVE_DIR = f"C:/satelliteImagery/MultiSensor_Analysis_{Location}_{Frame_Reg}" + 
 
 # Time Series Locations (Latitude, Longitude)
 TS_LOCATIONS = [
-    
-    {'latlon': (43.139423, -77.503825), 'label': "ROCX NITE Tarp",                  'color': 'tab:purple'},
+    {'latlon': (43.153519, -77.484902), 'label': "Whalen-Atlantic Intersection",      'color': 'tab:orange'},
+    #{'latlon': (43.139423, -77.503825), 'label': "ROCX NITE Tarp",                  'color': 'tab:purple'},
     #{'latlon': (43.139411, -77.504005), 'label': "ROCX NITE Tarp",                  'color': 'tab:purple'},
-    #{'latlon': (43.139038, -77.503505), 'label': "ROCX NITE Tarp",                  'color': 'tab:purple'},
+    {'latlon': (43.13927, -77.50340), 'label': "ROCX NITE Tarp",                  'color': 'tab:purple'},
     {'latlon': (43.142856, -77.508451), 'label': "West Tait Forest",                'color': 'tab:green'},
     {'latlon': (43.144861, -77.501176), 'label': "East Tait Forest",                'color': 'tab:olive'},
     #{'latlon': (43.149077, -77.506040), 'label': "North Tait Forest",              'color': 'tab:orange'},
@@ -1203,14 +1199,14 @@ class MultiComplexityViewer:
         
         if len(l_valid) > 0:
             # --- Linear Subplot ---
-            self.ax_scatter_lin.scatter(l_valid, t_valid, alpha=0.3, s=10, label=f'{COMPLEXITY_DICT[complexity_type]} Window Tiles', color='tab:purple')
+            self.ax_scatter_lin.scatter(l_valid, t_valid, alpha=0.3, s=10, label=f'Pixel {COMPLEXITY_DICT[complexity_type]}', color='tab:purple')
             
             # Plot Linear Regression Line
             l_range_lin = np.array([np.min(l_valid), np.max(l_valid)])
             t_fit_lin = lin_slope * l_range_lin + lin_intercept
             self.ax_scatter_lin.plot(l_range_lin, t_fit_lin, color='red', linewidth=2, label='Linear Fit')
             
-            self.ax_scatter_lin.set_title(f"Linear Scale\nLANDSAT ({l_date_str}) vs TANAGER ({t_date_str})")
+            self.ax_scatter_lin.set_title(f"LANDSAT ({l_date_str}) vs TANAGER ({t_date_str})")
             self.ax_scatter_lin.set_xlabel(f"LANDSAT {COMPLEXITY_DICT[complexity_type]}")
             self.ax_scatter_lin.set_ylabel(f"TANAGER {COMPLEXITY_DICT[complexity_type]}")
             self.ax_scatter_lin.grid(True, alpha=0.3)
@@ -1222,11 +1218,11 @@ class MultiComplexityViewer:
                 
             self.ax_scatter_lin.text(0.95, 0.05, stats_text_scatter, transform=self.ax_scatter_lin.transAxes, 
                                      ha='right', va='bottom', fontsize=10, bbox=dict(boxstyle='round', facecolor='white', alpha=0.5))
-            self.ax_scatter_lin.legend()
+            self.ax_scatter_lin.legend(loc='upper left')
 
             # --- Log-Log Subplot ---
             if LOG_SCALE:
-                self.ax_scatter_log.scatter(l_valid, t_valid, alpha=0.3, s=10, label=f'{COMPLEXITY_DICT[complexity_type]} Window Tiles', color='tab:orange')
+                self.ax_scatter_log.scatter(l_valid, t_valid, alpha=0.3, s=10, label=f'Pixel {COMPLEXITY_DICT[complexity_type]}', color='tab:orange')
                 
                 # Plot Log-Log Regression Line
                 l_range_log = np.array([np.min(l_valid), np.max(l_valid)])

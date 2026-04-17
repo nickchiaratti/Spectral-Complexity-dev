@@ -15,7 +15,7 @@ import SpecComplex as sc
 # ==========================================
 # 1. CONFIGURATION
 # ==========================================
-Location = "Tait"
+Location = "Rochester"
 Frame_Reg = "WRS16" # "CoReg"
 
 # Time Series Range
