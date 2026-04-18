@@ -24,7 +24,7 @@ cloud_threshold = 30
 print("Authenticating with NASA Earthdata...")
 earthaccess.login(strategy="all", persist=True)
 
-Location = "Rochesterv2"
+Location = "Tait"
 SOURCE_CACHE = "Rochesterv2" 
 
 if Location == "Rochesterv2":
@@ -32,6 +32,11 @@ if Location == "Rochesterv2":
     ROI_LAT_MIN = 42.961778; ROI_LAT_MAX = 43.342135
     START_DATE = '2025-01-01'
     END_DATE = '2025-12-31'
+if Location == "Tait":
+    ROI_LON_MIN = -77.516127; ROI_LON_MAX = -77.461968
+    ROI_LAT_MIN = 43.127698; ROI_LAT_MAX = 43.159168
+    START_DATE = '2025-01-01'
+    END_DATE = '2025-12-31' 
 
 HLSS30_OUTPUT_DIR = r"C:\satelliteImagery\HLSX30\HLSS30-SourceData"
 HLSL30_OUTPUT_DIR = r"C:\satelliteImagery\HLSX30\HLSL30-SourceData"

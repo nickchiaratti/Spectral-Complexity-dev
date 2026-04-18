@@ -1,21 +1,21 @@
 """
-Multi-Sensor Co-Registration Temporal Bracketing Quantifier
-Interactive Visual Analytics Interface & Summary Dashboard
+Intra-Sensor Co-Registration Sequential Quantifier (Landsat Only)
 
-Iterates across the entire hyperspectral timeline, bracketing 
-each epoch with the preceding and subsequent multispectral acquisitions.
-Produces a longitudinal summary plot and an interactive UI to visually 
-validate the Euclidean optimization vectors.
+Iterates chronologically through a single-sensor time series, evaluating 
+the geometric registration error of each frame against the immediately 
+subsequent frame (L_i vs L_i+1). 
+
+Produces longitudinal plots of Translation Drift, Rotational Misalignment, 
+and Pearson Correlation, alongside the calculated valid historical averages.
 
 Author: [Your Name/Lab]
-Date: 2026-04-15
+Date: 2026-04-17
 """
 
 import os
 import h5py
 import numpy as np
 import matplotlib.pyplot as plt
-from matplotlib.widgets import Button
 import matplotlib.dates as mdates
 from datetime import datetime, timezone
 import rasterio.transform
@@ -31,347 +31,275 @@ import SpecComplex as sc
 # ==========================================
 Location = "Rochester"
 
-TS_LOCATION = {'latlon': (43.092815, -77.621573), 'label': "43.131725, -77.560376"}
-SPAN = 100 # 100x100 window required for robust Fourier structural context
+# Target search window size (100x100 pixels)
+SPAN = 100 
+
+# Strict ARD Masking Configuration
+SUN_ELEVATION_THRESHOLD = 25
+CLOUD_DILATION = 0
+# Updated to 142 (Bits 1, 2, 3, 7) to strictly target Dilated Cloud, Cirrus, Cloud, and Water.
+QA_REJECT_MASK = 142 
+RADSAT_ACCEPT_VALUE = 0
+AEROSOL_ACCEPT_LEVEL = 'high'
 
 landsat_path = f"C:/satelliteImagery/LANDSAT/{Location}/LANDSAT_Stack_{Location}_GEE_2015_2025_WRS16_SC_EM-7_Gram-minEndmember_Norm-bandCount.h5"
-tanager_path = f"C:/satelliteImagery/Tanager/{Location}/Tanager_Stack_{Location}_HDFEOS_SC_EM-7_Gram-minEndmember_Norm-bandCount.h5"
+
 # ==========================================
 # 2. UTILITY FUNCTIONS
 # ==========================================
 
-def extract_luminance_and_mask(grp, f_idx, y_start, y_end, x_start, x_end):
+def get_landsat_luminance_and_mask(grp, f_idx):
     """
-    Extracts the BSQ ortho_visual array, converts RGB to CIE 1931 Luminance,
-    and returns it alongside the bounding alpha mask per Interface Spec.
+    Extracts the full-frame BSQ ortho_visual array, converts to Luminance,
+    and applies explicit QA masking via SpecComplex.
     """
-    raw_vis = grp['ortho_visual'][f_idx, :, y_start:y_end, x_start:x_end]
-    bip_vis = np.transpose(raw_vis, (1, 2, 0))
+    raw_vis = grp['ortho_visual'][f_idx, ...]
+    
+    if raw_vis.shape[0] in [3, 4]:
+        bip_vis = np.transpose(raw_vis, (1, 2, 0))
+    else:
+        bip_vis = raw_vis
+        
     rgb = bip_vis[..., :3].astype(np.float32) / 255.0
     luminance = np.dot(rgb, [0.299, 0.587, 0.114])
     
-    # Enforce Interface Spec: Alpha > 0 is valid. 
+    shape = luminance.shape
+    valid_mask = np.ones(shape, dtype=bool)
+    
     if bip_vis.shape[-1] == 4:
-        local_mask = bip_vis[..., 3] > 0
-    else:
-        local_mask = np.ones(luminance.shape, dtype=bool)
+        valid_mask &= (bip_vis[..., 3] > 0)
         
-    return luminance, local_mask, rgb
+    ard_mask = sc.get_landsat_mask(
+        data_grp=grp, f_idx=f_idx, shape=shape,
+        sun_elevation_threshold=SUN_ELEVATION_THRESHOLD,
+        cloud_dilation=CLOUD_DILATION, qa_reject_mask=QA_REJECT_MASK,
+        radsat_accept_value=RADSAT_ACCEPT_VALUE, aerosol_accept_level=AEROSOL_ACCEPT_LEVEL
+    )
+    valid_mask &= ard_mask
+
+    return luminance, valid_mask
+
+def find_optimal_window(mask_ref, mask_mov, lum_ref, span=100):
+    """
+    Finds a target window that is >=65% valid in BOTH sequential frames.
+    Selects the window with the highest structural variance.
+    """
+    h, w = mask_ref.shape
+    half = span // 2
+    stride = 1
+    
+    combined_mask = mask_ref & mask_mov
+    
+    best_y, best_x = None, None
+    best_valid_frac = 0.0
+    best_variance = -1.0
+    
+    for y in range(half, h - half, stride):
+        for x in range(half, w - half, stride):
+            y0, y1 = y - half, y + half
+            x0, x1 = x - half, x + half
+            
+            local_mask = combined_mask[y0:y1, x0:x1]
+            valid_frac = np.sum(local_mask) / (span * span)
+            
+            if valid_frac >= 0.65:
+                local_lum = lum_ref[y0:y1, x0:x1]
+                valid_lum = local_lum[local_mask]
+                variance = np.var(valid_lum) if len(valid_lum) > 0 else 0
+                
+                if valid_frac > best_valid_frac or (valid_frac == best_valid_frac and variance > best_variance):
+                    best_valid_frac = valid_frac
+                    best_variance = variance
+                    best_y, best_x = y, x
+                    
+    return best_y, best_x, best_valid_frac
 
 # ==========================================
-# 3. INTERACTIVE VIEWER & DASHBOARD CLASS
+# 3. MAIN EXECUTION
 # ==========================================
 
-class CoRegistrationViewer:
-    def __init__(self, h5_l, h5_t):
-        self.h5_l = h5_l
-        self.h5_t = h5_t
-        self.grp_l = h5_l['/HDFEOS/GRIDS/LANDSAT/Data Fields']
-        self.grp_t = h5_t['/HDFEOS/GRIDS/TANAGER/Data Fields']
+def main():
+    print("--- Intra-Sensor Sequential Co-Registration Quantifier (Landsat) ---")
+    
+    try:
+        h5_l = h5py.File(landsat_path, 'r')
+    except Exception as e:
+        print(f"Error opening file: {e}")
+        return
         
-        self.comparisons = []
-        self.current_idx = 0
-        
-        self._setup_metrology()
-        self._precalculate_all_transformations()
-        
-        # Instantiate both the Statistical Overview and the Details-on-Demand UI
-        self._plot_longitudinal_summary()
-        self._init_ui()
-        self.update_display()
+    grp_l = h5_l['/HDFEOS/GRIDS/LANDSAT/Data Fields']
+    sr_l = grp_l['surface_reflectance']
+    
+    l_times = sr_l.attrs['acquisition_time']
+    num_frames = sr_l.shape[0]
+    
+    if num_frames < 2:
+        print("Error: Dataset contains insufficient frames for sequential analysis.")
+        return
 
-    def _setup_metrology(self):
-        """Initializes the geographic to pixel coordinate mappings."""
-        geo_tf = self.grp_t['surface_reflectance'].attrs['GeoTransform']
-        crs_wkt = self.grp_t['surface_reflectance'].attrs['spatial_ref']
-        if isinstance(crs_wkt, bytes): crs_wkt = crs_wkt.decode('utf-8')
-        
-        self.affine = rasterio.transform.Affine.from_gdal(*geo_tf)
-        self.pixel_width = abs(self.affine.a)
-        self.pixel_height = abs(self.affine.e)
-        
-        crs = CRS.from_wkt(crs_wkt)
-        transformer_to_px = Transformer.from_crs("EPSG:4326", crs, always_xy=True)
-        
-        t_lat, t_lon = TS_LOCATION['latlon']
-        proj_x, proj_y = transformer_to_px.transform(t_lon, t_lat)
-        px, py = ~self.affine * (proj_x, proj_y)
-        self.t_x, self.t_y = int(round(px)), int(round(py))
-        
-        self.half_span = SPAN // 2
-        self.h, self.w = self.grp_t['ortho_visual'].shape[2:] 
-        self.x_start, self.x_end = max(0, self.t_x - self.half_span), min(self.w, self.t_x + self.half_span)
-        self.y_start, self.y_end = max(0, self.t_y - self.half_span), min(self.h, self.t_y + self.half_span)
-        
-        self.rel_center_y = self.t_y - self.y_start
-        self.rel_center_x = self.t_x - self.x_start
+    # Geographic Metrology
+    geo_tf = sr_l.attrs['GeoTransform']
+    affine = rasterio.transform.Affine.from_gdal(*geo_tf)
+    pixel_width = abs(affine.a)
+    pixel_height = abs(affine.e)
 
-    def _precalculate_all_transformations(self):
-        """Iterates through temporal brackets and caches optimization results for rapid UI rendering."""
-        l_times = self.grp_l['surface_reflectance'].attrs['acquisition_time']
-        t_times = self.grp_t['surface_reflectance'].attrs['acquisition_time']
-        
-        print(f"Pre-calculating optimizations for {len(t_times)} Tanager epochs...")
-        
-        for t_idx, t_time in enumerate(t_times):
-            t_dt = datetime.fromtimestamp(t_time, tz=timezone.utc)
-            
-            l_before_indices = np.where(l_times < t_time)[0]
-            l_after_indices = np.where(l_times > t_time)[0]
-            
-            l_prev_idx = l_before_indices[-1] if len(l_before_indices) > 0 else None
-            l_next_idx = l_after_indices[0] if len(l_after_indices) > 0 else None
-            
-            if l_prev_idx is not None:
-                self._compute_and_store(l_prev_idx, t_idx, l_times[l_prev_idx], t_dt, "L_prev (Before)")
-            
-            if l_next_idx is not None:
-                self._compute_and_store(l_next_idx, t_idx, l_times[l_next_idx], t_dt, "L_next (After)")
+    # Tracking Arrays (Using NaNs for mathematically void/cloudy pairs)
+    plot_dates = []
+    magnitudes = []
+    rotations = []
+    correlations = []
+    
+    print(f"Evaluating {num_frames - 1} sequential pairs...")
 
-    def _compute_and_store(self, l_idx, t_idx, l_time, t_dt, bracket_label):
-        l_dt = datetime.fromtimestamp(l_time, tz=timezone.utc)
-        delta_days = (t_dt - l_dt).total_seconds() / (60*60*24)
+    for idx in range(num_frames - 1):
+        ref_idx = idx
+        mov_idx = idx + 1
         
-        print(f"  -> Processing {t_dt.strftime('%Y-%m-%d')} vs {l_dt.strftime('%Y-%m-%d')} ({bracket_label})...")
+        ref_dt = datetime.fromtimestamp(l_times[ref_idx], tz=timezone.utc)
+        mov_dt = datetime.fromtimestamp(l_times[mov_idx], tz=timezone.utc)
         
-        lum_l, mask_l, _ = extract_luminance_and_mask(self.grp_l, l_idx, self.y_start, self.y_end, self.x_start, self.x_end)
-        lum_t, mask_t, _ = extract_luminance_and_mask(self.grp_t, t_idx, self.y_start, self.y_end, self.x_start, self.x_end)
+        plot_dates.append(mov_dt) # Anchor the result to the moving frame's date
+        print(f"[{idx+1}/{num_frames-1}] {ref_dt.strftime('%Y-%m-%d')} -> {mov_dt.strftime('%Y-%m-%d')}: ", end="")
         
-        overlap = mask_l & mask_t
+        lum_ref, mask_ref = get_landsat_luminance_and_mask(grp_l, ref_idx)
+        lum_mov, mask_mov = get_landsat_luminance_and_mask(grp_l, mov_idx)
         
-        # Strict fail-fast handling without injecting fill values
-        if np.sum(overlap) == 0:
-            print("     [FAILED] No valid overlapping pixels.")
-            self.comparisons.append({
-                'valid': False, 't_idx': t_idx, 'l_idx': l_idx, 't_dt': t_dt, 'l_dt': l_dt, 
-                'label': bracket_label, 'delta_days': delta_days, 'error_msg': '0 Valid Overlapping Pixels'
-            })
-            return
+        t_y, t_x, valid_frac = find_optimal_window(mask_ref, mask_mov, lum_ref, span=SPAN)
+        
+        if t_y is None:
+            print("FAILED (Insufficient cloud-free overlap)")
+            magnitudes.append(np.nan)
+            rotations.append(np.nan)
+            correlations.append(np.nan)
+            continue
+            
+        half = SPAN // 2
+        x_start, x_end = t_x - half, t_x + half
+        y_start, y_end = t_y - half, t_y + half
+        
+        rel_center_y = t_y - y_start
+        rel_center_x = t_x - x_start
 
-        # 1. Phase Correlation Seed
+        local_lum_ref = lum_ref[y_start:y_end, x_start:x_end]
+        local_mask_ref = mask_ref[y_start:y_end, x_start:x_end]
+        local_lum_mov = lum_mov[y_start:y_end, x_start:x_end]
+        local_mask_mov = mask_mov[y_start:y_end, x_start:x_end]
+
+        # 1. Sub-Pixel Phase Correlation Seed
         shift_vector, error, diffphase = phase_cross_correlation(
-            reference_image=lum_l, moving_image=lum_t, 
-            reference_mask=mask_l, moving_mask=mask_t, upsample_factor=100
+            reference_image=local_lum_ref, moving_image=local_lum_mov, 
+            reference_mask=local_mask_ref, moving_mask=local_mask_mov, upsample_factor=100
         )
         init_dy, init_dx = shift_vector
 
-        # 2. Euclidean Optimization
+        # 2. Euclidean Transform Parametric Optimization
         def objective_function(params):
             dy, dx, theta_deg = params
-            t1 = EuclideanTransform(translation=(-self.rel_center_x, -self.rel_center_y))
+            t1 = EuclideanTransform(translation=(-rel_center_x, -rel_center_y))
             t2 = EuclideanTransform(rotation=np.deg2rad(theta_deg))
-            t3 = EuclideanTransform(translation=(self.rel_center_x + dx, self.rel_center_y + dy))
+            t3 = EuclideanTransform(translation=(rel_center_x + dx, rel_center_y + dy))
             tform = t1 + t2 + t3
             
-            warped_lum = warp(lum_t, tform.inverse, order=3, mode='constant', cval=np.nan)
-            warped_mask = warp(mask_t.astype(float), tform.inverse, order=0, mode='constant', cval=0.0).astype(bool)
+            warped_lum = warp(local_lum_mov, tform.inverse, order=3, mode='constant', cval=np.nan)
+            warped_mask = warp(local_mask_mov.astype(float), tform.inverse, order=0, mode='constant', cval=0.0).astype(bool)
             
-            current_overlap = mask_l & warped_mask & ~np.isnan(warped_lum)
-            if np.sum(current_overlap) < (0.15 * mask_l.size):
-                return 1.0 
-            r, _ = pearsonr(lum_l[current_overlap], warped_lum[current_overlap])
+            current_overlap = local_mask_ref & warped_mask & ~np.isnan(warped_lum)
+            if np.sum(current_overlap) < (0.15 * local_mask_ref.size):
+                return 1.0 # Heavily penalize invalid geometric states
+                
+            r, _ = pearsonr(local_lum_ref[current_overlap], warped_lum[current_overlap])
             return -r 
 
         initial_guess = [init_dy, init_dx, 0.0]
         bounds = [(init_dy - 2.0, init_dy + 2.0), (init_dx - 2.0, init_dx + 2.0), (-2.0, 2.0)]
         
         result = minimize(objective_function, initial_guess, method='Nelder-Mead', bounds=bounds, options={'xatol': 1e-4, 'fatol': 1e-4})
+        
         opt_dy, opt_dx, opt_theta = result.x
+        opt_correlation = -result.fun
         
-        shift_meters_x = opt_dx * self.pixel_width
-        shift_meters_y = opt_dy * self.pixel_height
-        magnitude_meters = np.sqrt(shift_meters_x**2 + shift_meters_y**2)
-
-        self.comparisons.append({
-            'valid': True, 't_idx': t_idx, 'l_idx': l_idx, 't_dt': t_dt, 'l_dt': l_dt, 
-            'label': bracket_label, 'delta_days': delta_days,
-            'opt_dy': opt_dy, 'opt_dx': opt_dx, 'opt_theta': opt_theta, 
-            'corr': -result.fun, 'mag': magnitude_meters,
-            'shift_m_x': shift_meters_x, 'shift_m_y': shift_meters_y
-        })
-
-    def _plot_longitudinal_summary(self):
-        """Builds the 3-panel statistical overview of temporal registration drift."""
-        unique_t_dates = sorted(list(set([comp['t_dt'] for comp in self.comparisons])))
+        shift_meters_x = opt_dx * pixel_width
+        shift_meters_y = opt_dy * pixel_height
+        mag_meters = np.sqrt(shift_meters_x**2 + shift_meters_y**2)
         
-        mag_prev, rot_prev, corr_prev = [], [], []
-        mag_next, rot_next, corr_next = [], [], []
-        plot_dates = []
+        # Strict Failure Handling for Unmasked Cloud Outliers
+        # Landsat 8/9 nominal CE90 is <12m. A >250m shift is a physical impossibility 
+        # for L2SP data and indicates the algorithm locked onto moving atmospheric noise.
+        if mag_meters > 250.0:
+            print(f"FAILED (Offset {mag_meters:.1f}m > 250m physical limit. Tracking failure due to unmasked cloud.)")
+            magnitudes.append(np.nan)
+            rotations.append(np.nan)
+            correlations.append(np.nan)
+            continue
         
-        for t_dt in unique_t_dates:
-            plot_dates.append(t_dt)
-            c_prev = next((c for c in self.comparisons if c['t_dt'] == t_dt and c['label'] == 'L_prev (Before)'), None)
-            c_next = next((c for c in self.comparisons if c['t_dt'] == t_dt and c['label'] == 'L_next (After)'), None)
-            
-            if c_prev and c_prev['valid']:
-                mag_prev.append(c_prev['mag'])
-                rot_prev.append(c_prev['opt_theta'])
-                corr_prev.append(c_prev['corr'])
-            else:
-                mag_prev.append(np.nan); rot_prev.append(np.nan); corr_prev.append(np.nan)
-                
-            if c_next and c_next['valid']:
-                mag_next.append(c_next['mag'])
-                rot_next.append(c_next['opt_theta'])
-                corr_next.append(c_next['corr'])
-            else:
-                mag_next.append(np.nan); rot_next.append(np.nan); corr_next.append(np.nan)
-
-        self.fig_sum, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(14, 12), sharex=True)
-        self.fig_sum.canvas.manager.set_window_title("Longitudinal Co-Registration Stability")
+        magnitudes.append(mag_meters)
+        rotations.append(opt_theta)
+        correlations.append(opt_correlation)
         
-        # 1. Translation Magnitude Plot
-        ax1.plot(plot_dates, mag_prev, marker='^', linestyle='--', color='tab:blue', linewidth=1.5, markersize=8, label='Landsat Before ($L_{-1}$)')
-        ax1.plot(plot_dates, mag_next, marker='v', linestyle=':', color='tab:orange', linewidth=1.5, markersize=8, label='Landsat After ($L_{+1}$)')
-        ax1.set_ylabel("Absolute Offset Magnitude (Meters)", fontweight='bold')
-        ax1.set_title("Geometric Translation Drift over Time", fontweight='bold')
-        ax1.grid(True, alpha=0.3, linestyle='--')
-        ax1.legend(loc='upper right')
-        
-        # 2. Rotation Error Plot
-        ax2.plot(plot_dates, rot_prev, marker='^', linestyle='--', color='tab:blue', linewidth=1.5, markersize=8)
-        ax2.plot(plot_dates, rot_next, marker='v', linestyle=':', color='tab:orange', linewidth=1.5, markersize=8)
-        ax2.axhline(0, color='black', linewidth=1, alpha=0.5) 
-        ax2.set_ylabel("Orbital Yaw Rotation (Degrees)", fontweight='bold')
-        ax2.set_title("Rotational Misalignment over Time", fontweight='bold')
-        ax2.grid(True, alpha=0.3, linestyle='--')
+        print(f"Offset={mag_meters:.2f}m, Rot={opt_theta:+.3f}°, r={opt_correlation:.3f} (Valid: {valid_frac*100:.0f}%)")
 
-        # 3. Correlation (r) Plot
-        ax3.plot(plot_dates, corr_prev, marker='^', linestyle='--', color='tab:blue', linewidth=1.5, markersize=8)
-        ax3.plot(plot_dates, corr_next, marker='v', linestyle=':', color='tab:orange', linewidth=1.5, markersize=8)
-        ax3.set_ylabel("Valid Pearson Correlation (r)", fontweight='bold')
-        ax3.set_title("Structural Confidence Score", fontweight='bold')
-        ax3.set_xlabel("Tanager Acquisition Date", fontweight='bold')
-        ax3.grid(True, alpha=0.3, linestyle='--')
-        
-        ax3.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
-        ax3.tick_params(axis='x', rotation=45)
-        
-        for ax in [ax1, ax2, ax3]:
-            for dt in plot_dates:
-                ax.axvline(dt, color='purple', alpha=0.2, linewidth=10, zorder=0)
-
-        self.fig_sum.suptitle(f"Temporal Bracketing Registration Analysis\nTarget: {TS_LOCATION['label']} | Euclidean Optimization Window: {SPAN}x{SPAN}px", fontsize=16, fontweight='bold')
-        self.fig_sum.tight_layout()
-
-    def _init_ui(self):
-        """Initializes the Details-on-Demand interactive viewer."""
-        # Switched to 1x2 subplots with a wider figure spacing (wspace=0.4) to create a central gutter
-        self.fig, (self.ax1, self.ax2) = plt.subplots(1, 2, figsize=(15, 7))
-        self.fig.canvas.manager.set_window_title("Interactive Co-Registration Analytics")
-        self.fig.subplots_adjust(bottom=0.2, top=0.85, wspace=0.4)
-        
-        # Navigation Buttons (Centered around the new layout)
-        ax_prev = self.fig.add_axes([0.41, 0.05, 0.08, 0.05])
-        ax_next = self.fig.add_axes([0.51, 0.05, 0.08, 0.05])
-        self.btn_prev = Button(ax_prev, '<< Prev')
-        self.btn_next = Button(ax_next, 'Next >>')
-        self.btn_prev.on_clicked(self._on_prev)
-        self.btn_next.on_clicked(self._on_next)
-        
-        # Status Text
-        self.status_text = self.fig.text(0.5, 0.12, "", ha='center', va='center', fontsize=12, fontweight='bold')
-        
-        # Dynamic Statistics Annotation (Centered in the visual bridge between ax1 and ax2)
-        self.stats_annotation = self.fig.text(0.5, 0.5, "", ha='center', va='center', 
-                                              fontsize=12, bbox=dict(boxstyle='round', facecolor='white', alpha=0.9))
-
-    def _on_prev(self, event):
-        if self.current_idx > 0:
-            self.current_idx -= 1
-            self.update_display()
-
-    def _on_next(self, event):
-        if self.current_idx < len(self.comparisons) - 1:
-            self.current_idx += 1
-            self.update_display()
-
-    def update_display(self):
-        comp = self.comparisons[self.current_idx]
-        
-        self.ax1.clear()
-        self.ax2.clear()
-        
-        for ax in [self.ax1, self.ax2]:
-            ax.axis('off')
-            
-        t_date_str = comp['t_dt'].strftime('%Y-%m-%d')
-        l_date_str = comp['l_dt'].strftime('%Y-%m-%d')
-        
-        status = f"Pair {self.current_idx + 1} of {len(self.comparisons)} | Target: {TS_LOCATION['label']} ({SPAN}px)\n"
-        status += f"Evaluating Tanager {t_date_str} vs Landsat {l_date_str} [{comp['label']}: {comp['delta_days']:+.1f} days]"
-        self.status_text.set_text(status)
-
-        # Extract imagery for current frames
-        lum_l, mask_l, rgb_l = extract_luminance_and_mask(self.grp_l, comp['l_idx'], self.y_start, self.y_end, self.x_start, self.x_end)
-        lum_t, mask_t, rgb_t = extract_luminance_and_mask(self.grp_t, comp['t_idx'], self.y_start, self.y_end, self.x_start, self.x_end)
-
-        # 1. Show Reference (Landsat)
-        self.ax1.imshow(rgb_l)
-        self.ax1.axhline(self.rel_center_y, color='red', linestyle='--', lw=1, alpha=0.8)
-        self.ax1.axvline(self.rel_center_x, color='red', linestyle='--', lw=1, alpha=0.8)
-        self.ax1.plot(self.rel_center_x, self.rel_center_y, 'r+', markersize=15, mew=2, label='Target Focus')
-        self.ax1.set_title(f"Reference: Landsat ({l_date_str})")
-        self.ax1.legend(loc='lower right')
-
-        if not comp['valid']:
-            self.ax2.imshow(rgb_t)
-            self.ax2.set_title(f"Moving: Tanager ({t_date_str})\n[CALCULATION ABORTED]")
-            self.stats_annotation.set_text(f"DATA INTEGRITY FAILURE\n\n{comp['error_msg']}")
-            self.stats_annotation.set_color('red')
-            self.fig.canvas.draw_idle()
-            return
-            
-        self.stats_annotation.set_color('black')
-
-        # 2. Show Moving (Tanager) with Correction Vectors
-        self.ax2.imshow(rgb_t)
-        self.ax2.axhline(self.rel_center_y, color='red', linestyle='--', lw=1, alpha=0.8)
-        self.ax2.axvline(self.rel_center_x, color='red', linestyle='--', lw=1, alpha=0.8)
-        self.ax2.plot(self.rel_center_x, self.rel_center_y, 'r+', markersize=15, mew=2, label='Nominal Focus')
-        
-        true_x = self.rel_center_x - comp['opt_dx']
-        true_y = self.rel_center_y - comp['opt_dy']
-        self.ax2.plot(true_x, true_y, 'b+', markersize=15, mew=2, label='Euclidean Correction')
-        
-        self.ax2.annotate('', xy=(true_x, true_y), xytext=(self.rel_center_x, self.rel_center_y),
-                          arrowprops=dict(arrowstyle='->', color='blue', lw=2))
-                     
-        self.ax2.set_title(f"Moving: Tanager ({t_date_str})")
-        self.ax2.legend(loc='lower right')
-
-        stats_text = (f"Optimized Misregistration:\n\n"
-                      f"ΔY: {comp['opt_dy']:+.3f} px ({comp['shift_m_y']:+.1f}m)\n"
-                      f"ΔX: {comp['opt_dx']:+.3f} px ({comp['shift_m_x']:+.1f}m)\n"
-                      f"Rotation: {comp['opt_theta']:+.3f}°\n"
-                      f"Total Offset: {comp['mag']:.1f}m\n"
-                      f"Valid Correlation (r): {comp['corr']:.3f}")
-                      
-        self.stats_annotation.set_text(stats_text)
-
-        self.fig.canvas.draw_idle()
-
-# ==========================================
-# 4. EXECUTION ENTRY POINT
-# ==========================================
-
-def main():
-    print("--- Initializing Interactive Co-Registration Analytics ---")
-    try:
-        h5_l = h5py.File(landsat_path, 'r')
-        h5_t = h5py.File(tanager_path, 'r')
-    except Exception as e:
-        print(f"Error opening files: {e}")
-        return
-        
-    viewer = CoRegistrationViewer(h5_l, h5_t)
+    # ==========================================
+    # 4. STATISTICAL SUMMARY & PLOTTING
+    # ==========================================
     
-    # plt.show() will block execution until BOTH the interactive viewer 
-    # and the longitudinal summary plot windows are closed by the user.
-    plt.show()
+    # Calculate pure structural averages (ignoring NaN gaps)
+    avg_mag = np.nanmean(magnitudes)
+    avg_rot = np.nanmean(np.abs(rotations)) # Absolute yaw error
+    avg_corr = np.nanmean(correlations)
+    valid_pairs_count = np.sum(~np.isnan(magnitudes))
+    
+    print("\n--- Sequential Baseline Averages ---")
+    print(f"Total Valid Pairs Evaluated: {valid_pairs_count}")
+    print(f"Average Sequential Translation: {avg_mag:.2f} meters")
+    print(f"Average Absolute Rotation:      {avg_rot:.3f} degrees")
+    print(f"Average Structural Correlation: {avg_corr:.3f}")
+
+    fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(14, 12), sharex=True)
+    fig.canvas.manager.set_window_title(f"Landsat Sequential Registration Analysis | Window: {SPAN}x{SPAN}px")
+    
+    # 1. Magnitude Panel
+    ax1.plot(plot_dates, magnitudes, marker='o', linestyle='-', color='tab:blue', linewidth=1.5, markersize=6)
+    ax1.axhline(avg_mag, color='red', linestyle='--', linewidth=2, label=f'Mean: {avg_mag:.2f}m')
+    ax1.set_ylabel("Offset Magnitude (Meters)")
+    ax1.set_title("Sequential Geometric Translation Drift")
+    ax1.grid(True, alpha=0.3, linestyle='--')
+    ax1.legend(loc='upper right')
+    
+    # 2. Rotation Panel
+    ax2.plot(plot_dates, rotations, marker='o', linestyle='-', color='tab:orange', linewidth=1.5, markersize=6)
+    ax2.axhline(0, color='black', linewidth=1, alpha=0.5) 
+    ax2.axhline(avg_rot, color='red', linestyle='--', linewidth=2, alpha=0.5, label=f'|Mean|: {avg_rot:.3f}°')
+    ax2.set_ylabel("Rotation (Degrees)")
+    ax2.set_title("Sequential Rotational Misalignment")
+    ax2.grid(True, alpha=0.3, linestyle='--')
+    ax2.legend(loc='upper right')
+
+    # 3. Correlation Panel
+    ax3.plot(plot_dates, correlations, marker='o', linestyle='-', color='tab:green', linewidth=1.5, markersize=6)
+    ax3.axhline(avg_corr, color='red', linestyle='--', linewidth=2, label=f'Mean: {avg_corr:.3f}')
+    ax3.set_ylabel("Pearson Correlation (r)")
+    ax3.set_title("Structural Confidence Score")
+    ax3.set_xlabel("Acquisition Date")
+    ax3.grid(True, alpha=0.3, linestyle='--')
+    ax3.legend(loc='lower right')
+    
+    ax3.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
+    ax3.tick_params(axis='x', rotation=45)
+    
+    stats_box = (f"Landsat 8/9 Sequential Averages\n"
+                 f"Valid Cloud-Free Pairs: {valid_pairs_count}\n"
+                 f"Mean Translation: {avg_mag:.2f} m\n"
+                 f"Mean Abs Rotation: {avg_rot:.3f}°\n"
+                 f"Mean Correlation: r = {avg_corr:.3f}")
+                 
+    fig.text(0.5, 0.85, stats_box, fontsize=10, va='top', ha='center',
+             bbox=dict(boxstyle='square', facecolor='white'))
+
+    fig.suptitle(f"Landsat Registration Stability Analysis| Window: {SPAN}x{SPAN}px", fontsize=10)
+    plt.tight_layout(rect=[0, 0, 1, 0.95])
     
     h5_l.close()
-    h5_t.close()
+    plt.show()
 
 if __name__ == "__main__":
     main()

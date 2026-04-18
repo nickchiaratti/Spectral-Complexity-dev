@@ -13,33 +13,40 @@ from pyproj import Transformer, CRS
 # 1. VIDEO & EXTRACTION CONFIGURATION
 # ==========================================
 
-background_color = 'w' # Dark Slate Gray shows through transparent pixels
+background_color = 'w' 
 text_color = 'black'
 
-# File Paths
 Location = "Rochesterv2"
-# Point directly to the finalized ARD Master Cube that includes the Spectral Complexity datasets
 ARD_CUBE_PATH = f"C:/satelliteImagery/HLSX30/HLS-Tanager_{Location}_Harmonized_2025_SC_EM-7_Norm-bandCount.h5"
-OUTPUT_DIR = f"C:/satelliteImagery/MultiSensor_Analysis_{Location}_ARD_Videos"
+OUTPUT_DIR = f"C:/satelliteImagery/HLST_{Location}_Videos"
 
-COMPLEXITY_TYPE = 'sliding_volume_map'
+COMPLEXITY_TYPE = 'sliding_volume_z_score'
 
-# Temporal Configuration
-START_DATE = datetime(2020, 1, 1, tzinfo=timezone.utc)
+START_DATE = datetime(2025, 1, 1, tzinfo=timezone.utc)
 END_DATE = datetime(2025, 12, 31, tzinfo=timezone.utc)
 
-# QA Filtering Configuration
-EXCLUDE_CONTAMINATED_FRAMES = False
-# Allowed percentage of cloudy/invalid pixels before dropping the entire frame (0.0 = Strict exclusion)
-MAX_CONTAMINATION_FRACTION = 0.0
+# ==========================================
+# --- Coverage & QA Filtering Configuration ---
+# Options: 
+#   'NONE'       : Renders all frames regardless of cloud/shadow contamination.
+#   'POI'        : (Recommended) Frame is rendered ONLY if ALL TS_LOCATIONS are strictly cloud-free.
+#   'PERCENTAGE' : Frame is rendered if the overall clear-pixel ratio exceeds MIN_FRAME_VALIDITY_PERCENTAGE.
+# ==========================================
+COVERAGE_EVALUATION_MODE = 'PERCENTAGE'
+
+# Used strictly if COVERAGE_EVALUATION_MODE = 'PERCENTAGE'
+MIN_FRAME_VALIDITY_PERCENTAGE = .5
 
 # Video Output Configuration
 FPS = 3  
 DPI = 300
 EXPORT_GIF = False
-GIF_DPI = 100 # Prevents RAM exhaustion during Pillow color quantization
+GIF_DPI = 100 
 SHOW_PIXEL_INDICATORS = True
-GLOBAL_COLOR_SCALE = True # Prevents colormap "flickering" across the time series
+
+# --- Localized Color Scale Configuration ---
+GLOBAL_COLOR_SCALE = True 
+COLOR_SCALE_POI_RADIUS = 50 # Pixel radius around TS_LOCATIONS to sample for statistical color limits
 
 # Time Series Locations (Latitude, Longitude)
 TS_LOCATIONS = [
@@ -90,11 +97,13 @@ def generate_videos():
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     print(f"Opening ARD Master Cube: {ARD_CUBE_PATH}")
     
+    # Strict Configuration Validation
+    valid_modes = ['NONE', 'POI', 'PERCENTAGE']
+    if COVERAGE_EVALUATION_MODE not in valid_modes:
+        raise ValueError(f"CRITICAL ERROR: '{COVERAGE_EVALUATION_MODE}' is not a recognized COVERAGE_EVALUATION_MODE. Must be one of {valid_modes}.")
+
     with h5py.File(ARD_CUBE_PATH, 'r') as h5_ard:
         
-        # EVIDENCE-BASED FIX: Timeline Indexing via Provenance Attributes
-        # The script now explicitly targets the HARMONIZED group as the primary driver,
-        # using its embedded metadata to hunt for the required visual arrays in the native grids.
         harm_path = '/HDFEOS/GRIDS/HARMONIZED/Data Fields'
         if harm_path not in h5_ard:
             raise ValueError(f"CRITICAL ERROR: '{harm_path}' missing. Ensure Spectral Complexity script was run.")
@@ -107,13 +116,17 @@ def generate_videos():
         vol_ds = harm_grp[COMPLEXITY_TYPE]
         qa_ds = harm_grp.get('common_mask')
         
-        if qa_ds is None and EXCLUDE_CONTAMINATED_FRAMES:
-            raise ValueError("CRITICAL ERROR: 'common_mask' missing from HARMONIZED group for QA filtering.")
+        if qa_ds is None and COVERAGE_EVALUATION_MODE != 'NONE':
+            raise ValueError(f"CRITICAL ERROR: 'common_mask' missing from HARMONIZED group. Cannot perform {COVERAGE_EVALUATION_MODE} coverage filtering.")
             
-        # Establish Unified Geometric Provenance from the HARMONIZED dataset
         mapped_locs = map_locations(vol_ds)
+        height, width = qa_ds.shape[1], qa_ds.shape[2]
         
-        # Extract Absolute Data Provenance Arrays
+        # Strict Geographic Bounds Guardrail
+        for loc in mapped_locs:
+            if not (0 <= loc['y'] < height and 0 <= loc['x'] < width):
+                raise ValueError(f"CRITICAL ERROR: TS_LOCATION '{loc['label']}' mathematically falls outside the ARD Cube dimensions ({height}x{width}). Check your ROI or Lat/Lon configurations.")
+        
         try:
             prov_grids = vol_ds.attrs['source_grid']
             prov_spaces = vol_ds.attrs['source_spacecraft']
@@ -123,27 +136,41 @@ def generate_videos():
             raise ValueError(f"CRITICAL ERROR: Missing provenance attribute {e} on HARMONIZED dataset.")
             
         unified_frames = []
+        dropped_due_to_qa = 0
         
-        # Drive the loop using the harmonized timeline
+        # Pre-extract POI indices for rapid vectorized checking
+        poi_y = [loc['y'] for loc in mapped_locs]
+        poi_x = [loc['x'] for loc in mapped_locs]
+        
+        print(f"Applying Strict Coverage Filter: {COVERAGE_EVALUATION_MODE}")
+        
         for global_idx in range(len(prov_times)):
             ts = prov_times[global_idx]
             dt = datetime.fromtimestamp(ts, tz=timezone.utc)
             
             if START_DATE <= dt <= END_DATE:
-                # Strict QA Enforcement using the harmonized mask
-                if EXCLUDE_CONTAMINATED_FRAMES:
+                # ----------------------------------------------------
+                # CORE QUALITY ASSESSMENT: FRAME COVERAGE EVALUATION
+                # ----------------------------------------------------
+                if COVERAGE_EVALUATION_MODE != 'NONE':
                     qa_frame = qa_ds[global_idx, ...]
-                    bad_pixels = np.sum(qa_frame == 0)
-                        
-                    if (bad_pixels / qa_frame.size) > MAX_CONTAMINATION_FRACTION:
-                        continue # Exclude frame
-                        
-                # Extract relational pointers
+                    
+                    if COVERAGE_EVALUATION_MODE == 'PERCENTAGE':
+                        valid_frac = np.sum(qa_frame == 1) / qa_frame.size
+                        if valid_frac < MIN_FRAME_VALIDITY_PERCENTAGE:
+                            dropped_due_to_qa += 1
+                            continue 
+                            
+                    elif COVERAGE_EVALUATION_MODE == 'POI':
+                        # Vectorized check: Guarantees every specified POI is mathematically unmasked (== 1)
+                        if not np.all(qa_frame[poi_y, poi_x] == 1):
+                            dropped_due_to_qa += 1
+                            continue
+                
                 source_grid = decode_h5_string(prov_grids[global_idx])
                 source_spacecraft = decode_h5_string(prov_spaces[global_idx])
                 local_idx = int(prov_indices[global_idx])
                 
-                # Retrieve the sensor-specific ortho visual
                 ortho_path = f'/HDFEOS/GRIDS/{source_grid}/Data Fields/ortho_visual'
                 if ortho_path not in h5_ard:
                     raise ValueError(f"CRITICAL ERROR: '{ortho_path}' missing for frame {global_idx}.")
@@ -154,33 +181,52 @@ def generate_videos():
                     'sensor': source_spacecraft,
                     'dt': dt, 
                     'dt_et': dt.astimezone(ZoneInfo("America/New_York")),
-                    'vol_dset': vol_ds,        # Points to HARMONIZED array
-                    'vol_idx': global_idx,     # Index in HARMONIZED array
-                    'ortho_dset': ortho_ds,    # Points to NATIVE array
-                    'ortho_idx': local_idx     # Index in NATIVE array
+                    'vol_dset': vol_ds,        
+                    'vol_idx': global_idx,     
+                    'ortho_dset': ortho_ds,    
+                    'ortho_idx': local_idx     
                 })
                 
         if not unified_frames:
-            print("No valid frames found in the specified date range after strict QA filtering.")
+            print(f"Zero valid frames passed the {COVERAGE_EVALUATION_MODE} filter. ({dropped_due_to_qa} frames excluded).")
             return
             
-        print(f"Processing {len(unified_frames)} strictly interleaved frames based on HARMONIZED provenance...")
+        print(f"Coverage Evaluation Complete. Kept {len(unified_frames)} frames. Excluded {dropped_due_to_qa} frames.")
 
         # 3. Calculate Global Min/Max for Shared Complexity Colormap
         v_min, v_max = 0, 1
         if GLOBAL_COLOR_SCALE:
-            print("Calculating mathematically shared global color scale percentiles across the timeline...")
+            print(f"Calculating localized color scale (Mean ± 1 StdDev) within {COLOR_SCALE_POI_RADIUS}px of TS_LOCATIONS...")
+            
+            # Generate spatial mask defining the exact POI radii
+            Y, X = np.ogrid[:height, :width]
+            poi_mask = np.zeros((height, width), dtype=bool)
+            for loc in mapped_locs:
+                dist_sq = (Y - loc['y'])**2 + (X - loc['x'])**2
+                poi_mask |= (dist_sq <= COLOR_SCALE_POI_RADIUS**2)
+            
             all_vols = []
             for frame in unified_frames:
                 data = frame['vol_dset'][frame['vol_idx'], ...]
-                valid_data = data[~np.isnan(data)]
+                
+                # Extract valid pixels STRICTLY within the POI masking radii
+                valid_data = data[poi_mask & ~np.isnan(data)]
                 if len(valid_data) > 0:
                     all_vols.append(valid_data)
             
             if all_vols:
                 flat_vols = np.concatenate(all_vols)
-                v_min, v_max = np.nanpercentile(flat_vols, (2, 98))
-                print(f"Global Color Scale Locked: vmin={v_min:.4f}, vmax={v_max:.4f}")
+                
+                # Mathematical bounds: Mean ± 1 Standard Deviation
+                mean_vol = np.mean(flat_vols)
+                std_vol = np.std(flat_vols, ddof=1)
+                
+                v_min = mean_vol - std_vol
+                v_max = mean_vol + std_vol
+                
+                print(f"Global Color Scale Locked (Local POI subset): vmin={v_min:.4f}, vmax={v_max:.4f} (Mean={mean_vol:.4f}, Std={std_vol:.4f})")
+            else:
+                print("WARNING: No valid data found near TS_LOCATIONS. Defaulting to 0-1.")
 
         # 4. Set up matplotlib writers
         Writer = animation.writers['ffmpeg']
@@ -194,7 +240,14 @@ def generate_videos():
             writer_comp_gif = GifWriter(fps=FPS)
             writer_side_gif = GifWriter(fps=FPS)
         
-        qa_suffix = "_QAFilt" if EXCLUDE_CONTAMINATED_FRAMES else "_Unmasked"
+        # Dynamic Filename Suffix based on Filter Configuration
+        if COVERAGE_EVALUATION_MODE == 'POI':
+            qa_suffix = "_QA-POI-Strict"
+        elif COVERAGE_EVALUATION_MODE == 'PERCENTAGE':
+            qa_suffix = f"_QA-{int(MIN_FRAME_VALIDITY_PERCENTAGE*100)}pct"
+        else:
+            qa_suffix = "_Unmasked"
+            
         prefix = f"{Location}_ARD_Constellation_{COMPLEXITY_TYPE}_{START_DATE.strftime('%Y')}-{END_DATE.strftime('%Y')}{qa_suffix}_{FPS}fps"
         
         path_rgb = os.path.join(OUTPUT_DIR, f"{prefix}_TrueColor.mp4")
@@ -319,7 +372,6 @@ def generate_videos():
                     ax.set_xlim(0, w)
                     ax.set_ylim(h, 0)
                 
-                # Coordinate mapping applies universally across the ARD framework
                 if SHOW_PIXEL_INDICATORS:
                     for loc_idx, loc in enumerate(mapped_locs):
                         for ind_list in [inds_rgb, inds_comp, inds_s1, inds_s2]:

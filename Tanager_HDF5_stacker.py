@@ -378,7 +378,8 @@ def process_tanager_stack():
             ortho_vis_dset[t_idx, 0, :, :] = percentile_stretch(r_band, sr_fill)
             ortho_vis_dset[t_idx, 1, :, :] = percentile_stretch(g_band, sr_fill)
             ortho_vis_dset[t_idx, 2, :, :] = percentile_stretch(b_band, sr_fill)
-
+        ortho_vis_dset.attrs['wavelengths'] = np.array([TARGET_RED_NM, TARGET_GREEN_NM, TARGET_BLUE_NM])
+        ortho_vis_dset.attrs['band_indices'] = np.array([r_idx, g_idx, b_idx])
         # Write struct metadata
         struct_meta = generate_struct_metadata("TANAGER", width, height, ul_coords, lr_coords, datasets_created_info, len(grouped_scenes), band_count, utm_zone)
         dt_str = h5py.string_dtype(encoding='ascii')
