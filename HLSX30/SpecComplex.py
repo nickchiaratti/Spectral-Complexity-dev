@@ -147,16 +147,16 @@ def get_hls_mask(data_grp, t, sun_elevation_threshold, cloud_dilation, qa_reject
         
     return valid_mask
 
-def maximumDistance(data, num_endmembers):
+def maximumDistance(data, num_endmembers, chunk_size=50000):
     '''
-    Args:
-        data (np.ndarray): 3D image cube [nPixels0, nPixels1, nbands]
-        num_endmembers (int): number of endmembers to be calculated (choose more than expected to find)
+    Memory-optimized MaxD geometric simplex extraction.
+    Utilizes strict float32 typing and chunked vector broadcasting to 
+    prevent ArrayMemoryErrors on hyperspectral (300+ band) datasets.
+    
     Returns:
         endmembers [bands, num_endmembers]
         endmembers_index [1, num_endmembers]
     '''      
-    # Flatten 3D cube [rows, cols, bands] -> 2D [pixels, bands]
     image2D = np.reshape(data, (data.shape[0] * data.shape[1], data.shape[2]), order="F")
 
     if np.min(image2D) < 0:
@@ -166,61 +166,62 @@ def maximumDistance(data, num_endmembers):
         warnings.warn('Data contains values greater than 1')
         image2D = np.clip(image2D, 0, 1)
 
-    # --- NaN Handling ---
     valid_mask = ~np.isnan(image2D).any(axis=1)
     
     if np.sum(valid_mask) < num_endmembers:
-        #print(f"Not enough valid pixels (no NaNs) to find {num_endmembers} endmembers. Found {np.sum(valid_mask)} valid pixels.")
         return np.full((image2D.shape[1], num_endmembers), np.nan), np.full((1, num_endmembers), np.nan)
 
-    valid_data = image2D[valid_mask]
+    valid_data = image2D[valid_mask].astype(np.float32)
     valid_indices = np.where(valid_mask)[0]
 
-    # Transpose to [bands, pixels]
     data_t = np.transpose(valid_data)
     num_bands, num_pix = data_t.shape
 
-    # calculate magnitude of all vectors to find min and max
     magnitude = np.linalg.norm(data_t, axis=0)
     idx1 = np.argmax(magnitude)
     idx2 = np.argmin(magnitude)
 
-    # create empty output arrays for endmembers
-    endmembers = np.zeros([num_bands, num_endmembers])
+    endmembers = np.zeros([num_bands, num_endmembers], dtype=np.float32)
     endmembers_index = np.zeros([1, num_endmembers], dtype=int)   
 
-    # assign largest and smallest vector as first and second endmembers
     endmembers[:, 0] = data_t[:, idx1]
     endmembers[:, 1] = data_t[:, idx2]
     
     endmembers_index[0, 0] = valid_indices[idx1]
     endmembers_index[0, 1] = valid_indices[idx2]
 
-    # Use standard ndarray instead of deprecated np.matrix. 
-    # Create a copy so we don't modify the original data_t needed for extraction
+    # Pre-allocate strictly as float32 to prevent memory doubling
     data_proj = data_t.copy()
-    identity_matrix = np.identity(num_bands)
+    identity_matrix = np.identity(num_bands, dtype=np.float32)
 
     for i in range(2, num_endmembers):
-        # Extract difference vector as 2D column array (bands, 1) to maintain shape for broadcasting
         diff = data_proj[:, idx2:idx2+1] - data_proj[:, idx1:idx1+1]
-        # calculate pseudo inverse of difference vector
-        pseudo = np.linalg.pinv(diff)
-        data_proj = np.matmul((identity_matrix - np.matmul(diff, pseudo)), data_proj)
+        
+        # Enforce float32 on the pseudoinverse to prevent float64 upcasting during matmul
+        pseudo = np.linalg.pinv(diff).astype(np.float32)
+        proj_operator = (identity_matrix - np.matmul(diff, pseudo)).astype(np.float32)
+
+        # EVIDENCE-BASED FIX: Chunked In-Place Projection
+        # Applies the projection matrix in memory-safe chunks rather than generating 
+        # a new massive array across the entire image space simultaneously.
+        for c in range(0, num_pix, chunk_size):
+            c_end = min(c + chunk_size, num_pix)
+            data_proj[:, c:c_end] = np.matmul(proj_operator, data_proj[:, c:c_end])
 
         idx1 = idx2
-        vec = data_proj[:, idx2:idx2+1] # Shape (bands, 1)
+        vec = data_proj[:, idx2:idx2+1] 
             
-        diff_new = np.sum(np.square(vec - data_proj), axis=0)
-
-        # find the maximum distance for next endmember
-        # np.argmax returns the index of the first occurrence of the maximum value
+        # EVIDENCE-BASED FIX: Chunked Distance Calculation
+        # Prevents NumPy from allocating a massive intermediate array for np.square()
+        diff_new = np.zeros(num_pix, dtype=np.float32)
+        for c in range(0, num_pix, chunk_size):
+            c_end = min(c + chunk_size, num_pix)
+            chunk = data_proj[:, c:c_end]
+            diff_new[c:c_end] = np.sum(np.square(vec - chunk), axis=0)
+            
         idx2 = np.argmax(diff_new)
 
-        # assign to endmember file
         endmembers[:, i] = data_t[:, idx2]
-        
-        # Map back to original index
         endmembers_index[0, i] = valid_indices[idx2]
 
     return endmembers, endmembers_index
@@ -335,6 +336,7 @@ def process_volume_frame(frame_data, num_endmembers, gram_type, norm_type):
     Pixel Filtering: Only valid pixels are extracted into the 2D matrix.
     Returns the full volume curve, endmembers, and indices.
     """
+    print("Calculating Full FrameSpectral Complexity")
     bands, height, width = frame_data.shape
     img = np.transpose(frame_data, (1, 2, 0))
     image2D = np.reshape(img, (height * width, bands))
@@ -372,16 +374,17 @@ def process_volume_tiles(frame_data, tile_size, num_endmembers, gram_type, norm_
     Strict Validity: Window is only processed if ALL pixels are valid.
     Any pixel that is part of an invalid tile is set to NaN.
     """
+    #print("Calculating Tiled Spectral Complexity")
     bands, height, width = frame_data.shape
     img = np.transpose(frame_data, (1, 2, 0))
     output_map = np.full((height, width), np.nan, dtype=np.float32)
     # Check gram type
-    if gram_type == 'datasetMean': print("Localizing Gram to dataset mean")
-    elif gram_type == 'minEndmember': print("Localizing Gram to second endmember")
-    else: print("Localizing Gram to 0")
-    # Check norm type
-    if norm_type == 'bandCount': print(f"Normalizing Endmembers by √{bands}")
-    else: print("No Endmember Normalization Applied")
+    #if gram_type == 'datasetMean': print("Localizing Gram to dataset mean")
+    #elif gram_type == 'minEndmember': print("Localizing Gram to second endmember")
+    #else: print("Localizing Gram to 0")
+    ## Check norm type
+    #if norm_type == 'bandCount': print(f"Normalizing Endmembers by √{bands}")
+    #else: print("No Endmember Normalization Applied")
     
     for y in range(0, height, tile_size):
         for x in range(0, width, tile_size):
@@ -391,6 +394,8 @@ def process_volume_tiles(frame_data, tile_size, num_endmembers, gram_type, norm_
                 meanVector = tile.mean(axis=(0, 1))
                 volume = np.zeros(num_endmembers)
                 endmembers, _ = maximumDistance(tile, num_endmembers)
+                if np.isnan(endmembers).any():
+                    continue
                 localizationVec = endmembers[:,1]
 
                 if gram_type == 'datasetMean':
@@ -416,22 +421,23 @@ def process_volume_sliding_tile(frame_data, tile_size, stride, num_endmembers, g
     Strict Validity: Window is only processed if ALL pixels are valid.
     Output is masked with NaN for any pixel identified as invalid.
     """
+    #print("Calculating Sliding Window Spectral Complexity")
     bands, height, width = frame_data.shape
     img = np.transpose(frame_data, (1, 2, 0))
     
     sum_map = np.zeros((height, width), dtype=np.float32)
     count_map = np.zeros((height, width), dtype=np.int8)
-    if gram_type == 'datasetMean':
-        print("Localizing Gram to dataset mean")
-    elif gram_type == 'minEndmember':
-        print("Localizing Gram to second endmember")
-    else:
-        print("Localizing Gram to 0")
-
-    if norm_type == 'bandCount':
-        print(f"Normalizing Endmembers by √{bands}")
-    else:
-        print("No Endmember Normalization Applied")
+    #if gram_type == 'datasetMean':
+    #    print("Localizing Gram to dataset mean")
+    #elif gram_type == 'minEndmember':
+    #    print("Localizing Gram to second endmember")
+    #else:
+    #    print("Localizing Gram to 0")
+#
+    #if norm_type == 'bandCount':
+    #    print(f"Normalizing Endmembers by √{bands}")
+    #else:
+    #    print("No Endmember Normalization Applied")
     
     for y_start in range(0, height - tile_size + 1, stride):
         for x_start in range(0, width - tile_size + 1, stride):
@@ -440,6 +446,8 @@ def process_volume_sliding_tile(frame_data, tile_size, stride, num_endmembers, g
             tile = img[y_start:y_end, x_start:x_end, :]
             meanVector = tile.mean(axis=(0, 1))
             endmembers, _ = maximumDistance(tile, num_endmembers)
+            if np.isnan(endmembers).any():
+                    continue
             localizationVec = endmembers[:,1]
 
             if gram_type == 'datasetMean':
@@ -551,7 +559,7 @@ def calculate_global_z_score(volume_array, valid_pixel_mask):
     calculating the mean and standard deviation from radiometrically valid pixels, 
     preventing artifacts from skewing the background model.
     """
-    print("Calculating global Z-score for frame")
+    #print("Calculating global Z-score for frame")
     height, width = volume_array.shape
     z_scores = np.full((height, width), np.nan, dtype=np.float32)
     
@@ -593,7 +601,7 @@ def calculate_local_z_score(volume_array, window_size, stride):
     Uses a sum_map and count_map to average the Z-scores across all overlapping sliding windows,
     creating an ensemble anomaly detection map.
     """
-    print(f"Calculating local {window_size}x{window_size} neighborhood Z-score for frame")
+    #print(f"Calculating local {window_size}x{window_size} neighborhood Z-score for frame")
     height, width = volume_array.shape
     
     sum_map = np.zeros((height, width), dtype=np.float32)

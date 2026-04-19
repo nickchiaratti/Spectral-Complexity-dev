@@ -16,46 +16,57 @@ from pyproj import Transformer, CRS
 background_color = 'w' 
 text_color = 'black'
 
-Location = "Rochesterv2"
-ARD_CUBE_PATH = f"C:/satelliteImagery/HLSX30/HLS-Tanager_{Location}_Harmonized_2025_SC_EM-7_Norm-bandCount.h5"
-OUTPUT_DIR = f"C:/satelliteImagery/HLST_{Location}_Videos"
+Location = "MtEtna"
+ARD_CUBE_PATH = f"C:/satelliteImagery/HLST30/HLST_{Location}_Harmonized_2025_SC_EM-7_Norm-bandCount.h5"
+OUTPUT_DIR = f"C:/satelliteImagery/HLST30/HLST_{Location}_Videos"
 
 COMPLEXITY_TYPE = 'sliding_volume_z_score'
 
-START_DATE = datetime(2025, 1, 1, tzinfo=timezone.utc)
-END_DATE = datetime(2025, 12, 31, tzinfo=timezone.utc)
+START_DATE = datetime(2020, 1, 1, tzinfo=timezone.utc)
+END_DATE = datetime(2021, 12, 31, tzinfo=timezone.utc)
 
 # ==========================================
 # --- Coverage & QA Filtering Configuration ---
 # Options: 
 #   'NONE'       : Renders all frames regardless of cloud/shadow contamination.
-#   'POI'        : (Recommended) Frame is rendered ONLY if ALL TS_LOCATIONS are strictly cloud-free.
-#   'PERCENTAGE' : Frame is rendered if the overall clear-pixel ratio exceeds MIN_FRAME_VALIDITY_PERCENTAGE.
+#   'POI'        : (Recommended) Frame is rendered ONLY if ALL TS_LOCATIONS are within the frame's valid data coverage.
+#   'PERCENTAGE' : Frame is rendered if the overall valid-pixel ratio exceeds MIN_FRAME_VALIDITY_PERCENTAGE.
 # ==========================================
-COVERAGE_EVALUATION_MODE = 'PERCENTAGE'
+COVERAGE_EVALUATION_MODE = 'POI'
+
+# If True, validates pixels against the QA mask (cloud/water filters), meaning data must be both present AND clear.
+# If False, only checks that data physically exists (is not NaN / outside the valid satellite swath).
+ENFORCE_QA_MASKING = False
 
 # Used strictly if COVERAGE_EVALUATION_MODE = 'PERCENTAGE'
 MIN_FRAME_VALIDITY_PERCENTAGE = .5
 
 # Video Output Configuration
-FPS = 3  
+FPS = 4
 DPI = 300
-EXPORT_GIF = False
-GIF_DPI = 100 
-SHOW_PIXEL_INDICATORS = True
+EXPORT_GIF = True
+GIF_DPI = 40 
+SHOW_PIXEL_INDICATORS = False
 
 # --- Localized Color Scale Configuration ---
 GLOBAL_COLOR_SCALE = True 
-COLOR_SCALE_POI_RADIUS = 50 # Pixel radius around TS_LOCATIONS to sample for statistical color limits
+COLOR_SCALE_POI_RADIUS = 100 # Pixel radius around TS_LOCATIONS to sample for statistical color limits
 
 # Time Series Locations (Latitude, Longitude)
 TS_LOCATIONS = [
-    {'latlon': (43.142856, -77.508451), 'label': "West Tait Forest",                'color': 'tab:green'},
-    {'latlon': (43.144861, -77.501176), 'label': "East Tait Forest",                'color': 'tab:olive'},
-    {'latlon': (43.136910, -77.469462), 'label': "Artificial turf football field",  'color': 'tab:blue'},
-    {'latlon': (43.138241, -77.470873), 'label': "Recently added artificial turf",  'color': 'tab:cyan'},
-    {'latlon': (43.141297, -77.506256), 'label': "Tait Parking Lot",                'color': 'tab:red'},
-    {'latlon': (43.139411, -77.504005), 'label': "ROCX NITE Tarp",                  'color': 'tab:purple'},
+    {'latlon': (37.738, 14.970), 'label': "left",                'color': 'tab:green'},
+    {'latlon': (37.710, 15.000), 'label': "lower",                'color': 'tab:green'},
+    {'latlon': (37.738, 15.04), 'label': "right",                'color': 'tab:olive'},
+    {'latlon': (37.795, 15.005), 'label': "top",  'color': 'tab:blue'},
+
+
+
+    #{'latlon': (43.142856, -77.508451), 'label': "West Tait Forest",                'color': 'tab:green'},
+    #{'latlon': (43.144861, -77.501176), 'label': "East Tait Forest",                'color': 'tab:olive'},
+    #{'latlon': (43.136910, -77.469462), 'label': "Artificial turf football field",  'color': 'tab:blue'},
+    #{'latlon': (43.138241, -77.470873), 'label': "Recently added artificial turf",  'color': 'tab:cyan'},
+    #{'latlon': (43.141297, -77.506256), 'label': "Tait Parking Lot",                'color': 'tab:red'},
+    #{'latlon': (43.139411, -77.504005), 'label': "ROCX NITE Tarp",                  'color': 'tab:purple'},
 ]
 
 # ==========================================
@@ -116,8 +127,8 @@ def generate_videos():
         vol_ds = harm_grp[COMPLEXITY_TYPE]
         qa_ds = harm_grp.get('common_mask')
         
-        if qa_ds is None and COVERAGE_EVALUATION_MODE != 'NONE':
-            raise ValueError(f"CRITICAL ERROR: 'common_mask' missing from HARMONIZED group. Cannot perform {COVERAGE_EVALUATION_MODE} coverage filtering.")
+        if qa_ds is None and ENFORCE_QA_MASKING:
+            raise ValueError(f"CRITICAL ERROR: 'common_mask' missing from HARMONIZED group. Cannot perform QA masking.")
             
         mapped_locs = map_locations(vol_ds)
         height, width = qa_ds.shape[1], qa_ds.shape[2]
@@ -142,7 +153,8 @@ def generate_videos():
         poi_y = [loc['y'] for loc in mapped_locs]
         poi_x = [loc['x'] for loc in mapped_locs]
         
-        print(f"Applying Strict Coverage Filter: {COVERAGE_EVALUATION_MODE}")
+        qa_filter_str = "with QA Masking" if ENFORCE_QA_MASKING else "without QA Masking"
+        print(f"Applying Strict Coverage Filter: {COVERAGE_EVALUATION_MODE} ({qa_filter_str})")
         
         for global_idx in range(len(prov_times)):
             ts = prov_times[global_idx]
@@ -153,17 +165,30 @@ def generate_videos():
                 # CORE QUALITY ASSESSMENT: FRAME COVERAGE EVALUATION
                 # ----------------------------------------------------
                 if COVERAGE_EVALUATION_MODE != 'NONE':
-                    qa_frame = qa_ds[global_idx, ...]
+                    vol_frame = vol_ds[global_idx, ...]
+                    
+                    if ENFORCE_QA_MASKING:
+                        qa_frame = qa_ds[global_idx, ...]
                     
                     if COVERAGE_EVALUATION_MODE == 'PERCENTAGE':
-                        valid_frac = np.sum(qa_frame == 1) / qa_frame.size
+                        if ENFORCE_QA_MASKING:
+                            valid_frac = np.sum(qa_frame == 1) / qa_frame.size
+                        else:
+                            valid_frac = np.sum(~np.isnan(vol_frame)) / vol_frame.size
+                            
                         if valid_frac < MIN_FRAME_VALIDITY_PERCENTAGE:
                             dropped_due_to_qa += 1
                             continue 
                             
                     elif COVERAGE_EVALUATION_MODE == 'POI':
-                        # Vectorized check: Guarantees every specified POI is mathematically unmasked (== 1)
-                        if not np.all(qa_frame[poi_y, poi_x] == 1):
+                        # Vectorized check: Guarantees every specified POI has data (is not NaN)
+                        poi_valid = ~np.isnan(vol_frame[poi_y, poi_x])
+                        
+                        if ENFORCE_QA_MASKING:
+                            qa_valid = (qa_frame[poi_y, poi_x] == 1)
+                            poi_valid = poi_valid & qa_valid
+                            
+                        if not np.all(poi_valid):
                             dropped_due_to_qa += 1
                             continue
                 
@@ -242,9 +267,9 @@ def generate_videos():
         
         # Dynamic Filename Suffix based on Filter Configuration
         if COVERAGE_EVALUATION_MODE == 'POI':
-            qa_suffix = "_QA-POI-Strict"
+            qa_suffix = "_QA-POI-Strict" if ENFORCE_QA_MASKING else "_Coverage-POI"
         elif COVERAGE_EVALUATION_MODE == 'PERCENTAGE':
-            qa_suffix = f"_QA-{int(MIN_FRAME_VALIDITY_PERCENTAGE*100)}pct"
+            qa_suffix = f"_QA-{int(MIN_FRAME_VALIDITY_PERCENTAGE*100)}pct" if ENFORCE_QA_MASKING else f"_Coverage-{int(MIN_FRAME_VALIDITY_PERCENTAGE*100)}pct"
         else:
             qa_suffix = "_Unmasked"
             

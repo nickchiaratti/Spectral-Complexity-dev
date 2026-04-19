@@ -19,7 +19,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.widgets import Button
 import matplotlib.dates as mdates
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import rasterio.transform
 from pyproj import Transformer, CRS
 from skimage.registration import phase_cross_correlation
@@ -34,7 +34,7 @@ import warnings
 Location = "Tait"
 
 # Point directly to the finalized ARD Master Cube
-ARD_CUBE_PATH = f"C:/satelliteImagery/HLSX30/HLS-Tanager_{Location}_Harmonized_2025_SC_EM-7_Norm-bandCount.h5"
+ARD_CUBE_PATH = f"C:/satelliteImagery/HLST30/HLST_{Location}_Harmonized_2025_SC_EM-7_Norm-bandCount.h5"
 
 # The Absolute Geometric Anchor (Reference Sensor)
 BASELINE_GRID = "TANAGER"
@@ -276,45 +276,74 @@ class MultiSensorCoRegistrationViewer:
         self.fig_sum, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(14, 12), sharex=True)
         self.fig_sum.canvas.manager.set_window_title("Multi-Sensor Baseline Stability")
         
+        # 1. Establish Vertical Epoch Bands aligned to the Anchor Grid
+        unique_b_dates = sorted(list(set(c['b_dt'] for c in valid_comps)))
+        for ax in [ax1, ax2, ax3]:
+            for b_date in unique_b_dates:
+                # Draws a 4-day wide visual band centered on the Anchor acquisition
+                ax.axvspan(b_date - timedelta(days=2), b_date + timedelta(days=2), 
+                           color='purple', alpha=0.2, zorder=0, lw=0)
+        
         colors = plt.cm.tab10(np.linspace(0, 1, len(target_grids)))
         
         for i, t_grid in enumerate(target_grids):
-            grid_comps = sorted([c for c in valid_comps if c['t_grid'] == t_grid], key=lambda x: x['t_dt'])
+            grid_comps = [c for c in valid_comps if c['t_grid'] == t_grid]
             
-            dates = [c['t_dt'] for c in grid_comps]
-            mags = [c['mag'] for c in grid_comps]
-            rots = [abs(c['opt_theta']) for c in grid_comps]
-            corrs = [c['corr'] for c in grid_comps]
+            # 2. Separate into "Before" and "After" temporal brackets
+            prev_comps = sorted([c for c in grid_comps if 'prev' in c['label']], key=lambda x: x['b_dt'])
+            next_comps = sorted([c for c in grid_comps if 'next' in c['label']], key=lambda x: x['b_dt'])
             
-            ax1.scatter(dates, mags, color=colors[i], label=f'{t_grid}', s=40, zorder=3)
-            ax2.scatter(dates, rots, color=colors[i], label=f'{t_grid}', s=40, zorder=3)
-            ax3.scatter(dates, corrs, color=colors[i], label=f'{t_grid}', s=40, zorder=3)
+            # 3. Plot Connected Bracketing Vectors vs the Anchor X-Axis
+            if prev_comps:
+                dates = [c['b_dt'] for c in prev_comps]
+                mags = [c['mag'] for c in prev_comps]
+                rots = [abs(c['opt_theta']) for c in prev_comps]
+                corrs = [c['corr'] for c in prev_comps]
+                
+                ax1.plot(dates, mags, color=colors[i], marker='^', markersize=10, linestyle='--', label=f'{t_grid} Frame Before ($L_{{-1}}$)', zorder=3)
+                ax2.plot(dates, rots, color=colors[i], marker='^', markersize=10, linestyle='--', zorder=3)
+                ax3.plot(dates, corrs, color=colors[i], marker='^', markersize=10, linestyle='--', zorder=3)
+                
+            if next_comps:
+                dates = [c['b_dt'] for c in next_comps]
+                mags = [c['mag'] for c in next_comps]
+                rots = [abs(c['opt_theta']) for c in next_comps]
+                corrs = [c['corr'] for c in next_comps]
+                
+                # Use a dotted line and downward triangle for the trailing bracket
+                ax1.plot(dates, mags, color=colors[i], marker='v', markersize=10, linestyle=':', label=f'{t_grid} Frame After ($L_{{+1}}$)', zorder=3)
+                ax2.plot(dates, rots, color=colors[i], marker='v', markersize=10, linestyle=':', zorder=3)
+                ax3.plot(dates, corrs, color=colors[i], marker='v', markersize=10, linestyle=':', zorder=3)
             
             print(f"\n--- {t_grid} vs {self.baseline_name} Baseline Averages ---")
-            print(f"Valid Evaluations: {len(mags)}")
-            print(f"Mean Translation:  {np.mean(mags):.2f}m")
-            print(f"Mean Abs Rotation: {np.mean(rots):.3f}°")
-            print(f"Mean Correlation:  {np.mean(corrs):.3f}")
+            mags_all = [c['mag'] for c in grid_comps]
+            rots_all = [abs(c['opt_theta']) for c in grid_comps]
+            corrs_all = [c['corr'] for c in grid_comps]
+            print(f"Valid Evaluations: {len(mags_all)}")
+            print(f"Mean Translation:  {np.mean(mags_all):.2f}m")
+            print(f"Mean Abs Rotation: {np.mean(rots_all):.3f}°")
+            print(f"Mean Correlation:  {np.mean(corrs_all):.3f}")
 
+        # Labeling and Formatting
         ax1.set_ylabel("Offset Magnitude (Meters)", fontsize=10)
-        ax1.set_title(f"Geometric Translation Drift (Anchored to {self.baseline_name})", fontsize=10)
+        ax1.set_title("Geometric Translation Drift over Time", fontsize=10)
         ax1.grid(True, alpha=0.3, linestyle='--')
         ax1.legend(loc='upper left', fontsize=10)
         
         ax2.axhline(0, color='black', linewidth=1, alpha=0.5) 
-        ax2.set_ylabel("Abs Rotation (Degrees)", fontsize=10)
-        ax2.set_title("Rotational Misalignment", fontsize=10)
+        ax2.set_ylabel("Rotation (Degrees)", fontsize=10)
+        ax2.set_title("Rotational Misalignment over Time", fontsize=10)
         ax2.grid(True, alpha=0.3, linestyle='--')
 
         ax3.set_ylabel("Pearson Correlation (r)", fontsize=10)
-        ax3.set_title("Structural Confidence Score", fontsize=10)
-        ax3.set_xlabel("Target Sensor Acquisition Date", fontsize=10)
+        ax3.set_title("Correlation Coefficient over Time", fontsize=10)
+        ax3.set_xlabel(f"{self.baseline_name} Acquisition Date", fontsize=10)
         ax3.grid(True, alpha=0.3, linestyle='--')
         
         ax3.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
         ax3.tick_params(axis='x', rotation=45)
         
-        self.fig_sum.suptitle(f"Multi-Sensor Co-Registration (Anchor: {self.baseline_name}) | Window: {SPAN}x{SPAN}px")
+        self.fig_sum.suptitle(f"Temporal Bracketing Registration Analysis | Window: {SPAN}x{SPAN}px")
         self.fig_sum.tight_layout()
 
     def _init_ui(self):

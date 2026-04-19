@@ -15,7 +15,7 @@ import SpecComplex as sc
 # ==========================================
 # 1. CONFIGURATION & DIRECTORIES
 # ==========================================
-Location = "Rochesterv2"
+Location = "MtEtna"
 
 if Location == "Rochesterv2":
     ROI_LON_MIN = -77.770166; ROI_LON_MAX = -77.376776
@@ -23,15 +23,22 @@ if Location == "Rochesterv2":
 elif Location == "Tait":
     ROI_LON_MIN = -77.516127; ROI_LON_MAX = -77.461968
     ROI_LAT_MIN = 43.127698; ROI_LAT_MAX = 43.159168
+if Location == 'Guatemala-Debris':
+    ROI_LON_MIN = -88.222000; ROI_LON_MAX = -87.822000
+    ROI_LAT_MIN = 15.636200; ROI_LAT_MAX = 16.036200
+if Location == "MtEtna":
+    ROI_LON_MIN = 14.9100; ROI_LON_MAX = 15.0900
+    ROI_LAT_MIN = 37.6900; ROI_LAT_MAX = 37.8300
     
-COMBINED_OUTPUT_DIR = r"C:\satelliteImagery\HLSX30"
+HLS_SOURCE_DIR = r"C:\satelliteImagery\HLS30"
 TANAGER_SOURCE_DIR = r"C:\satelliteImagery\Tanager\SourceData"
+COMBINED_OUTPUT_DIR = r"C:\satelliteImagery\HLST30"
 
-INPUT_NATIVE_HDF5 = os.path.join(COMBINED_OUTPUT_DIR, f"HLS_Combined_Stack_Rochesterv2_STAC_Native_2025.h5")
+INPUT_NATIVE_HDF5 = os.path.join(HLS_SOURCE_DIR, f"HLS_{Location}_STAC_Native_2025.h5")
 # New modular ingestion source for Tanager Hyperspectral data
-INPUT_NATIVE_TANAGER_HDF5 = os.path.join(TANAGER_SOURCE_DIR, "Tanager_Native_Stack_HDFEOS.h5")
+INPUT_NATIVE_TANAGER_HDF5 = os.path.join(TANAGER_SOURCE_DIR, "SKIP")#"Tanager_Native_Stack_HDFEOS.h5")
 
-OUTPUT_MASTER_HDF5 = os.path.join(COMBINED_OUTPUT_DIR, f"HLS-Tanager_{Location}_Harmonized_2025.h5")
+OUTPUT_MASTER_HDF5 = os.path.join(COMBINED_OUTPUT_DIR, f"HLST_{Location}_Harmonized_2025.h5")
 
 S30_WAVELENGTHS = [0.443, 0.490, 0.560, 0.665, 0.705, 0.740, 0.783, 0.842, 0.865, 0.945, 1.375, 1.610, 2.190]
 L30_SR_WAVELENGTHS = [0.443, 0.482, 0.561, 0.655, 0.865, 1.609, 2.201, 1.373] 

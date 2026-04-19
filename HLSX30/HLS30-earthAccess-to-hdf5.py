@@ -5,11 +5,9 @@ import numpy as np
 from datetime import datetime, timezone
 from rasterio.windows import from_bounds
 from rasterio.transform import from_bounds as transform_from_bounds
-from rasterio.warp import reproject, Resampling
 from pyproj import Transformer, CRS
 import pystac_client
 import earthaccess
-import SpecComplex as sc
 import json
 import concurrent.futures
 import warnings
@@ -24,23 +22,42 @@ cloud_threshold = 30
 print("Authenticating with NASA Earthdata...")
 earthaccess.login(strategy="all", persist=True)
 
-Location = "Tait"
-SOURCE_CACHE = "Rochesterv2" 
+Location = "MtEtna"
+SOURCE_CACHE = False
+# Define exactly which MGRS tiles cover the Rochester ROI. 
+# Excludes marginal edge-collision tiles like T18TUN and T18TUP.
+
 
 if Location == "Rochesterv2":
+    SOURCE_CACHE = "Rochesterv2"
     ROI_LON_MIN = -77.770166; ROI_LON_MAX = -77.376776
     ROI_LAT_MIN = 42.961778; ROI_LAT_MAX = 43.342135
     START_DATE = '2025-01-01'
     END_DATE = '2025-12-31'
+    ALLOWED_MGRS_TILES = ['T17TQJ', 'T17TQH'] 
 if Location == "Tait":
+    SOURCE_CACHE = "Rochesterv2"
     ROI_LON_MIN = -77.516127; ROI_LON_MAX = -77.461968
     ROI_LAT_MIN = 43.127698; ROI_LAT_MAX = 43.159168
     START_DATE = '2025-01-01'
     END_DATE = '2025-12-31' 
+    ALLOWED_MGRS_TILES = ['T17TQH'] 
+if Location == 'Guatemala-Debris':
+    ROI_LON_MIN = -88.222000; ROI_LON_MAX = -87.822000
+    ROI_LAT_MIN = 15.636200; ROI_LAT_MAX = 16.036200
+    START_DATE = '2020-08-01'
+    END_DATE = '2020-10-31' 
+    ALLOWED_MGRS_TILES = ['T16PCC'] 
+if Location == "MtEtna":
+    ROI_LON_MIN = 14.9100; ROI_LON_MAX = 15.0900
+    ROI_LAT_MIN = 37.6900; ROI_LAT_MAX = 37.8300
+    START_DATE = '2020-12-01'
+    END_DATE = '2021-05-31' 
+    ALLOWED_MGRS_TILES = ['T33SVB','T33SWB'] 
 
-HLSS30_OUTPUT_DIR = r"C:\satelliteImagery\HLSX30\HLSS30-SourceData"
-HLSL30_OUTPUT_DIR = r"C:\satelliteImagery\HLSX30\HLSL30-SourceData"
-COMBINED_OUTPUT_DIR = r"C:\satelliteImagery\HLSX30"
+HLSS30_OUTPUT_DIR = r"C:\satelliteImagery\HLS30\HLSS30-SourceData"
+HLSL30_OUTPUT_DIR = r"C:\satelliteImagery\HLS30\HLSL30-SourceData"
+COMBINED_OUTPUT_DIR = r"C:\satelliteImagery\HLS30"
 
 if SOURCE_CACHE:
     S30_TEMP_DIR = os.path.join(HLSS30_OUTPUT_DIR, f"{SOURCE_CACHE}/STAC_CACHE")
@@ -53,7 +70,7 @@ os.makedirs(S30_TEMP_DIR, exist_ok=True)
 os.makedirs(L30_TEMP_DIR, exist_ok=True)
 os.makedirs(COMBINED_OUTPUT_DIR, exist_ok=True)
 
-OUTPUT_NATIVE_HDF5 = os.path.join(COMBINED_OUTPUT_DIR, f"HLS_Combined_Stack_{Location}_STAC_Native_2025.h5")
+OUTPUT_NATIVE_HDF5 = os.path.join(COMBINED_OUTPUT_DIR, f"HLS_{Location}_STAC_Native_2025.h5")
 
 ASSETS_S30 = ['B01', 'B02', 'B03', 'B04', 'B05', 'B06', 'B07', 'B08', 'B8A', 'B09', 'B10', 'B11', 'B12', 'Fmask', 'SZA', 'SAA', 'VZA', 'VAA']
 ASSETS_L30 = ['B01', 'B02', 'B03', 'B04', 'B05', 'B06', 'B07', 'B09', 'B10', 'B11', 'Fmask', 'SZA', 'SAA', 'VZA', 'VAA']
@@ -62,12 +79,15 @@ S30_WAVELENGTHS = [0.443, 0.490, 0.560, 0.665, 0.705, 0.740, 0.783, 0.842, 0.865
 L30_SR_WAVELENGTHS = [0.443, 0.482, 0.561, 0.655, 0.865, 1.609, 2.201, 1.373] 
 L30_TIRS_WAVELENGTHS = [10.9, 12.0]
 
+
+
 # Defensive Topology Enforcement for STAC
 safe_bbox = [
     min(ROI_LON_MIN, ROI_LON_MAX), max(ROI_LAT_MIN, ROI_LAT_MAX), 
     max(ROI_LON_MIN, ROI_LON_MAX), min(ROI_LAT_MIN, ROI_LAT_MAX)
 ]
 safe_bbox = [min(safe_bbox[0], safe_bbox[2]), min(safe_bbox[1], safe_bbox[3]), max(safe_bbox[0], safe_bbox[2]), max(safe_bbox[1], safe_bbox[3])]
+
 
 # ==========================================
 # 2. NASA STAC QUERY & NATIVE VIRTUAL READ (HLS)
@@ -78,12 +98,12 @@ def stac_native_window_read(collection_id, assets_list, temp_dir):
     search = catalog.search(collections=[collection_id], bbox=safe_bbox, datetime=f"{START_DATE}/{END_DATE}", limit=500)
     filtered_items = [i for i in list(search.items()) if i.properties.get('eo:cloud_cover', 100) < cloud_threshold]
     
-    # EVIDENCE-BASED FIX: Pipeline Telemetry
-    # Establishes the total payload expectation before any I/O operations begin.
     total_items = len(filtered_items)
     print(f"Identified {total_items} STAC items for {collection_id} within temporal bounds and cloud thresholds.")
     
     tile_collections = {}
+    
+    # Environment configs to maximize throughput for GDAL's virtual file system
     gdal_env = {
         'GDAL_HTTP_COOKIEFILE': os.path.expanduser('~/.urs_cookies'),
         'GDAL_HTTP_COOKIEJAR': os.path.expanduser('~/.urs_cookies'),
@@ -94,9 +114,11 @@ def stac_native_window_read(collection_id, assets_list, temp_dir):
     }
     
     def _fetch_single_band(idx, asset_key, url, window_obj):
+        """Thread-safe worker block for fetching independent spectral bands."""
         if asset_key == 'Fmask': fill_val = 255
         elif asset_key in ['SZA', 'SAA', 'VZA', 'VAA']: fill_val = 40000
         else: fill_val = -9999
+        
         with rasterio.open(url) as b_src:
             data = b_src.read(1, window=window_obj, boundless=True, fill_value=fill_val)
             if asset_key in ['SZA', 'SAA', 'VZA', 'VAA']:
@@ -104,16 +126,21 @@ def stac_native_window_read(collection_id, assets_list, temp_dir):
         return idx, data
 
     with rasterio.Env(**gdal_env):
-        # Tracking sequence progress through the generator
         for i, item in enumerate(filtered_items, 1):
             img_id = item.id 
             parsed_mgrs_tile = img_id.split('.')[2] 
+            
+            # Strict Filtering Directive: Drop unapproved marginal tiles
+            if parsed_mgrs_tile not in ALLOWED_MGRS_TILES:
+                print(f"  [{i}/{total_items}] [{img_id}] Dropping frame: Tile {parsed_mgrs_tile} is not in the approved whitelist.")
+                continue
+                
             cloud_cov = item.properties.get('eo:cloud_cover')
             
             if cloud_cov is None: 
                 print(f"  [{i}/{total_items}] [{img_id}] WARNING: STAC metadata is null. Excluding frame.")
                 continue
-            
+                
             if parsed_mgrs_tile not in tile_collections:
                 tile_collections[parsed_mgrs_tile] = {'items': {}, 'transform': None, 'crs': None, 'width': None, 'height': None, 'zone': None}
                 
@@ -136,13 +163,10 @@ def stac_native_window_read(collection_id, assets_list, temp_dir):
                         tile_data['width'] = cached_src.width
                         tile_data['height'] = cached_src.height
                         
-                        # EVIDENCE-BASED FIX: Robust UTM Zone Parsing
-                        # Handles COGs missing strict EPSG codes and fixes the Northern Hemisphere math bias.
                         epsg_code = CRS.from_user_input(cached_src.crs).to_epsg()
                         if epsg_code is not None:
-                            tile_data['zone'] = epsg_code % 100 # Modulo safely handles both North (326xx) and South (327xx)
+                            tile_data['zone'] = epsg_code % 100
                         else:
-                            # Fallback: Extract absolute provenance from the MGRS Tile ID directly
                             zone_match = re.search(r'T(\d+)', parsed_mgrs_tile)
                             if zone_match:
                                 tile_data['zone'] = int(zone_match.group(1))
@@ -165,7 +189,6 @@ def stac_native_window_read(collection_id, assets_list, temp_dir):
                         tile_data['width'] = window.width
                         tile_data['height'] = window.height
                         
-                        # EVIDENCE-BASED FIX: Robust UTM Zone Parsing (Download Block)
                         epsg_code = CRS.from_user_input(src.crs).to_epsg()
                         if epsg_code is not None:
                             tile_data['zone'] = epsg_code % 100
@@ -183,6 +206,7 @@ def stac_native_window_read(collection_id, assets_list, temp_dir):
                 num_assets = len(assets_list)
                 compiled_array = np.zeros((num_assets, tile_data['height'], tile_data['width']), dtype=np.int16)
                 
+                # Bypasses Python GIL IO blocking for massive concurrent fetch speeds
                 with concurrent.futures.ThreadPoolExecutor(max_workers=len(assets_list)) as executor:
                     futures = []
                     for idx, asset_key in enumerate(assets_list):
@@ -197,8 +221,14 @@ def stac_native_window_read(collection_id, assets_list, temp_dir):
                     
             except Exception as e:
                 print(f"  [{i}/{total_items}] Failed retrieval for {img_id}: {e}")
-                del tile_data['items'][img_id]
+                # Ensure corrupted or failed downloads are not retained in the manifest
+                if img_id in tile_data['items']:
+                    del tile_data['items'][img_id]
                 
+    # Strict Failure Handling: Halt if whitelist + bounds yield no data
+    if not tile_collections:
+        raise ValueError(f"CRITICAL ERROR: No valid tiles found for {collection_id} after enforcing ALLOWED_MGRS_TILES whitelist.")
+        
     return tile_collections
 
 s30_collections = stac_native_window_read("HLSS30.v2.0", ASSETS_S30, S30_TEMP_DIR)
@@ -293,8 +323,6 @@ def stream_native_stack_to_hdf5(h5f, group_path, tile_data, expected_sr, expecte
     grp = h5f.create_group(group_path)
 
     # 1. Pre-allocate HDF5 Datasets directly on the physical disk
-    # Reverted to Spatial Chunking: (1 frame, all bands, 256x256 pixels)
-    # This prevents the B-Tree index from rewriting identical blocks 175 times.
     chunk_h, chunk_w = min(h, 256), min(w, 256)
     
     sr_ds = grp.create_dataset('surface_reflectance', shape=(num_frames, expected_sr, h, w), 
