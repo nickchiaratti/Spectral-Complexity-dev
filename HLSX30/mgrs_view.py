@@ -5,8 +5,8 @@ import os
 
 # Your ROI Configuration
 #42.961778,-77.770166,43.342135,-77.376776
-ROI_LON_MIN = 14.9100; ROI_LON_MAX = 15.15
-ROI_LAT_MIN = 37.6900; ROI_LAT_MAX = 37.8300
+ROI_LON_MIN = -77.770166; ROI_LON_MAX = -77.376776
+ROI_LAT_MIN = 42.961778; ROI_LAT_MAX = 43.342135
 #ROI_LON_MIN = -77.770166; ROI_LON_MAX = -77.376776
 #ROI_LAT_MIN = 42.961778; ROI_LAT_MAX = 43.342135
 safe_bbox = [
@@ -19,7 +19,7 @@ catalog = pystac_client.Client.open("https://cmr.earthdata.nasa.gov/stac/LPCLOUD
 search = catalog.search(
     collections=["HLSS30.v2.0"],
     bbox=safe_bbox,
-    datetime="2024-06-01/2024-06-15", # Short timeframe just to grab spatial footprints
+    datetime="2020-12-01/2021-03-15", # Short timeframe just to grab spatial footprints
     limit=50
 )
 

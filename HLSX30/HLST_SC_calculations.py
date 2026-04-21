@@ -1,3 +1,7 @@
+'''
+Calculates derivative metrics for HDFEOS compliant grids. Stores calculated values in a 
+combined HARMONIZED grid to produce virtual constellation results. 
+'''
 import os
 import shutil
 import h5py

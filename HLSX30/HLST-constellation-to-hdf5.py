@@ -1,3 +1,10 @@
+'''
+Combines HDFEOS compliant grids in separate h5 files using a dynamically 
+centered Albers Equal Area coordinate grid into a single h5 file. 
+Implements an ROI bounding box for the combined data and a strict spatial 
+coverage guardrail to reject marginal swath overlaps.
+'''
+
 import os
 import h5py
 import rasterio
@@ -15,30 +22,44 @@ import SpecComplex as sc
 # ==========================================
 # 1. CONFIGURATION & DIRECTORIES
 # ==========================================
-Location = "MtEtna"
+Location = "Rochesterv2"
 
 if Location == "Rochesterv2":
+    SOURCE_CACHE = "Rochesterv2"
     ROI_LON_MIN = -77.770166; ROI_LON_MAX = -77.376776
     ROI_LAT_MIN = 42.961778; ROI_LAT_MAX = 43.342135
-elif Location == "Tait":
+    TANAGER_AVAILABLE = True
+if Location == "Tait":
+    
+    SOURCE_CACHE = "Rochesterv2"
     ROI_LON_MIN = -77.516127; ROI_LON_MAX = -77.461968
     ROI_LAT_MIN = 43.127698; ROI_LAT_MAX = 43.159168
+    TANAGER_AVAILABLE = True
 if Location == 'Guatemala-Debris':
     ROI_LON_MIN = -88.222000; ROI_LON_MAX = -87.822000
     ROI_LAT_MIN = 15.636200; ROI_LAT_MAX = 16.036200
+    TANAGER_AVAILABLE = False
 if Location == "MtEtna":
+    SOURCE_CACHE = "MtEtna"
     ROI_LON_MIN = 14.9100; ROI_LON_MAX = 15.0900
     ROI_LAT_MIN = 37.6900; ROI_LAT_MAX = 37.8300
+    TANAGER_AVAILABLE = False
+if Location == "MtEtna-Catania":
+    SOURCE_CACHE = "MtEtna-Catania"
+    ROI_LON_MIN = 14.800; ROI_LON_MAX = 15.35
+    ROI_LAT_MIN = 37.400; ROI_LAT_MAX = 37.9
+    TANAGER_AVAILABLE = False
     
-HLS_SOURCE_DIR = r"C:\satelliteImagery\HLS30"
-TANAGER_SOURCE_DIR = r"C:\satelliteImagery\Tanager\SourceData"
-COMBINED_OUTPUT_DIR = r"C:\satelliteImagery\HLST30"
+HLS_SOURCE_DIR = "C:/satelliteImagery/HLS30/"
+TANAGER_SOURCE_DIR = "C:/satelliteImagery/Tanager/SourceData"
+COMBINED_OUTPUT_DIR = "C:/satelliteImagery/HLST30/"
 
 INPUT_NATIVE_HDF5 = os.path.join(HLS_SOURCE_DIR, f"HLS_{Location}_STAC_Native_2025.h5")
-# New modular ingestion source for Tanager Hyperspectral data
-INPUT_NATIVE_TANAGER_HDF5 = os.path.join(TANAGER_SOURCE_DIR, "SKIP")#"Tanager_Native_Stack_HDFEOS.h5")
-
-OUTPUT_MASTER_HDF5 = os.path.join(COMBINED_OUTPUT_DIR, f"HLST_{Location}_Harmonized_2025.h5")
+if TANAGER_AVAILABLE:
+    INPUT_NATIVE_TANAGER_HDF5 = os.path.join(TANAGER_SOURCE_DIR, "Tanager_Native_Stack_HDFEOS.h5")
+else:
+    INPUT_NATIVE_TANAGER_HDF5 = os.path.join(TANAGER_SOURCE_DIR, "SKIP")#"Tanager_Native_Stack_HDFEOS.h5")
+OUTPUT_MASTER_HDF5 = os.path.join(COMBINED_OUTPUT_DIR, f"HLST_{Location}_Harmonized.h5")
 
 S30_WAVELENGTHS = [0.443, 0.490, 0.560, 0.665, 0.705, 0.740, 0.783, 0.842, 0.865, 0.945, 1.375, 1.610, 2.190]
 L30_SR_WAVELENGTHS = [0.443, 0.482, 0.561, 0.655, 0.865, 1.609, 2.201, 1.373] 
@@ -52,6 +73,8 @@ safe_bbox = [min(safe_bbox[0], safe_bbox[2]), min(safe_bbox[1], safe_bbox[3]), m
 TARGET_RESOLUTION = 30.0
 
 # --- Pixel Mask Configuration ---
+# Strict 85% spatial coverage threshold to prevent edge collisions
+MIN_ROI_COVERAGE_PERCENT = 70.0 
 SUN_ELEVATION_THRESHOLD = 30
 # HLS Specific Configuration (Unified Fmask for both S30 and L30)
 # Bits 0-5: cirrus, cloud, adj cloud/shadow, cloud shadow, snow/ice, water
@@ -65,12 +88,23 @@ TANAGER_UNCERTAINTY_THRESHOLD = 0.1
 TANAGER_AEROSOL_THRESHOLD = 0.35
 
 # ==========================================
-# 2. MASTER GRID PRE-CALCULATION (USGS ARD)
+# 2. MASTER GRID PRE-CALCULATION (DYNAMIC ALBERS)
 # ==========================================
 def calculate_master_grid(bbox, resolution):
-    """Calculates a Unified Master Grid using USGS CONUS Albers Equal Area."""
-    lat_1, lat_2, central_lat, central_lon = 29.5, 45.5, 23.0, -96.0
-    proj_str = f"+proj=aea +lat_1={lat_1} +lat_2={lat_2} +lat_0={central_lat} +lon_0={central_lon} +x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs"
+    """
+    Calculates a Unified Master Grid using a Dynamically Centered Albers Equal Area projection.
+    Prevents spatial distortion on international targets by centering the map mathematically
+    on the chosen ROI using the Deetz & Adams One-Sixth Rule.
+    """
+    min_lon, min_lat, max_lon, max_lat = bbox
+    
+    # Derive optimal parameters directly from the spatial bounds
+    central_lon = (min_lon + max_lon) / 2.0
+    central_lat = (min_lat + max_lat) / 2.0
+    lat_1 = min_lat + (max_lat - min_lat) / 6.0
+    lat_2 = max_lat - (max_lat - min_lat) / 6.0
+    
+    proj_str = f"+proj=aea +lat_1={lat_1:.6f} +lat_2={lat_2:.6f} +lat_0={central_lat:.6f} +lon_0={central_lon:.6f} +x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs"
     dst_crs = CRS.from_string(proj_str)
     
     transformer = Transformer.from_crs("EPSG:4326", dst_crs, always_xy=True)
@@ -80,12 +114,14 @@ def calculate_master_grid(bbox, resolution):
     width = int(np.ceil((maxx - minx) / resolution))
     height = int(np.ceil((maxy - miny) / resolution))
     transform = transform_from_bounds(minx, miny, maxx, maxy, width, height)
+    
+    # Preserves HDF-EOS GCTP metadata provenance accurately
     gctp_params = [6378137.0, 6356752.314245, lat_1, lat_2, central_lon, central_lat, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
     
     return dst_crs, transform, width, height, "GCTP_ALBERS", 0, gctp_params
 
 master_crs, master_transform, master_width, master_height, master_proj, master_zone, master_gctp = calculate_master_grid(safe_bbox, TARGET_RESOLUTION)
-print(f"Master Grid Established: {master_width}x{master_height} at USGS CONUS Albers Equal Area")
+print(f"Master Grid Established: {master_width}x{master_height} at Dynamic Albers Equal Area (Centered: {master_gctp[5]:.2f}N, {master_gctp[4]:.2f}E)")
 
 # ==========================================
 # 3. HDFEOS5 ODL GENERATORS
@@ -378,21 +414,43 @@ def process_hls_master_stack(native_h5_path, daily_groups, expected_sr, expected
                                             qa_reject_mask=QA_REJECT_MASK,
                                             aerosol_accept_level=AEROSOL_ACCEPT_LEVEL).astype(np.uint8)
             
-            #try:
             rgba_img = sc.generate_rgba_image(stk_sr[idx])
             vis_data[idx, ...] = np.transpose(rgba_img, (2, 0, 1))
-            #except Exception:
-            #    vis_data[idx, 0] = np.clip(np.nan_to_num(stk_sr[idx, 3]) * 255 * 3, 0, 255).astype(np.uint8) 
-            #    vis_data[idx, 1] = np.clip(np.nan_to_num(stk_sr[idx, 2]) * 255 * 3, 0, 255).astype(np.uint8) 
-            #    vis_data[idx, 2] = np.clip(np.nan_to_num(stk_sr[idx, 1]) * 255 * 3, 0, 255).astype(np.uint8) 
-            #    vis_data[idx, 3] = 255
 
-    return {'sr': stk_sr, 'th': stk_th, 'fm': stk_fm, 'ag': stk_ag, 'tm': stk_tm, 'vis': vis_data, 'mask': stk_mask, 'meta': meta_arrays, 'count': num_frames}
+    valid_indices = []
+    for idx, date_str in enumerate(sorted_dates):
+        valid_pixels = np.sum(~np.isnan(stk_sr[idx, 0]))
+        coverage = (valid_pixels / (master_height * master_width)) * 100
+        if coverage >= MIN_ROI_COVERAGE_PERCENT:
+            valid_indices.append(idx)
+        else:
+            print(f"    Skipping HLS frame {date_str} (Coverage: {coverage:.1f}% < {MIN_ROI_COVERAGE_PERCENT}%)")
+
+    if not valid_indices:
+        return None
+        
+    num_valid = len(valid_indices)
+    stk_sr = stk_sr[valid_indices]
+    if expected_thermal > 0:
+        stk_th = stk_th[valid_indices]
+    stk_fm = stk_fm[valid_indices]
+    stk_tm = stk_tm[valid_indices]
+    stk_ag = stk_ag[valid_indices]
+    stk_mask = stk_mask[valid_indices]
+    vis_data = vis_data[valid_indices]
+    
+    meta_arrays['acq'] = [meta_arrays['acq'][i] for i in valid_indices]
+    meta_arrays['space'] = [meta_arrays['space'][i] for i in valid_indices]
+    meta_arrays['saz'] = [meta_arrays['saz'][i] for i in valid_indices]
+    meta_arrays['sel'] = [meta_arrays['sel'][i] for i in valid_indices]
+    meta_arrays['cc'] = [meta_arrays['cc'][i] for i in valid_indices]
+
+    return {'sr': stk_sr, 'th': stk_th, 'fm': stk_fm, 'ag': stk_ag, 'tm': stk_tm, 'vis': vis_data, 'mask': stk_mask, 'meta': meta_arrays, 'count': num_valid}
 
 # ==========================================
 # 5. MASTER EXECUTION
 # ==========================================
-print(f"\nBuilding Multi-Sensor ARD Cube (CONUS Albers): {OUTPUT_MASTER_HDF5}")
+print(f"\nBuilding Multi-Sensor ARD Cube (Dynamic Albers): {OUTPUT_MASTER_HDF5}")
 
 s30_daily, s30_tiles = fetch_native_hls_groups(INPUT_NATIVE_HDF5, "HLSS30")
 l30_daily, l30_tiles = fetch_native_hls_groups(INPUT_NATIVE_HDF5, "HLSL30")
@@ -424,12 +482,53 @@ with h5py.File(OUTPUT_MASTER_HDF5, 'w') as h5f:
         print(f"\nHarmonizing Tanager Hyperspectral Arrays from Pre-Compiled Native Stack: {INPUT_NATIVE_TANAGER_HDF5}")
         with h5py.File(INPUT_NATIVE_TANAGER_HDF5, 'r') as f_tan_native:
             src_grp = f_tan_native["HDFEOS/GRIDS/TANAGER/Data Fields"]
-            num_frames = src_grp["surface_reflectance"].shape[0]
+            total_num_frames = src_grp["surface_reflectance"].shape[0]
             band_count = src_grp["surface_reflectance"].shape[1]
 
-            if num_frames > 0:
-                datasets_created_info = []
-                grp_tanager = h5f.create_group("HDFEOS/GRIDS/TANAGER/Data Fields")
+            if total_num_frames > 0:
+                print("  Evaluating Tanager frame coverage against ROI...")
+                valid_t_indices = []
+                src_sr_dset = src_grp["surface_reflectance"]
+                
+                if "_FillValue" in src_sr_dset.attrs:
+                    fill_val_sr = src_sr_dset.attrs["_FillValue"]
+                elif src_sr_dset.fillvalue is not None:
+                    fill_val_sr = src_sr_dset.fillvalue
+                else:
+                    fill_val_sr = np.nan
+                if isinstance(fill_val_sr, (np.ndarray, list)): fill_val_sr = fill_val_sr[0]
+
+                src_crs_str_sr = src_sr_dset.attrs['spatial_ref']
+                src_crs_str_sr = src_crs_str_sr.decode('utf-8') if isinstance(src_crs_str_sr, bytes) else str(src_crs_str_sr)
+                src_crs_sr = CRS.from_user_input(src_crs_str_sr)
+                src_tf_sr = Affine.from_gdal(*src_sr_dset.attrs['GeoTransform'])
+
+                for t in range(total_num_frames):
+                    src_data = src_sr_dset[t, 0, ...]
+                    incoming = np.full((1, master_height, master_width), fill_val_sr, dtype=src_sr_dset.dtype)
+                    reproject(
+                        source=src_data, destination=incoming,
+                        src_transform=src_tf_sr, src_crs=src_crs_sr,
+                        dst_transform=master_transform, dst_crs=master_crs,
+                        resampling=Resampling.nearest, src_nodata=fill_val_sr, dst_nodata=fill_val_sr
+                    )
+                    
+                    if np.isnan(fill_val_sr):
+                        valid_pixels = np.sum(~np.isnan(incoming[0]))
+                    else:
+                        valid_pixels = np.sum(incoming[0] != fill_val_sr)
+                    
+                    coverage = (valid_pixels / (master_height * master_width)) * 100
+                    if coverage >= MIN_ROI_COVERAGE_PERCENT:
+                        valid_t_indices.append(t)
+                    else:
+                        print(f"    Skipping Tanager frame {t} (Coverage: {coverage:.1f}% < {MIN_ROI_COVERAGE_PERCENT}%)")
+
+                num_frames = len(valid_t_indices)
+                
+                if num_frames > 0:
+                    datasets_created_info = []
+                    grp_tanager = h5f.create_group("HDFEOS/GRIDS/TANAGER/Data Fields")
                 
                 # Clone METADATA group to preserve deep JSON origin provenance 
                 if "METADATA" in f_tan_native:
@@ -448,9 +547,7 @@ with h5py.File(OUTPUT_MASTER_HDF5, 'w') as h5f:
                     out_shape = (num_frames, bands, master_height, master_width) if is_3d else (num_frames, master_height, master_width)
                     chunks = (1, bands, chunk_h, chunk_w) if is_3d else (1, chunk_h, chunk_w)
 
-                    # EVIDENCE-BASED FIX: Intrinsic vs Attribute Fill Value Resolution
-                    # Resolves HDF5 intrinsic fill properties vs GDAL user-defined attributes, 
-                    # while maintaining strict data purity requirements for scientific float arrays.
+                    # Resolves HDF5 intrinsic fill properties vs GDAL user-defined attributes
                     if "_FillValue" in src_dset.attrs:
                         fill_val = src_dset.attrs["_FillValue"]
                     elif src_dset.fillvalue is not None:
@@ -466,10 +563,13 @@ with h5py.File(OUTPUT_MASTER_HDF5, 'w') as h5f:
                     out_dset = grp_tanager.create_dataset(name, shape=out_shape, dtype=dtype, compression="gzip", compression_opts=4, fillvalue=fill_val, chunks=chunks)
                     datasets_created_info.append((name, dtype, len(out_shape), ["Time", "Band", "YDim", "XDim"] if is_3d else ["Time", "YDim", "XDim"]))
 
-                    # Dynamically port all scientific attributes (wavelengths, timestamps, IDs)
+                    # Dynamically port all scientific attributes
                     for k, v in src_dset.attrs.items():
                         if k not in ["DIMENSION_LIST", "REFERENCE_LIST", "CLASS", "PALETTE", "spatial_ref", "GeoTransform"]:
-                            out_dset.attrs[k] = v
+                            if isinstance(v, (np.ndarray, list)) and len(v) == total_num_frames and k in ['acquisition_time', 'spacecraft_id', 'sun_azimuth', 'sun_elevation', 'cloud_cover']:
+                                out_dset.attrs[k] = [v[idx] for idx in valid_t_indices] if isinstance(v, list) else v[valid_t_indices]
+                            else:
+                                out_dset.attrs[k] = v
                             
                     out_dset.attrs['spatial_ref'] = master_crs.to_wkt()
                     out_dset.attrs['GeoTransform'] = gdal_transform
@@ -485,10 +585,10 @@ with h5py.File(OUTPUT_MASTER_HDF5, 'w') as h5f:
                     # Strict Interpolation Rule: Nearest neighbor for masks/RGB, Cubic for continuous signals
                     resampling_algo = Resampling.nearest if dtype.name == 'uint8' else Resampling.cubic
 
-                    for t in range(num_frames):
+                    for out_idx, t in enumerate(valid_t_indices):
                         src_data = src_dset[t, ...]
                         
-                        # Pad the spatial arrays with a temporary band dimension to satisfy rasterio.warp requirements
+                        # Pad the spatial arrays with a temporary band dimension
                         if not is_3d: src_data = src_data[np.newaxis, ...]
                             
                         incoming = np.full((bands if is_3d else 1, master_height, master_width), fill_val, dtype=dtype)
@@ -500,7 +600,7 @@ with h5py.File(OUTPUT_MASTER_HDF5, 'w') as h5f:
                             resampling=resampling_algo, src_nodata=fill_val, dst_nodata=fill_val
                         )
                         
-                        out_dset[t, ...] = incoming if is_3d else incoming[0, ...]
+                        out_dset[out_idx, ...] = incoming if is_3d else incoming[0, ...]
 
                 # Generate the final Harmonized 'common_mask' utilizing the master grid data
                 print("  Generating Common Mask for Tanager on Master Grid...")
@@ -510,14 +610,14 @@ with h5py.File(OUTPUT_MASTER_HDF5, 'w') as h5f:
                 mask_dset.attrs['description'] = "0 = Invalid/Masked, 1 = Valid. Generated from SpecComplex ARD rules."
                 datasets_created_info.append(("common_mask", np.uint8, 3, ["Time", "YDim", "XDim"]))
 
-                for t_idx in range(num_frames):
-                    valid_mask = sc.get_tanager_mask(grp_tanager, t_idx, (master_height, master_width),
+                for out_idx in range(num_frames):
+                    valid_mask = sc.get_tanager_mask(grp_tanager, out_idx, (master_height, master_width),
                                                      sun_elevation_threshold=SUN_ELEVATION_THRESHOLD,
                                                      cloud_dilation=TANAGER_CLOUD_DILATION,
                                                      apply_cloud_mask=True,
                                                      uncertainty_threshold=TANAGER_UNCERTAINTY_THRESHOLD,
                                                      aerosol_depth_threshold=TANAGER_AEROSOL_THRESHOLD)
-                    mask_dset[t_idx, ...] = valid_mask.astype(np.uint8)
+                    mask_dset[out_idx, ...] = valid_mask.astype(np.uint8)
 
                 odl_blocks.append(generate_tanager_odl_string("TANAGER", master_width, master_height, master_transform, master_proj, master_zone, master_gctp, datasets_created_info, num_frames, band_count))
     else:

@@ -15,15 +15,33 @@ from pyproj import Transformer, CRS
 
 background_color = 'w' 
 text_color = 'black'
+TEXT_OVERLAY = True
 
-Location = "MtEtna"
-ARD_CUBE_PATH = f"C:/satelliteImagery/HLST30/HLST_{Location}_Harmonized_2025_SC_EM-7_Norm-bandCount.h5"
+Location = "Tait"
+ARD_CUBE_PATH = f"C:/satelliteImagery/HLST30/HLST_{Location}_Harmonized_SC_EM-7_Norm-bandCount.h5"
 OUTPUT_DIR = f"C:/satelliteImagery/HLST30/HLST_{Location}_Videos"
 
 COMPLEXITY_TYPE = 'sliding_volume_z_score'
 
 START_DATE = datetime(2020, 1, 1, tzinfo=timezone.utc)
 END_DATE = datetime(2021, 12, 31, tzinfo=timezone.utc)
+
+if Location == "Tait" or Location == "Rochesterv2":
+    TS_LOCATIONS = [
+    {'latlon': (43.142856, -77.508451), 'label': "West Tait Forest",                'color': 'tab:green'},
+    {'latlon': (43.144861, -77.501176), 'label': "East Tait Forest",                'color': 'tab:olive'},
+    {'latlon': (43.136910, -77.469462), 'label': "Artificial turf football field",  'color': 'tab:blue'},
+    {'latlon': (43.138241, -77.470873), 'label': "Recently added artificial turf",  'color': 'tab:cyan'},
+    {'latlon': (43.141297, -77.506256), 'label': "Tait Parking Lot",                'color': 'tab:red'},
+    {'latlon': (43.139411, -77.504005), 'label': "ROCX NITE Tarp",                  'color': 'tab:purple'},
+    ]
+elif Location == "MtEtna":
+    TS_LOCATIONS = [
+    {'latlon': (37.738, 14.970), 'label': "left",                'color': 'tab:green'},
+    {'latlon': (37.710, 15.000), 'label': "lower",                'color': 'tab:green'},
+    {'latlon': (37.738, 15.04), 'label': "right",                'color': 'tab:olive'},
+    {'latlon': (37.795, 15.005), 'label': "top",  'color': 'tab:blue'},
+    ]
 
 # ==========================================
 # --- Coverage & QA Filtering Configuration ---
@@ -32,42 +50,26 @@ END_DATE = datetime(2021, 12, 31, tzinfo=timezone.utc)
 #   'POI'        : (Recommended) Frame is rendered ONLY if ALL TS_LOCATIONS are within the frame's valid data coverage.
 #   'PERCENTAGE' : Frame is rendered if the overall valid-pixel ratio exceeds MIN_FRAME_VALIDITY_PERCENTAGE.
 # ==========================================
-COVERAGE_EVALUATION_MODE = 'POI'
+COVERAGE_EVALUATION_MODE = 'PERCENTAGE'
 
 # If True, validates pixels against the QA mask (cloud/water filters), meaning data must be both present AND clear.
 # If False, only checks that data physically exists (is not NaN / outside the valid satellite swath).
 ENFORCE_QA_MASKING = False
 
 # Used strictly if COVERAGE_EVALUATION_MODE = 'PERCENTAGE'
-MIN_FRAME_VALIDITY_PERCENTAGE = .5
+MIN_FRAME_VALIDITY_PERCENTAGE = .25
 
 # Video Output Configuration
-FPS = 4
+FPS = 2
 DPI = 300
-EXPORT_GIF = True
-GIF_DPI = 40 
+EXPORT_GIF = False
+GIF_DPI = 80 
 SHOW_PIXEL_INDICATORS = False
 
 # --- Localized Color Scale Configuration ---
 GLOBAL_COLOR_SCALE = True 
 COLOR_SCALE_POI_RADIUS = 100 # Pixel radius around TS_LOCATIONS to sample for statistical color limits
 
-# Time Series Locations (Latitude, Longitude)
-TS_LOCATIONS = [
-    {'latlon': (37.738, 14.970), 'label': "left",                'color': 'tab:green'},
-    {'latlon': (37.710, 15.000), 'label': "lower",                'color': 'tab:green'},
-    {'latlon': (37.738, 15.04), 'label': "right",                'color': 'tab:olive'},
-    {'latlon': (37.795, 15.005), 'label': "top",  'color': 'tab:blue'},
-
-
-
-    #{'latlon': (43.142856, -77.508451), 'label': "West Tait Forest",                'color': 'tab:green'},
-    #{'latlon': (43.144861, -77.501176), 'label': "East Tait Forest",                'color': 'tab:olive'},
-    #{'latlon': (43.136910, -77.469462), 'label': "Artificial turf football field",  'color': 'tab:blue'},
-    #{'latlon': (43.138241, -77.470873), 'label': "Recently added artificial turf",  'color': 'tab:cyan'},
-    #{'latlon': (43.141297, -77.506256), 'label': "Tait Parking Lot",                'color': 'tab:red'},
-    #{'latlon': (43.139411, -77.504005), 'label': "ROCX NITE Tarp",                  'color': 'tab:purple'},
-]
 
 # ==========================================
 # 2. UTILITY FUNCTIONS
@@ -205,7 +207,7 @@ def generate_videos():
                 unified_frames.append({
                     'sensor': source_spacecraft,
                     'dt': dt, 
-                    'dt_et': dt.astimezone(ZoneInfo("America/New_York")),
+                    'dt_et': dt.astimezone(ZoneInfo("UTC")),
                     'vol_dset': vol_ds,        
                     'vol_idx': global_idx,     
                     'ortho_dset': ortho_ds,    
@@ -403,9 +405,10 @@ def generate_videos():
                             ind_list[loc_idx].set_data([loc['x'] + 0.5], [loc['y'] + 0.5])
                             ind_list[loc_idx].set_markeredgecolor(loc['color'])
 
-                txt_rgb.set_text(time_str)
-                txt_comp.set_text(time_str)
-                txt_side.set_text(time_str)
+                if TEXT_OVERLAY:
+                    txt_rgb.set_text(time_str)
+                    txt_comp.set_text(time_str)
+                    txt_side.set_text(time_str)
                 
                 writer_rgb.grab_frame()
                 writer_comp.grab_frame()

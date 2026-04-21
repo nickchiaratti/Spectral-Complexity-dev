@@ -1,3 +1,7 @@
+'''
+Downloads HLS30 data for a specified ROI and time range from NASA Earth Access. 
+Merges downloaded imagery into a consolidated h5 file in native CRS grid. 
+'''
 import os
 import h5py
 import rasterio
@@ -17,13 +21,13 @@ import re
 # ==========================================
 # 1. CONFIGURATION & AUTHENTICATION
 # ==========================================
-cloud_threshold = 30
+cloud_threshold = 60
 
 print("Authenticating with NASA Earthdata...")
 earthaccess.login(strategy="all", persist=True)
 
-Location = "MtEtna"
-SOURCE_CACHE = False
+Location = "Rochesterv2"
+SOURCE_CACHE = "Rochesterv2"
 # Define exactly which MGRS tiles cover the Rochester ROI. 
 # Excludes marginal edge-collision tiles like T18TUN and T18TUP.
 
@@ -32,15 +36,15 @@ if Location == "Rochesterv2":
     SOURCE_CACHE = "Rochesterv2"
     ROI_LON_MIN = -77.770166; ROI_LON_MAX = -77.376776
     ROI_LAT_MIN = 42.961778; ROI_LAT_MAX = 43.342135
-    START_DATE = '2025-01-01'
-    END_DATE = '2025-12-31'
-    ALLOWED_MGRS_TILES = ['T17TQJ', 'T17TQH'] 
+    START_DATE = '2022-01-01'
+    END_DATE = '2026-03-31'
+    ALLOWED_MGRS_TILES = ['T17TQH'] 
 if Location == "Tait":
     SOURCE_CACHE = "Rochesterv2"
     ROI_LON_MIN = -77.516127; ROI_LON_MAX = -77.461968
     ROI_LAT_MIN = 43.127698; ROI_LAT_MAX = 43.159168
-    START_DATE = '2025-01-01'
-    END_DATE = '2025-12-31' 
+    START_DATE = '2018-01-01'
+    END_DATE = '2026-03-31' 
     ALLOWED_MGRS_TILES = ['T17TQH'] 
 if Location == 'Guatemala-Debris':
     ROI_LON_MIN = -88.222000; ROI_LON_MAX = -87.822000
@@ -51,9 +55,16 @@ if Location == 'Guatemala-Debris':
 if Location == "MtEtna":
     ROI_LON_MIN = 14.9100; ROI_LON_MAX = 15.0900
     ROI_LAT_MIN = 37.6900; ROI_LAT_MAX = 37.8300
-    START_DATE = '2020-12-01'
-    END_DATE = '2021-05-31' 
+    START_DATE = '2020-08-01'
+    END_DATE = '2021-07-31' 
     ALLOWED_MGRS_TILES = ['T33SVB','T33SWB'] 
+if Location == "MtEtna-Catania":
+    ROI_LON_MIN = 14.800; ROI_LON_MAX = 15.35
+    ROI_LAT_MIN = 37.400; ROI_LAT_MAX = 37.9
+    START_DATE = '2024-01-01'
+    END_DATE = '2025-01-01' 
+    ALLOWED_MGRS_TILES = ['T33SVB','T33SWB'] 
+
 
 HLSS30_OUTPUT_DIR = r"C:\satelliteImagery\HLS30\HLSS30-SourceData"
 HLSL30_OUTPUT_DIR = r"C:\satelliteImagery\HLS30\HLSL30-SourceData"
@@ -147,9 +158,19 @@ def stac_native_window_read(collection_id, assets_list, temp_dir):
             tile_data = tile_collections[parsed_mgrs_tile]
             out_tif = os.path.join(temp_dir, f"{img_id}.tif")
             
+            # STAC items from LPCLOUD for HLS often lack the 'platform' property
+            # We can reliably derive it from the product ID (e.g., HLS.S30... or HLS.L30...)
+            sensor_code = img_id.split('.')[1] if len(img_id.split('.')) > 1 else ''
+            if sensor_code == 'S30':
+                platform_id = 'Sentinel-2'
+            elif sensor_code == 'L30':
+                platform_id = 'Landsat'
+            else:
+                platform_id = item.properties.get('platform', 'UNKNOWN')
+                
             tile_data['items'][img_id] = {
                 'acquisition_time': item.datetime.timestamp(),
-                'spacecraft_id': item.properties.get('platform', 'UNKNOWN'),
+                'spacecraft_id': platform_id,
                 'cloud_cover': cloud_cov,
                 'filepath': out_tif
             }
@@ -355,17 +376,25 @@ def stream_native_stack_to_hdf5(h5f, group_path, tile_data, expected_sr, expecte
                 raise ValueError(f"CRITICAL ERROR: Metadata '{k}' for '{img_id}' is null. Halting pipeline to prevent data assumptions.")
 
         with rasterio.open(meta['filepath']) as src:
-            t_sr = src.read(list(range(1, expected_sr+1)))
+            from rasterio.windows import Window
+            target_transform = tile_data['transform']
+            w, h = tile_data['width'], tile_data['height']
+            target_left, target_top = target_transform * (0, 0)
+            col_off_float, row_off_float = ~src.transform * (target_left, target_top)
+            col_off, row_off = int(round(col_off_float)), int(round(row_off_float))
+            read_window = Window(col_off, row_off, w, h)
+
+            t_sr = src.read(list(range(1, expected_sr+1)), window=read_window, boundless=True, fill_value=-9999)
             sr_ds[idx, ...] = np.where(t_sr != -9999, t_sr.astype(np.float32) * 0.0001, np.nan)
             
             if expected_thermal > 0:
                 off = expected_sr + 1
-                t_th = src.read(list(range(off, off+expected_thermal)))
+                t_th = src.read(list(range(off, off+expected_thermal)), window=read_window, boundless=True, fill_value=-9999)
                 th_ds[idx, ...] = np.where(t_th != -9999, t_th.astype(np.float32) * 0.01, np.nan)
                 
-            fm_ds[idx, ...] = src.read(expected_fmask_idx).astype(np.uint8)[np.newaxis, ...]
+            fm_ds[idx, ...] = src.read(expected_fmask_idx, window=read_window, boundless=True, fill_value=255).astype(np.uint8)[np.newaxis, ...]
             
-            t_ag = src.read(list(range(expected_fmask_idx+1, expected_fmask_idx+5)))
+            t_ag = src.read(list(range(expected_fmask_idx+1, expected_fmask_idx+5)), window=read_window, boundless=True, fill_value=-9999)
             ag_mapped = np.where(t_ag != -9999, t_ag.astype(np.float32) * 0.01, np.nan)
             ag_ds[idx, ...] = ag_mapped
 
