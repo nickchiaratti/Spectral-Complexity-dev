@@ -21,13 +21,13 @@ import re
 # ==========================================
 # 1. CONFIGURATION & AUTHENTICATION
 # ==========================================
-cloud_threshold = 60
+cloud_threshold = 20
 
 print("Authenticating with NASA Earthdata...")
 earthaccess.login(strategy="all", persist=True)
 
-Location = "Rochesterv2"
-SOURCE_CACHE = "Rochesterv2"
+Location = "MtEtna-Catania"
+SOURCE_CACHE = "MtEtna-Catania"
 # Define exactly which MGRS tiles cover the Rochester ROI. 
 # Excludes marginal edge-collision tiles like T18TUN and T18TUP.
 

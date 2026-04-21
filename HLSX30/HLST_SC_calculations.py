@@ -34,7 +34,7 @@ CALC_NDBI = False
 CALC_MSD = False
 CALC_GLOBAL_ENDMEMBERS = False
 CALC_SLIDING_VOLUME = True
-CALC_Z_SCORE = True
+CALC_Z_SCORE = False
 
 # ==========================================
 # 2. WORKER FUNCTION (PARALLEL EXECUTION WITH TELEMETRY)
