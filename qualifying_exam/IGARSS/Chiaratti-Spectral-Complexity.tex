@@ -1,0 +1,197 @@
+\documentclass[conference,a4paper]{IEEEtran}
+\IEEEoverridecommandlockouts
+
+\usepackage[hidelinks]{hyperref}
+\usepackage[cmex10]{amsmath}%American Math Society(AMS) math formatting
+\usepackage{amssymb,amsfonts}%AMS extra symbols and fonts
+\interdisplaylinepenalty=2500%allow line breaks in multi-line formulas
+\usepackage{dblfloatfix}%fix double column figure ordering and placement
+
+\usepackage[ruled,vlined]{algorithm2e}
+\usepackage{graphicx}
+\graphicspath{{Figures/PDF/}{Figures/PNG/}}
+
+\usepackage{booktabs}
+\usepackage{siunitx}
+\usepackage{cite}
+\usepackage{texnames}
+\usepackage{bm,bbm}
+\usepackage{orcidlink}
+\usepackage{placeins}
+
+\usepackage{comment}
+\begin{comment}
+---- Comments from the Reviewers ----
+Review #187C
+*General Comments to Authors*
+How the methods are extended to incorporate multiple frames (temporal profiles) is not made clear. A typo: were is repeated in "were calculated". Most of the references are to early, not recent work.
+-----------
+Review #100C
+*General Comments to Authors*
+The motivation can be better clarified. Some symbols should be explained in detail.
+-----------
+Review #1101
+*General Comments to Authors*
+The paper presents a clear and well-executed extension of spectral complexity analysis to Landsat time series with convincing case-study results.
+Broader validation across multiple sites and longer archives would further strengthen the impact and generalizability of the work.
+-----------
+Review #1C7C
+*General Comments to Authors*
+This paper extends the spectral complexity metric from high-resolution single-frame image analysis to medium-resolution remote sensing time-series monitoring, proposing a subpixel activity monitoring method based on convex hull volume estimation of Gram matrices. The overall quality of the manuscript is good; the following issues are recommended to be addressed in the revision.
+(1)     The spectral complexity metric is sensitive to "spectral diversity injection" but may be insensitive to the expansion of homogeneous materials (e.g., pure concrete pavement). It is recommended to explicitly delineate the method's applicability boundaries and limitations in Section III (Results and Analysis).
+(2)     The manuscript does not clarify how to distinguish between "normal seasonal variations" and "anomalous activity events." It is recommended to discuss thresholding strategies (e.g., the 3σ criterion based on historical standard deviation) or incorporate an unsupervised anomaly detection module to enhance event discrimination.
+(3)     The 3×3 window size appears to be empirically selected without analysis of the trade-off between localization accuracy and noise robustness under different window sizes (e.g., 5×5, 7×7). A brief sensitivity analysis is recommended to justify this design choice.
+\end{comment}
+
+
+
+% DWM comment for overleaf
+\usepackage{xcolor}
+\newcommand{\DWM}[1]{\textcolor{red}{\textbf{DWM: #1}}}%DWM comment; requires package{xcolor}
+\newcommand{\NSC}[1]{\textcolor{blue}{\textbf{#1}}}%NSC comment; requires package{xcolor}
+% bold math vector
+\newcommand{\vecb}[1]{\mbox{\boldmath$#1$}}% use: \vecb{x}
+\begin{document}
+
+\title{\uppercase{Sub-Pixel Activity Monitoring in Landsat via Temporal Spectral Complexity}}
+
+\author{	\IEEEauthorblockN{Nicholas S.\ Chiaratti}
+	\IEEEauthorblockA{\textit{Rochester Institute of Technology}\\
+		Rochester, New York\\
+		nc3789@g.rit.edu}
+	\and
+	\IEEEauthorblockN{David W. Messinger\orcidlink{0000-0002-2273-9194}}
+	\IEEEauthorblockA{\textit{Rochester Institute of Technology}\\
+		Rochester, New York\\dwmpci@rit.edu}
+}
+
+
+\maketitle
+\begin{abstract}
+    Spectral image complexity serves as a metric for identifying regions of interest based on material diversity rather than \textit{a priori} target signatures. While prior work has applied this method to single-frame high-resolution collections, this study examines the utility of spectral complexity metrics for temporal monitoring in moderate-resolution multispectral imagery. We apply the maximum distance endmember extraction method with the Gram matrix convex hull volume estimation method to cloud-free time-series Landsat imagery utilizing a sliding window scheme to achieve sub-pixel material diversity analysis.
+
+    The results demonstrate that the spectral complexity metric functions as an indicator for land-use change. Beyond distinguishing man-made materials from natural backgrounds, the analysis reveals that temporal fluctuations in spectral complexity successfully identify seasonal usage trends in outdoor facilities and detect significant infrastructure transitions such as the initiation of construction activity. This metric is driven by the sub-pixel addition of spectrally diverse materials—such as vehicles, construction equipment, and synthetic materials which expands the convex hull volume. These findings validate temporal spectral complexity as a low computation cost indicator of activity levels, enabling moderate-resolution archives to address global monitoring challenges such as urbanization and infrastructure development where spatial resolution is otherwise insufficient.
+\end{abstract}
+
+\begin{IEEEkeywords}
+	Landsat, spectral complexity, remote sensing, spectral imaging, activity monitoring.
+\end{IEEEkeywords}
+
+\section{Introduction}
+
+Large area search and activity monitoring in remote sensing applications from satellites present significant challenges when target signatures are unknown or are variable. Target detection algorithms such as a matched filter or a spectral angle mapper rely on \textit{a priori} knowledge of target spectra to distinguish objects of interest from the background \cite{manolakis_hyperspectral_2003, schaum_linear_2003, chen_target_2023}. In surveillance applications where the goal is to identify changes in activity or regions of interest without predefined targets, these signature-based methods are often too narrowly focused \cite{ben_salem_anomaly_2014}. In development of methods to locate regions of interest without prior spectral knowledge, recent research has focused on metrics of spectral complexity \cite{messinger_metrics_2012, ziemann_using_2010}. This metric leverages the linear mixture model, which assumes that a mixed pixel's spectrum is a linear combination of constituent pure materials, or endmembers, present in the spatial sample~\cite{schott_subpixel_2003, lee_subpixel_2003}. 
+
+The spectral signatures of the mixed pixels are constrained within a convex hull defined by the endmembers in an $n$-dimensional spectral space formed by the spectral bands. Prior research established that the spectral complexity of a spatial region is proportional to the volume of this enclosing convex set \cite{messinger_metrics_2012, ziemann_using_2010}.  Regions exhibiting high material diversity, such as those containing man-made structures, occupy a significantly larger volume in the spectral space than spectrally homogeneous natural materials. This complexity is quantified by computing the determinant of the Gram matrix, a form of similarity matrix between vectors, which is proportional to the squared volume of the parallelotope formed by the endmembers. While this metric has been proven effective for large-area search in single-frame, high-resolution multi- and hyperspectral collections, its application to temporal analysis in lower spatial resolution multispectral time-series data remains unexplored. 
+
+As global earth observation archives expand, leveraging these massive time-series datasets to detect human-scale activity remains challenging when specific target signatures are unknown \cite{chi_big_2016, zhu_continuous_2020}. This study addresses the need for signature-agnostic temporal monitoring by extending % addressing 187C and 100C with more modern reference and  wording aligning with my QE work
+the Gram matrix volume estimation to the temporal domain to monitor pattern of life activity in moderate-resolution satellite imagery. While the Landsat archive provides temporal depth, its $30\,m$ ground sample distance is often too coarse to resolve specific objects like vehicles in a scene \cite{xiaolu_change_2011}. We build off the original implementation of the approach, but to improve the localization precision of the results, we apply a sliding window scheme. This approach spatially convolves the spectral response, causing high-complexity regions to appear as clusters of elevated spectral complexity analogous to a point spread function. This spatial spread indicates a centroid location for the spectrally complex regions, achieving sub-pixel localization accuracy despite the coarse sampling of the sensor. We hypothesize that the transient inclusion of spectrally diverse materials, such as the glass, metal, and paint that vehicles are composed of, expands the convex hull volume. By evaluating the temporal changes of these resulting complexity spikes, we can monitor activity levels that are otherwise invisible to standard spatial analysis.
+
+\section{Methods}
+
+\subsection{Dataset Selection and Preparation}
+To investigate the temporal evolution of spectral complexity, this study utilized multispectral imagery from the Landsat archive \cite{earth_resources_observation_and_science_eros_center_landsat_2022}. The analysis combined data from the Landsat 8 and 9 Operational Land Imager (OLI) surface reflectance products. All seven spectral bands included in Landsat surface reflectance products, as shown in Table \ref{tab:LandsatBands}, were used in this study. Images converted to surface reflectance are preferred in spectral complexity analysis to reduce the influence of atmospheric effects and increase temporal consistency \cite{wulder_current_2019}.  We integrated acquisitions from both Landsat sensors to maximize temporal density. While the revisit rate of each sensor is 16 days, their combined revisit capability is approximately 8 days.
+\begin{table}[ht]
+    \centering
+    \caption{Landsat Spectral Bands Utilized for Volume Estimation}
+    \label{tab:LandsatBands}
+    \begin{tabular}{cccc}
+    \hline
+    \textbf{Band} & \textbf{Name} & \textbf{Wavelength} ($\mu$m) & \textbf{Resolution} (m) \\
+    \hline
+    1 & Coastal Aerosol      & 0.43 -- 0.45 & 30 \\
+    2 & Blue                 & 0.45 -- 0.51 & 30 \\
+    3 & Green                & 0.53 -- 0.59 & 30 \\
+    4 & Red                  & 0.64 -- 0.67 & 30 \\
+    5 & Near Infrared        & 0.85 -- 0.88 & 30 \\
+    6 & Shortwave Infrared 1 & 1.57 -- 1.65 & 30 \\
+    7 & Shortwave Infrared 2 & 2.11 -- 2.29 & 30 \\
+    \hline
+    \end{tabular}
+\end{table}
+
+The imagery was spatially subset with a bounding box centered upon the Rochester Institute of Technology (RIT) Tait Preserve in Rochester, NY. %Eliminated the arbitrary coordinates: , defined by the coordinates: Longitude -77.688990 to -77.660365 and Latitude 43.072486 to 43.093298. 
+This semi-suburban region contains a mix of large parking lots, structures of varying sizes, and natural vegetation, providing a variety of materials in the scene.
+
+Previous implementations of spectral complexity metrics have noted sensitivity to image noise and clouds which can impact endmember selection and inflate the convex hull volume \cite{messinger_metrics_2012}. To mitigate this, we implemented a frame selection process utilizing the pixel quality assessment mask provided with Landsat Collection 2 Level 2 products. These mask layers assess the probability of cloud, cloud shadow, and snow or ice per pixel. Utilizing the mask layer, frames were accepted for analysis only if all pixels possessed mask layer values corresponding to clear land  or clear water \cite{earth_resources_observation_and_science_eros_center_landsat_2022}.  This strict filtering criteria, applied to a 36 month time window including January 2023 through December 2025, yielded 24 frames suitable for analysis for the spatial bounding box. 
+
+\subsection{Endmember Determination}
+
+Endmember determination was performed using the maximum distance (MaxD) method \cite{schott_subpixel_2003, lee_subpixel_2003}. This approach relies on the linear mixture model assumption that spectral data within a spatial region approximates a simplex, where vertices correspond to spectrally pure endmembers. MaxD identifies these vertices by initializing with the pixel at the maximum Euclidean norm, and then iteratively projecting the remaining data into a subspace orthogonal to the currently identified endmembers to locate subsequent vertices \cite{lee_subpixel_2003}. This iterative extraction was repeated until the desired number of endmembers was found. For this analysis, eight endmembers (an empirically derived value) were extracted per spatial window. 
+
+% Reduced the endmember determination section since I did not change the algorithm nor need to rely on the definitions of specific endmembers in this paper
+
+%Endmember determination was performed using the maximum distance (MaxD) method \cite{schott_subpixel_2003}\cite{lee_subpixel_2003}. This approach relies on the linear mixture model assumption that the spectral data within a spatial region approximates a simplex where the vertices correspond to the spectrally pure endmembers in the region. A property of the simplex is that for any point contained within it, the point residing at the maximum Euclidean distance from it must be one of the vertices. 
+
+%The maximum distance method initializes by determining the Euclidean norm for all pixel vectors within a tile of pixels. The pixel with the maximum norm is selected as the first endmember ($\vecb{v}_1$), and the pixel with the minimum norm is selected as the second endmember ($\vecb{v}_2$) \cite{lee_subpixel_2003}. An iterative projection process is used to identify the subsequent endmembers. A difference vector is constructed as $\vecb{d}=\vecb{v}_1 - \vecb{v}_2$ and the pixel vectors are projected onto the subspace orthogonal to $\vecb{d}$ using the projection matrix \(\textbf{P}\) defined as 
+%\begin{equation}
+%    \textbf{P} = \textbf{I} - \vecb{d}(\vecb{d}^T \vecb{d})^{-1}\vecb{d}^T
+%\end{equation}
+%where here, \textbf{I} is the identity matrix.
+
+%This projection effectively collapses the current simplex vertices into a single point in the projected space. The pixel vector with the maximum distance to this point in the subspace is selected as the next endmember ($\vecb{v}_3$). For each subsequent iteration, the projection matrix is updated to be orthogonal to the subspace spanned by all currently identified endmembers. This process repeats until the desired number of endmembers is found. For this study, eight endmembers (an empirically derived value) were extracted per 3$\times$3 window to define the local spectral volume. Window sizes of five and seven were similarly evaluated and produced wider spatial spreading of the response. 
+
+\subsection{Spectral Complexity Metric}
+We employed the simplex volume estimation algorithm to quantify the spectral complexity of each tile of pixels. This algorithm uses the Gram matrix to calculate the hypervolume of the convex set approximated by the endmembers \cite{kostrikin_linear_1989, ziemann_using_2010, messinger_metrics_2012}. While the volume of a simplex defined by endmembers is traditionally calculated using the determinant of a matrix containing those vectors as columns, this necessitates that the vectors form a square matrix or requires dimensionality reduction to form one. To avoid the loss of information associated with dimensionality reduction, we utilize the Gram matrix, constructed such that the individual entries are the dot products of the endmember vectors; specifically, the $(i,j)$-th entry is defined as $\vecb{x_i} \cdot \vecb{x_j}$. The volume of the parallelotope formed by these vectors is then calculated as the square root of the determinant of this matrix, allowing for estimation directly in the collected spectral space.
+
+
+For a set of k endmember vectors, $\textbf{S}=[\vecb{v}_1,\vecb{v}_2,\cdots ,\vecb{v}_k ]$, volume estimation using the standard Gram matrix $\textbf{G}=\textbf{S}^T\textbf{S}$ % addressing 100C adding S= to clarify what S is
+calculates the volume relative to the origin of the coordinate system \cite{ziemann_using_2010}. In spectral data, this can inflate volume estimates for bright targets far from the origin \cite{messinger_metrics_2012}. To rectify this, we utilized the Local Gram Matrix, which calculates the volume of the parallelotope defined by the endmembers relative to a local reference point. We first identified the endmember closest to the mean of the set, denoted as $\vecb{v}_{ref}$, to serve as the local origin. The elements of the corresponding Local Gram Matrix \(\textbf{G}^\prime\) were calculated as the scalar products of the difference vectors, % addressing 187C removed repeated "were"
+\begin{equation}
+    \textbf{G}^\prime\ = (\vecb{v}_i-\vecb{v}_{ref})^T(\vecb{v}_j-\vecb{v}_{ref})
+\end{equation}
+where $i,j$ represent the indices of the remaining $k-1$ endmembers \cite{ziemann_using_2010, messinger_metrics_2012}. The volume of the parallelotope formed by these endmembers is calculated as the square root of the Local Gram Matrix determinant, \(\sqrt{|{\textbf{G}^\prime}|}\). For each 3$\times$3 pixel tile, we calculated the volume iteratively for \(k=3,4,\cdots ,8\) endmembers. This procedure yields a Gram volume function describing the volume as a function of the number of endmembers used to describe the space. Consistent with previous applications of this metric, the spectral complexity was defined as the maximum value of this volume function \cite{messinger_metrics_2012}. 
+
+A $3\times3$ pixel window was traversed across the image with a 1-pixel stride. Larger windows ($5\times5$, $7\times7$) presented results with increasing spatial low-pass filtering, reducing the spatial context desired for this study. % addressing 1C7C #3
+Within each local window the spectral complexity metric was calculated using the maximum distance endmember estimation with Gram matrix algorithm described above. The resulting complexity metrics were accumulated into a 2D map for the frame with the final value at each pixel computed as the mean of the volume estimates derived for windows covering that pixel. This sliding window aggregation provided a pixel-continuous representation of the spectral complexity metric, providing a spatial gradient that peaks at the physical sub-pixel centroid of the activity. % clarifying the sub-pixel claim further
+
+\section{Results and Analysis}
+\subsection{Spatial Distribution of Spectral Complexity}
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=.85\linewidth]{Figures/PNG/frame_0023_PixelAnalysis.png}
+    \caption{Color representation of the Landsat 8 collection from 2025-10-06. Overlaid markers correspond with Fig.~\ref{fig:TimeSeriesPlot}: purple is a forested region on the north side of the Tait Preserve, blue is a football field with artificial turf, orange is an athletic field with recently added artificial turf, and red is an ongoing construction site.}
+    \label{fig:Frame21Color-boxed}
+\end{figure}
+
+The application of the spectral complexity methodology successfully differentiated regions of high material diversity from spectrally homogeneous natural backgrounds. In Fig.~\ref{fig:Frame21Color-boxed} the region analyzed under this spectral complexity methodology can be seen in a ``true-color'' representation of the multispectral image from Landsat 8 taken on October 6th 2025. This frame is the last and most recent image that fit the frame selection criteria analyzed with the described methodology. The body of water to the left side of the image is part of the Tait Preserve which includes natural vegetation around the perimeter of the preserve. The white region on the right side of the image is a quarry and the white smaller patches to the left top and bottom are manmade structures. 
+
+The corresponding spectral complexity map generated by the sliding window method is shown in Fig.~\ref{fig:Frame21SCMap}. A visual comparison reveals a strong spatial correlation between man-made features (and class edges) and high spectral complexity, consistent with previous work \cite{messinger_metrics_2012}. The high complexity regions do not appear as single pixel points but instead as shapes with a visible centroid. This spatial spread highlights the center of the spectrally complex shape suggesting an ability to perform sub-pixel localization. Conversely, natural features within RIT's Tait Preserve and the surrounding area, such as the dense vegetation and open fields, exhibited consistently lower spectral complexity values throughout the series of images.  We note that the spectral complexity metric is not correlated with overall ``brightness.''  Regions such as the bright quarry are largely uniform in their material diversity and score low in spectral complexity, just as the dark water body does, while other bright regions composed largely of diverse, man-made materials score high. A feature of this metric is its insensitivity to the expansion of purely homogeneous materials (e.g., uniform concrete pavement), as it relies strictly on detecting spectral diversity. %addressing 1C7C #1
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=1\linewidth]{Figures//PNG/frame_0021_SpectralMap.png}
+    \caption{Spectral Complexity Map corresponding to the Landsat 8 frame taken on 2025-10-06.}
+    \label{fig:Frame21SCMap}
+\end{figure}
+
+\subsection{Temporal Analysis}
+\begin{figure*}
+    \centering
+    \includegraphics[width=.95\textwidth]{Figures/PNG/frame_0023_PixelAnalysis_TimeSeries.png}
+    \caption{Temporal spectral complexity profiles for the selected pixels in Fig.~\ref{fig:Frame21Color-boxed}. Y-axis is broken to incorporate peak value in orange while demonstrating temporal changes in the other series.}
+    \label{fig:TimeSeriesPlot}
+\end{figure*} 
+
+We extracted time series profiles for four distinct pixels shown in Fig.~\ref{fig:Frame21Color-boxed} outlined with colored boxes representing different land use classes. Outlined in purple is a natural environment control selection, outlined in blue and orange are athletic fields with artificial turf, and outlined in red is an active construction site. The resulting temporal profiles of the computed spectral complexity metric for each are plotted in Fig.~\ref{fig:TimeSeriesPlot}. The purple highlighted pixel is a forested region within the RIT Tait Preserve and this pixel exhibits a relatively flat temporal response. It exhibits slight increases in April of 2024 and 2025 which could indicate the initiation of the growing season coming out of winter and leading into spring. The stability of these control pixels confirms that the fluctuations observed in other targets are driven by human activity rather than atmospheric artifacts or sensor noise. 
+
+The blue outlined pixel located at the Penfield High School football field with artificial turf exhibits a seasonal periodicity. Unlike the random variance of noise, the complexity peaks consistently in the late summer and early fall of each year coinciding with active sports seasons. The metric reaches a minimum during winter and spring months corresponding with low use of the field. The baseline complexity of this pixel is consistently higher than the natural control sample due to the diversity of the materials on a artificial football field and surrounding track and stadium. The spatial sampling size of the Landsat pixels do not guarantee the visually green pixels to be pure pixels of the field. 
+
+The orange outlined pixel is located at the Penfield High School multipurpose field with artificial turf having been installed in 2025 \cite{noauthor_penfield_2025, district_penfield_nodate}. The addition of artificial turf to the field was begun in April 2025 which corresponds to the rapid increase in spectral complexity in the field under construction. Prior to the construction, the field exhibited seasonal fluctuations consistent with the natural control sample observed in the blue pixel. The installation of the synthetic surface in 2025 modified this behavior, resulting in the distinct complexity signature observed in the final data points of the sequence. 
+This temporal divergence validates the metric's sensitivity to land-use transitions. The spectral complexity does not merely step up to a new baseline; rather, it reaches a maximum in August 2025. This peak likely characterizes the phase of highest site disturbance—involving the exposure of aggregate sub-layers, the presence of construction machinery, and the staging of synthetic materials—before the installation was completed. This effectively demonstrates the capability of the metric to monitor the intensity of engineering works, not just their presence. Furthermore, the subsequent drop in complexity below the mid-construction baseline reflects the final transition from a diverse mixture of materials and equipment to a uniform synthetic surface. % taking advantage of reducing MaxD with additional analysis
+
+The profile for the red outlined pixel, containing a construction site at the Tait Preserve, exhibited a low baseline corresponding to a low use, uniform gravel parking lot from April 2023 through August 2025. In the last frame, the spectral volume spike corresponds with a time of active construction at the location \cite{Tait_Field_Station_2025}. The temporal changes in spectral complexity in the two construction sites illustrates the metric's utility for detection of significant change in material diversity due to the man-made activity. This rapid increase correctly identifies the introduction of spectrally diverse materials that are not resolvable with the spatial resolution of the sensor. 
+
+\section{Conclusion}
+This study successfully demonstrated that temporal spectral complexity has utility in applications of sub-pixel activity monitoring in moderate resolution Landsat imagery. The Gram matrix volume estimation method, previously used with high resolution multi- and hyperspectral snapshots, was adapted to a sliding window time series analysis leading to the detection and quantification of activity levels that are spatially unresolved by the sensor. 
+
+The results validated that high complexity metrics correlate to human activity regions like active construction sites against natural backgrounds. The addition of a sliding window provided a centroid based localization for high spectral complexity features. The metric also successfully detected the transition of a site from a static gravel lot to an active construction zone, characterized by a significant increase in spectral complexity. This confirms that the injection of diverse materials drives a detectable expansion of the convex hull even when the objects themselves are sub-pixel \cite{messinger_metrics_2012}.
+
+These findings establish temporal spectral complexity as a signature-agnostic tool for blind archival search and monitoring of pattern-of-life activities. % aligning with QE work and extracting the computation efficiency claim
+Future work will extend this methodology to the hyperspectral domain using data from the ROCX 2025 collection, alongside broader validation across diverse geographic sites. To explicitly distinguish anomalous activity events from normal seasonal variations, future study will integrate these chronologically stacked complexity profiles with harmonic regression models and statistical thresholding \cite{pasquarella_demystifying_2022}. %addressing 1101 with a comment about other locations, addressing 1C7C regarding seasonal variations, addressing 187C with the modern reference I used in QE 
+The anticipated higher spatial and spectral resolution of the sensors collecting during the event, with ground truth, will allow for a rigorous cross validation of the hypotheses in this study. 
+
+\FloatBarrier
+\bibliographystyle{IEEEtran}
+\bibliography{references}
+
+\end{document}

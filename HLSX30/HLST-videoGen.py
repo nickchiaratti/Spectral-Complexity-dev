@@ -15,27 +15,27 @@ from pyproj import Transformer, CRS
 
 background_color = 'w' 
 text_color = 'black'
-TEXT_OVERLAY = True
+TEXT_OVERLAY = False
 
-Location = "Tait"
+Location = "MtEtna-Catania"
 ARD_CUBE_PATH = f"C:/satelliteImagery/HLST30/HLST_{Location}_Harmonized_SC_EM-7_Norm-bandCount.h5"
 OUTPUT_DIR = f"C:/satelliteImagery/HLST30/HLST_{Location}_Videos"
 
-COMPLEXITY_TYPE = 'sliding_volume_z_score'
+COMPLEXITY_TYPE = 'sliding_volume_map'
 
 START_DATE = datetime(2020, 1, 1, tzinfo=timezone.utc)
-END_DATE = datetime(2021, 12, 31, tzinfo=timezone.utc)
+END_DATE = datetime(2025, 12, 31, tzinfo=timezone.utc)
 
 if Location == "Tait" or Location == "Rochesterv2":
     TS_LOCATIONS = [
-    {'latlon': (43.142856, -77.508451), 'label': "West Tait Forest",                'color': 'tab:green'},
-    {'latlon': (43.144861, -77.501176), 'label': "East Tait Forest",                'color': 'tab:olive'},
-    {'latlon': (43.136910, -77.469462), 'label': "Artificial turf football field",  'color': 'tab:blue'},
-    {'latlon': (43.138241, -77.470873), 'label': "Recently added artificial turf",  'color': 'tab:cyan'},
-    {'latlon': (43.141297, -77.506256), 'label': "Tait Parking Lot",                'color': 'tab:red'},
+    #{'latlon': (43.142856, -77.508451), 'label': "West Tait Forest",                'color': 'tab:green'},
+    #{'latlon': (43.144861, -77.501176), 'label': "East Tait Forest",                'color': 'tab:olive'},
+    #{'latlon': (43.136910, -77.469462), 'label': "Artificial turf football field",  'color': 'tab:blue'},
+    #{'latlon': (43.138241, -77.470873), 'label': "Recently added artificial turf",  'color': 'tab:cyan'},
+    #{'latlon': (43.141297, -77.506256), 'label': "Tait Parking Lot",                'color': 'tab:red'},
     {'latlon': (43.139411, -77.504005), 'label': "ROCX NITE Tarp",                  'color': 'tab:purple'},
     ]
-elif Location == "MtEtna":
+elif Location == "MtEtna" or Location == "MtEtna-Catania":
     TS_LOCATIONS = [
     {'latlon': (37.738, 14.970), 'label': "left",                'color': 'tab:green'},
     {'latlon': (37.710, 15.000), 'label': "lower",                'color': 'tab:green'},
@@ -50,7 +50,7 @@ elif Location == "MtEtna":
 #   'POI'        : (Recommended) Frame is rendered ONLY if ALL TS_LOCATIONS are within the frame's valid data coverage.
 #   'PERCENTAGE' : Frame is rendered if the overall valid-pixel ratio exceeds MIN_FRAME_VALIDITY_PERCENTAGE.
 # ==========================================
-COVERAGE_EVALUATION_MODE = 'PERCENTAGE'
+COVERAGE_EVALUATION_MODE = 'POI'
 
 # If True, validates pixels against the QA mask (cloud/water filters), meaning data must be both present AND clear.
 # If False, only checks that data physically exists (is not NaN / outside the valid satellite swath).
@@ -62,8 +62,8 @@ MIN_FRAME_VALIDITY_PERCENTAGE = .25
 # Video Output Configuration
 FPS = 2
 DPI = 300
-EXPORT_GIF = False
-GIF_DPI = 80 
+EXPORT_GIF = True
+GIF_DPI = 20 
 SHOW_PIXEL_INDICATORS = False
 
 # --- Localized Color Scale Configuration ---
