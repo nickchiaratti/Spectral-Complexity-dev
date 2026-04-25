@@ -2,7 +2,7 @@
 
 
 
-::: mermaid
+'''mermaid
 mindmap
   root((Spectral Complexity))
     Enhancements
@@ -38,7 +38,7 @@ mindmap
     Theory Questions
         Connection to manifolds?
         Correlate pixel volume to manifold snake?
-:::
+'''
 
 
 # **Technical Specification: Localized Spectral Complexity Index**
