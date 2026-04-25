@@ -1,5 +1,3 @@
-
-
 ::: mermaid
 mindmap
   root((Spectral Complexity))
