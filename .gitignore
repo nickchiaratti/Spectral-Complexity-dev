@@ -183,3 +183,8 @@ cython_debug/
 *.png
 *.pptx
 *.pdf
+*.js
+*.css
+*.woff
+*.docx
+*.html

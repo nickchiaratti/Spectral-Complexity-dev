@@ -1,6 +1,10 @@
-::: mermaid
+```mermaid
 mindmap
   root((Spectral Complexity))
+    Change detection
+        1D-CNN
+        Transformer
+        Full frame prediction?
     Enhancements
         Sliding Window
             Num Encmembers Extracted
@@ -34,4 +38,4 @@ mindmap
     Theory Questions
         Connection to manifolds?
         Correlate pixel volume to manifold snake?
-:::
+```
