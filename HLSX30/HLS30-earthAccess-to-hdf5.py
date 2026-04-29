@@ -21,13 +21,13 @@ import re
 # ==========================================
 # 1. CONFIGURATION & AUTHENTICATION
 # ==========================================
-cloud_threshold = 20
+cloud_threshold = 40
 
 print("Authenticating with NASA Earthdata...")
 earthaccess.login(strategy="all", persist=True)
 
-Location = "MtEtna-Catania"
-SOURCE_CACHE = "MtEtna-Catania"
+Location = "Tait"
+
 # Define exactly which MGRS tiles cover the Rochester ROI. 
 # Excludes marginal edge-collision tiles like T18TUN and T18TUP.
 
@@ -43,22 +43,25 @@ if Location == "Tait":
     SOURCE_CACHE = "Rochesterv2"
     ROI_LON_MIN = -77.516127; ROI_LON_MAX = -77.461968
     ROI_LAT_MIN = 43.127698; ROI_LAT_MAX = 43.159168
-    START_DATE = '2018-01-01'
+    START_DATE = '2014-01-01'
     END_DATE = '2026-03-31' 
     ALLOWED_MGRS_TILES = ['T17TQH'] 
 if Location == 'Guatemala-Debris':
+    SOURCE_CACHE = None
     ROI_LON_MIN = -88.222000; ROI_LON_MAX = -87.822000
     ROI_LAT_MIN = 15.636200; ROI_LAT_MAX = 16.036200
     START_DATE = '2020-08-01'
     END_DATE = '2020-10-31' 
     ALLOWED_MGRS_TILES = ['T16PCC'] 
 if Location == "MtEtna":
+    SOURCE_CACHE = "MtEtna-Catania"
     ROI_LON_MIN = 14.9100; ROI_LON_MAX = 15.0900
     ROI_LAT_MIN = 37.6900; ROI_LAT_MAX = 37.8300
     START_DATE = '2020-08-01'
     END_DATE = '2021-07-31' 
     ALLOWED_MGRS_TILES = ['T33SVB','T33SWB'] 
 if Location == "MtEtna-Catania":
+    SOURCE_CACHE = "MtEtna-Catania"
     ROI_LON_MIN = 14.800; ROI_LON_MAX = 15.35
     ROI_LAT_MIN = 37.400; ROI_LAT_MAX = 37.9
     START_DATE = '2024-01-01'

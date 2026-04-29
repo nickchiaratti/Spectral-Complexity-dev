@@ -19,11 +19,12 @@ import multiprocessing
 # ==========================================
 # 1. CONFIGURATION & FEATURE TOGGLES
 # ==========================================
-TILE_SIZE = 3          
+TILE_SIZE = 2         
 SLIDING_STRIDE = 1      
 #Z_SCORE_WINDOW_SIZE = 11
 
-NUM_ENDMEMBERS = 7
+NUM_ENDMEMBERS = 4
+CUSTOM_SUFFIX = '_2x2'
 NORM_PARAM = 'bandCount'
 MASKING = True 
 
@@ -35,7 +36,7 @@ CALC_NDBI = False
 CALC_MSD = False
 CALC_GLOBAL_ENDMEMBERS = False
 CALC_SLIDING_VOLUME = True
-CALC_Z_SCORE = False
+CALC_Z_SCORE = True
 
 # ==========================================
 # 2. WORKER FUNCTION (PARALLEL EXECUTION WITH TELEMETRY)
@@ -148,7 +149,7 @@ def compute_frame_metrics(payload):
 # ==========================================
 def process_ard_cube(filepath):
     print(f"\nEvaluating Initialization Directives for: {filepath}")
-    suffix = f"_SC_EM-{NUM_ENDMEMBERS}_Norm-{NORM_PARAM}"
+    suffix = f"_SC_EM-{NUM_ENDMEMBERS}_Norm-{NORM_PARAM}{CUSTOM_SUFFIX}"
     
     # OS Thread-Lock Isolation: If updating an existing file, create a strictly 
     # read-only cache for the parallel workers to prevent Windows SWMR crashes.

@@ -22,7 +22,7 @@ import SpecComplex as sc
 # ==========================================
 # 1. CONFIGURATION & DIRECTORIES
 # ==========================================
-Location = "Rochesterv2"
+Location = "Tait"
 
 if Location == "Rochesterv2":
     SOURCE_CACHE = "Rochesterv2"
@@ -30,7 +30,6 @@ if Location == "Rochesterv2":
     ROI_LAT_MIN = 42.961778; ROI_LAT_MAX = 43.342135
     TANAGER_AVAILABLE = True
 if Location == "Tait":
-    
     SOURCE_CACHE = "Rochesterv2"
     ROI_LON_MIN = -77.516127; ROI_LON_MAX = -77.461968
     ROI_LAT_MIN = 43.127698; ROI_LAT_MAX = 43.159168
