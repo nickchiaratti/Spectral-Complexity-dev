@@ -19,12 +19,12 @@ import multiprocessing
 # ==========================================
 # 1. CONFIGURATION & FEATURE TOGGLES
 # ==========================================
-TILE_SIZE = 2         
+TILE_SIZE = 3        
 SLIDING_STRIDE = 1      
 #Z_SCORE_WINDOW_SIZE = 11
 
-NUM_ENDMEMBERS = 4
-CUSTOM_SUFFIX = '_2x2'
+NUM_ENDMEMBERS = 7
+CUSTOM_SUFFIX = ''
 NORM_PARAM = 'bandCount'
 MASKING = True 
 
@@ -34,7 +34,7 @@ MASKING = True
 CALC_NDVI = False
 CALC_NDBI = False
 CALC_MSD = False
-CALC_GLOBAL_ENDMEMBERS = False
+CALC_GLOBAL_ENDMEMBERS = True
 CALC_SLIDING_VOLUME = True
 CALC_Z_SCORE = True
 

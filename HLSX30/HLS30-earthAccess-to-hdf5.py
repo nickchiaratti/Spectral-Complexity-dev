@@ -26,7 +26,7 @@ cloud_threshold = 40
 print("Authenticating with NASA Earthdata...")
 earthaccess.login(strategy="all", persist=True)
 
-Location = "Tait"
+Location = "Buenos-Aires"
 
 # Define exactly which MGRS tiles cover the Rochester ROI. 
 # Excludes marginal edge-collision tiles like T18TUN and T18TUP.
@@ -67,6 +67,15 @@ if Location == "MtEtna-Catania":
     START_DATE = '2024-01-01'
     END_DATE = '2025-01-01' 
     ALLOWED_MGRS_TILES = ['T33SVB','T33SWB'] 
+
+if Location == "BuenosAires":
+    SOURCE_CACHE = "BuenosAires"
+    ROI_LAT_MIN = -34.26; ROI_LAT_MAX = -34.80
+    ROI_LON_MIN = -58.79; ROI_LON_MAX = -58.45
+    START_DATE = '2025-01-01'
+    END_DATE = '2026-01-01' 
+    ALLOWED_MGRS_TILES = ['T21HUB', 'T21HUC'] 
+
 
 
 HLSS30_OUTPUT_DIR = r"C:\satelliteImagery\HLS30\HLSS30-SourceData"

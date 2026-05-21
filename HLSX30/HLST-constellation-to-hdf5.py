@@ -22,7 +22,7 @@ import SpecComplex as sc
 # ==========================================
 # 1. CONFIGURATION & DIRECTORIES
 # ==========================================
-Location = "Tait"
+Location = "BuenosAires"
 
 if Location == "Rochesterv2":
     SOURCE_CACHE = "Rochesterv2"
@@ -48,6 +48,11 @@ if Location == "MtEtna-Catania":
     ROI_LON_MIN = 14.800; ROI_LON_MAX = 15.35
     ROI_LAT_MIN = 37.400; ROI_LAT_MAX = 37.9
     TANAGER_AVAILABLE = False
+if Location == "BuenosAires":
+    SOURCE_CACHE = "BuenosAires"
+    ROI_LAT_MIN = -34.26; ROI_LAT_MAX = -34.80
+    ROI_LON_MIN = -58.79; ROI_LON_MAX = -58.45
+    TANAGER_AVAILABLE = True
     
 HLS_SOURCE_DIR = "C:/satelliteImagery/HLS30/"
 TANAGER_SOURCE_DIR = "C:/satelliteImagery/Tanager/SourceData"
