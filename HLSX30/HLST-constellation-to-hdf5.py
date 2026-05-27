@@ -22,7 +22,7 @@ import SpecComplex as sc
 # ==========================================
 # 1. CONFIGURATION & DIRECTORIES
 # ==========================================
-Location = "BuenosAires"
+Location = "Palisades"
 
 if Location == "Rochesterv2":
     SOURCE_CACHE = "Rochesterv2"
@@ -53,14 +53,24 @@ if Location == "BuenosAires":
     ROI_LAT_MIN = -34.26; ROI_LAT_MAX = -34.80
     ROI_LON_MIN = -58.79; ROI_LON_MAX = -58.45
     TANAGER_AVAILABLE = True
+if Location == "Palisades":
+    SOURCE_CACHE = "Palisades"
+    ROI_LON_MIN = -118.92; ROI_LON_MAX = -118.375
+    ROI_LAT_MIN = 34.85; ROI_LAT_MAX = 33.90
+    TANAGER_AVAILABLE = True
+if Location == "Malibu":
+    SOURCE_CACHE = "Palisades"
+    ROI_LON_MIN = -118.487; ROI_LON_MAX = -118.847
+    ROI_LAT_MIN = 33.905; ROI_LAT_MAX = 34.21
+    TANAGER_AVAILABLE = True
     
 HLS_SOURCE_DIR = "C:/satelliteImagery/HLS30/"
-TANAGER_SOURCE_DIR = "C:/satelliteImagery/Tanager/SourceData"
+TANAGER_SOURCE_DIR = f"C:/satelliteImagery/Tanager/{Location}_SourceData"
 COMBINED_OUTPUT_DIR = "C:/satelliteImagery/HLST30/"
 
 INPUT_NATIVE_HDF5 = os.path.join(HLS_SOURCE_DIR, f"HLS_{Location}_STAC_Native_2025.h5")
 if TANAGER_AVAILABLE:
-    INPUT_NATIVE_TANAGER_HDF5 = os.path.join(TANAGER_SOURCE_DIR, "Tanager_Native_Stack_HDFEOS.h5")
+    INPUT_NATIVE_TANAGER_HDF5 = os.path.join(TANAGER_SOURCE_DIR, f"Tanager_Native_Stack_{Location}.h5")
 else:
     INPUT_NATIVE_TANAGER_HDF5 = os.path.join(TANAGER_SOURCE_DIR, "SKIP")#"Tanager_Native_Stack_HDFEOS.h5")
 OUTPUT_MASTER_HDF5 = os.path.join(COMBINED_OUTPUT_DIR, f"HLST_{Location}_Harmonized.h5")
@@ -78,7 +88,7 @@ TARGET_RESOLUTION = 30.0
 
 # --- Pixel Mask Configuration ---
 # Strict 85% spatial coverage threshold to prevent edge collisions
-MIN_ROI_COVERAGE_PERCENT = 70.0 
+MIN_ROI_COVERAGE_PERCENT = 25.0 
 SUN_ELEVATION_THRESHOLD = 30
 # HLS Specific Configuration (Unified Fmask for both S30 and L30)
 # Bits 0-5: cirrus, cloud, adj cloud/shadow, cloud shadow, snow/ice, water
@@ -534,98 +544,184 @@ with h5py.File(OUTPUT_MASTER_HDF5, 'w') as h5f:
                     datasets_created_info = []
                     grp_tanager = h5f.create_group("HDFEOS/GRIDS/TANAGER/Data Fields")
                 
-                # Clone METADATA group to preserve deep JSON origin provenance 
-                if "METADATA" in f_tan_native:
-                    h5f.copy(f_tan_native["METADATA"], "METADATA_TANAGER")
+                    # Clone METADATA group to preserve deep JSON origin provenance 
+                    if "METADATA" in f_tan_native:
+                        h5f.copy(f_tan_native["METADATA"], "METADATA_TANAGER")
 
-                chunk_h, chunk_w = min(master_height, 256), min(master_width, 256)
-                gdal_transform = np.array([master_transform.c, master_transform.a, master_transform.b, master_transform.f, master_transform.d, master_transform.e], dtype='float64')
+                    chunk_h, chunk_w = min(master_height, 256), min(master_width, 256)
+                    gdal_transform = np.array([master_transform.c, master_transform.a, master_transform.b, master_transform.f, master_transform.d, master_transform.e], dtype='float64')
 
-                # Dynamically iterate and reproject all Native datasets (including pre-stretched ortho_visual)
-                for name in src_grp.keys():
-                    src_dset = src_grp[name]
-                    dtype = src_dset.dtype
-                    is_3d = len(src_dset.shape) == 4 # (Time, Bands, Y, X)
-                    bands = src_dset.shape[1] if is_3d else None
-                    
-                    out_shape = (num_frames, bands, master_height, master_width) if is_3d else (num_frames, master_height, master_width)
-                    chunks = (1, bands, chunk_h, chunk_w) if is_3d else (1, chunk_h, chunk_w)
-
-                    # Resolves HDF5 intrinsic fill properties vs GDAL user-defined attributes
-                    if "_FillValue" in src_dset.attrs:
-                        fill_val = src_dset.attrs["_FillValue"]
-                    elif src_dset.fillvalue is not None:
-                        fill_val = src_dset.fillvalue
-                    elif dtype.name == 'uint8':
-                        fill_val = 0  # Standard background for 8-bit visual and binary mask arrays
-                    else:
-                        raise AttributeError(f"CRITICAL ERROR: Scientific Dataset '{name}' missing fill value in Native Tanager Stack.")
+                    # Dynamically iterate and reproject all Native datasets (including pre-stretched ortho_visual)
+                    for name in src_grp.keys():
+                        src_dset = src_grp[name]
+                        dtype = src_dset.dtype
+                        is_3d = len(src_dset.shape) == 4 # (Time, Bands, Y, X)
+                        bands = src_dset.shape[1] if is_3d else None
                         
-                    if isinstance(fill_val, (np.ndarray, list)): fill_val = fill_val[0]
+                        out_shape = (num_frames, bands, master_height, master_width) if is_3d else (num_frames, master_height, master_width)
+                        chunks = (1, bands, chunk_h, chunk_w) if is_3d else (1, chunk_h, chunk_w)
 
-                    print(f"  Reprojecting dataset: {name}")
-                    out_dset = grp_tanager.create_dataset(name, shape=out_shape, dtype=dtype, compression="gzip", compression_opts=4, fillvalue=fill_val, chunks=chunks)
-                    datasets_created_info.append((name, dtype, len(out_shape), ["Time", "Band", "YDim", "XDim"] if is_3d else ["Time", "YDim", "XDim"]))
-
-                    # Dynamically port all scientific attributes
-                    for k, v in src_dset.attrs.items():
-                        if k not in ["DIMENSION_LIST", "REFERENCE_LIST", "CLASS", "PALETTE", "spatial_ref", "GeoTransform"]:
-                            if isinstance(v, (np.ndarray, list)) and len(v) == total_num_frames and k in ['acquisition_time', 'spacecraft_id', 'sun_azimuth', 'sun_elevation', 'cloud_cover']:
-                                out_dset.attrs[k] = [v[idx] for idx in valid_t_indices] if isinstance(v, list) else v[valid_t_indices]
-                            else:
-                                out_dset.attrs[k] = v
+                        # Resolves HDF5 intrinsic fill properties vs GDAL user-defined attributes
+                        if "_FillValue" in src_dset.attrs:
+                            fill_val = src_dset.attrs["_FillValue"]
+                        elif src_dset.fillvalue is not None:
+                            fill_val = src_dset.fillvalue
+                        elif dtype.name == 'uint8':
+                            fill_val = 0  # Standard background for 8-bit visual and binary mask arrays
+                        else:
+                            raise AttributeError(f"CRITICAL ERROR: Scientific Dataset '{name}' missing fill value in Native Tanager Stack.")
                             
-                    out_dset.attrs['spatial_ref'] = master_crs.to_wkt()
-                    out_dset.attrs['GeoTransform'] = gdal_transform
+                        if isinstance(fill_val, (np.ndarray, list)): fill_val = fill_val[0]
 
-                    # Extract Native Georeferencing
-                    src_crs_str = src_dset.attrs['spatial_ref']
-                    src_crs_str = src_crs_str.decode('utf-8') if isinstance(src_crs_str, bytes) else str(src_crs_str)
-                    src_crs = CRS.from_user_input(src_crs_str)
-                    
-                    src_gt = src_dset.attrs['GeoTransform']
-                    src_tf = Affine.from_gdal(*src_gt)
+                        print(f"  Reprojecting dataset: {name}")
+                        out_dset = grp_tanager.create_dataset(name, shape=out_shape, dtype=dtype, compression="gzip", compression_opts=4, fillvalue=fill_val, chunks=chunks)
+                        datasets_created_info.append((name, dtype, len(out_shape), ["Time", "Band", "YDim", "XDim"] if is_3d else ["Time", "YDim", "XDim"]))
 
-                    # Strict Interpolation Rule: Nearest neighbor for masks/RGB, Cubic for continuous signals
-                    resampling_algo = Resampling.nearest if dtype.name == 'uint8' else Resampling.cubic
+                        # Dynamically port all scientific attributes
+                        for k, v in src_dset.attrs.items():
+                            if k not in ["DIMENSION_LIST", "REFERENCE_LIST", "CLASS", "PALETTE", "spatial_ref", "GeoTransform"]:
+                                if isinstance(v, (np.ndarray, list)) and len(v) == total_num_frames and k in ['acquisition_time', 'spacecraft_id', 'sun_azimuth', 'sun_elevation', 'cloud_cover']:
+                                    out_dset.attrs[k] = [v[idx] for idx in valid_t_indices] if isinstance(v, list) else v[valid_t_indices]
+                                else:
+                                    out_dset.attrs[k] = v
+                                
+                        out_dset.attrs['spatial_ref'] = master_crs.to_wkt()
+                        out_dset.attrs['GeoTransform'] = gdal_transform
 
-                    for out_idx, t in enumerate(valid_t_indices):
-                        src_data = src_dset[t, ...]
+                        # Extract Native Georeferencing
+                        src_crs_str = src_dset.attrs['spatial_ref']
+                        src_crs_str = src_crs_str.decode('utf-8') if isinstance(src_crs_str, bytes) else str(src_crs_str)
+                        src_crs = CRS.from_user_input(src_crs_str)
                         
-                        # Pad the spatial arrays with a temporary band dimension
-                        if not is_3d: src_data = src_data[np.newaxis, ...]
+                        src_gt = src_dset.attrs['GeoTransform']
+                        src_tf = Affine.from_gdal(*src_gt)
+
+                        # Strict Interpolation Rule: Nearest neighbor for masks/RGB, Cubic for continuous signals
+                        resampling_algo = Resampling.nearest if dtype.name == 'uint8' else Resampling.cubic
+
+                        for out_idx, t in enumerate(valid_t_indices):
+                            src_data = src_dset[t, ...]
                             
-                        incoming = np.full((bands if is_3d else 1, master_height, master_width), fill_val, dtype=dtype)
-                        
-                        reproject(
-                            source=src_data, destination=incoming,
-                            src_transform=src_tf, src_crs=src_crs,
-                            dst_transform=master_transform, dst_crs=master_crs,
-                            resampling=resampling_algo, src_nodata=fill_val, dst_nodata=fill_val
-                        )
-                        
-                        out_dset[out_idx, ...] = incoming if is_3d else incoming[0, ...]
+                            # Pad the spatial arrays with a temporary band dimension
+                            if not is_3d: src_data = src_data[np.newaxis, ...]
+                                
+                            incoming = np.full((bands if is_3d else 1, master_height, master_width), fill_val, dtype=dtype)
+                            
+                            reproject(
+                                source=src_data, destination=incoming,
+                                src_transform=src_tf, src_crs=src_crs,
+                                dst_transform=master_transform, dst_crs=master_crs,
+                                resampling=resampling_algo, src_nodata=fill_val, dst_nodata=fill_val
+                            )
+                            
+                            out_dset[out_idx, ...] = incoming if is_3d else incoming[0, ...]
 
-                # Generate the final Harmonized 'common_mask' utilizing the master grid data
-                print("  Generating Common Mask for Tanager on Master Grid...")
-                mask_dset = grp_tanager.create_dataset('common_mask', shape=(num_frames, master_height, master_width), dtype='uint8', compression="gzip", compression_opts=4, fillvalue=0, chunks=(1, chunk_h, chunk_w))
-                mask_dset.attrs['spatial_ref'] = master_crs.to_wkt()
-                mask_dset.attrs['GeoTransform'] = gdal_transform
-                mask_dset.attrs['description'] = "0 = Invalid/Masked, 1 = Valid. Generated from SpecComplex ARD rules."
-                datasets_created_info.append(("common_mask", np.uint8, 3, ["Time", "YDim", "XDim"]))
+                    # Generate the final Harmonized 'common_mask' utilizing the master grid data
+                    print("  Generating Common Mask for Tanager on Master Grid...")
+                    mask_dset = grp_tanager.create_dataset('common_mask', shape=(num_frames, master_height, master_width), dtype='uint8', compression="gzip", compression_opts=4, fillvalue=0, chunks=(1, chunk_h, chunk_w))
+                    mask_dset.attrs['spatial_ref'] = master_crs.to_wkt()
+                    mask_dset.attrs['GeoTransform'] = gdal_transform
+                    mask_dset.attrs['description'] = "0 = Invalid/Masked, 1 = Valid. Generated from SpecComplex ARD rules."
+                    datasets_created_info.append(("common_mask", np.uint8, 3, ["Time", "YDim", "XDim"]))
 
-                for out_idx in range(num_frames):
-                    valid_mask = sc.get_tanager_mask(grp_tanager, out_idx, (master_height, master_width),
-                                                     sun_elevation_threshold=SUN_ELEVATION_THRESHOLD,
-                                                     cloud_dilation=TANAGER_CLOUD_DILATION,
-                                                     apply_cloud_mask=True,
-                                                     uncertainty_threshold=TANAGER_UNCERTAINTY_THRESHOLD,
-                                                     aerosol_depth_threshold=TANAGER_AEROSOL_THRESHOLD)
-                    mask_dset[out_idx, ...] = valid_mask.astype(np.uint8)
+                    for out_idx in range(num_frames):
+                        valid_mask = sc.get_tanager_mask(grp_tanager, out_idx, (master_height, master_width),
+                                                         sun_elevation_threshold=SUN_ELEVATION_THRESHOLD,
+                                                         cloud_dilation=TANAGER_CLOUD_DILATION,
+                                                         apply_cloud_mask=True,
+                                                         uncertainty_threshold=TANAGER_UNCERTAINTY_THRESHOLD,
+                                                         aerosol_depth_threshold=TANAGER_AEROSOL_THRESHOLD)
+                        mask_dset[out_idx, ...] = valid_mask.astype(np.uint8)
 
-                odl_blocks.append(generate_tanager_odl_string("TANAGER", master_width, master_height, master_transform, master_proj, master_zone, master_gctp, datasets_created_info, num_frames, band_count))
+                    odl_blocks.append(generate_tanager_odl_string("TANAGER", master_width, master_height, master_transform, master_proj, master_zone, master_gctp, datasets_created_info, num_frames, band_count))
+                else:
+                    print("  No Tanager frames met the minimum coverage threshold. Skipping Tanager processing.")
     else:
         print(f"\nWARNING: Native Tanager Stack not found at {INPUT_NATIVE_TANAGER_HDF5}. Skipping Tanager processing.")
+
+    # --- 5c. HARMONIZED Global Timeline and ortho_visual generation ---
+    print("\nGenerating Global Timeline and HARMONIZED ortho_visual dataset...")
+    grids = [g for g in h5f['/HDFEOS/GRIDS'].keys()]
+    timeline = []
+    for grid in grids:
+        data_grp = h5f[f"/HDFEOS/GRIDS/{grid}/Data Fields"]
+        if "surface_reflectance" in data_grp:
+            acq_times = data_grp["surface_reflectance"].attrs['acquisition_time']
+            spacecraft_ids = data_grp["surface_reflectance"].attrs.get('spacecraft_id', [b'UNKNOWN']*len(acq_times))
+            for i, ts in enumerate(acq_times):
+                sp_id = spacecraft_ids[i]
+                sp_str = sp_id.decode('utf-8') if isinstance(sp_id, bytes) else str(sp_id)
+                timeline.append({'time': ts, 'grid': grid, 'local_idx': i, 'spacecraft': sp_str})
+
+    timeline.sort(key=lambda x: x['time'])
+    total_frames = len(timeline)
+    
+    if total_frames > 0:
+        harm_grp = h5f.create_group('/HDFEOS/GRIDS/HARMONIZED/Data Fields')
+        chunk_h, chunk_w = min(master_height, 256), min(master_width, 256)
+        
+        ortho_ds = harm_grp.create_dataset('ortho_visual', shape=(total_frames, 4, master_height, master_width), dtype='uint8', compression="gzip", compression_opts=4, chunks=(1, 4, chunk_h, chunk_w))
+        ortho_ds.attrs['spatial_ref'] = master_crs.to_wkt()
+        gdal_transform = np.array([master_transform.c, master_transform.a, master_transform.b, master_transform.f, master_transform.d, master_transform.e], dtype='float64')
+        ortho_ds.attrs['GeoTransform'] = gdal_transform
+        
+        dt_str = h5py.string_dtype(encoding='ascii')
+        prov_grid = np.array([m['grid'] for m in timeline], dtype=dt_str)
+        prov_space = np.array([m['spacecraft'] for m in timeline], dtype=dt_str)
+        prov_time = np.array([m['time'] for m in timeline], dtype='float64')
+        prov_idx = np.array([m['local_idx'] for m in timeline], dtype='int32')
+        
+        ortho_ds.attrs.create('source_grid', data=prov_grid)
+        ortho_ds.attrs.create('source_spacecraft', data=prov_space)
+        ortho_ds.attrs['acquisition_time'] = prov_time
+        ortho_ds.attrs['source_frame_index'] = prov_idx
+        
+        for global_idx, meta in enumerate(timeline):
+            grid_name = meta['grid']
+            local_idx = meta['local_idx']
+            ortho_ds[global_idx, ...] = h5f[f"/HDFEOS/GRIDS/{grid_name}/Data Fields/ortho_visual"][local_idx, ...]
+            
+        print(f"  HARMONIZED ortho_visual created with {total_frames} frames.")
+        
+        harm_odl = f"""    GROUP=HARMONIZED
+        GridName="HARMONIZED"
+        XDim={master_width}
+        YDim={master_height}
+        UpperLeftPointMtrs=({master_transform.c:.6f},{master_transform.f:.6f})
+        LowerRightMtrs=({master_transform.c + master_transform.a * master_width:.6f},{master_transform.f + master_transform.e * master_height:.6f})
+        Projection={master_proj}
+        ZoneCode={master_zone}
+        SphereCode=12
+        ProjParams={str(tuple(master_gctp)).replace(' ', '').replace('(', '').replace(')', '')}
+        GROUP=Dimension
+            OBJECT=Dimension_1
+                DimensionName="Time"
+                Size={total_frames}
+            END_OBJECT=Dimension_1
+            OBJECT=Dimension_2
+                DimensionName="YDim"
+                Size={master_height}
+            END_OBJECT=Dimension_2
+            OBJECT=Dimension_3
+                DimensionName="XDim"
+                Size={master_width}
+            END_OBJECT=Dimension_3
+            OBJECT=Dimension_4
+                DimensionName="VisBand"
+                Size=4
+            END_OBJECT=Dimension_4
+        END_GROUP=Dimension
+        GROUP=DataField
+            OBJECT=DataField_1
+                DataFieldName="ortho_visual"
+                DataType=HDF5T_NATIVE_UINT8
+                DimList=("Time","VisBand","YDim","XDim")
+            END_OBJECT=DataField_1
+        END_GROUP=DataField
+        GROUP=MergedFields
+        END_GROUP=MergedFields
+    END_GROUP=HARMONIZED"""
+        odl_blocks.append(harm_odl)
 
     full_odl = "GROUP=SwathStructure\nEND_GROUP=SwathStructure\nGROUP=GridStructure\n" + "\n".join(odl_blocks) + "\nEND_GROUP=GridStructure\nGROUP=PointStructure\nEND_GROUP=PointStructure\nGROUP=ZaStructure\nEND_GROUP=ZaStructure\nEND\n"
     info_grp.create_dataset("StructMetadata.0", shape=(1,), dtype=h5py.string_dtype(encoding='ascii'), data=full_odl)

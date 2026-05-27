@@ -336,17 +336,17 @@ def process_volume_frame(frame_data, num_endmembers, gram_type, norm_type):
     Pixel Filtering: Only valid pixels are extracted into the 2D matrix.
     Returns the full volume curve, endmembers, and indices.
     """
-    print("Calculating Full FrameSpectral Complexity")
+    #print("Calculating Full FrameSpectral Complexity")
     bands, height, width = frame_data.shape
     img = np.transpose(frame_data, (1, 2, 0))
     image2D = np.reshape(img, (height * width, bands))
     # Check gram type
-    if gram_type == 'datasetMean': print("Localizing Gram to dataset mean")
-    elif gram_type == 'minEndmember': print("Localizing Gram to second endmember")
-    else: print("Localizing Gram to 0")
+    #if gram_type == 'datasetMean': print("Localizing Gram to dataset mean")
+    #elif gram_type == 'minEndmember': print("Localizing Gram to second endmember")
+    #else: print("Localizing Gram to 0")
     # Check norm type
-    if norm_type == 'bandCount': print(f"Normalizing Endmembers by √{bands}")
-    else: print("No Endmember Normalization Applied")
+    #if norm_type == 'bandCount': print(f"Normalizing Endmembers by √{bands}")
+    #else: print("No Endmember Normalization Applied")
     # Find endmembers
     endmembers, endmember_indices = maximumDistance(img, num_endmembers)
     meanVector = img.mean(axis=(0, 1))

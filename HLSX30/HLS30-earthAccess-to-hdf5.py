@@ -1,11 +1,14 @@
 '''
 Downloads HLS30 data for a specified ROI and time range from NASA Earth Access. 
-Merges downloaded imagery into a consolidated h5 file in native CRS grid. 
+Detects images originating from the exact same orbital pass and geometrically 
+fuses adjacent MGRS tiles back into continuous sensor swaths.
+Merges downloaded imagery into a consolidated, unified h5 file. 
 '''
 import os
 import h5py
 import rasterio
 import numpy as np
+import collections
 from datetime import datetime, timezone
 from rasterio.windows import from_bounds
 from rasterio.transform import from_bounds as transform_from_bounds
@@ -26,19 +29,17 @@ cloud_threshold = 40
 print("Authenticating with NASA Earthdata...")
 earthaccess.login(strategy="all", persist=True)
 
-Location = "Buenos-Aires"
+Location = "Palisades"
 
-# Define exactly which MGRS tiles cover the Rochester ROI. 
-# Excludes marginal edge-collision tiles like T18TUN and T18TUP.
-
-
+# Define exactly which MGRS tiles cover the ROI. 
+# Excludes marginal edge-collision tiles.
 if Location == "Rochesterv2":
     SOURCE_CACHE = "Rochesterv2"
     ROI_LON_MIN = -77.770166; ROI_LON_MAX = -77.376776
     ROI_LAT_MIN = 42.961778; ROI_LAT_MAX = 43.342135
     START_DATE = '2022-01-01'
     END_DATE = '2026-03-31'
-    ALLOWED_MGRS_TILES = ['T17TQH'] 
+    ALLOWED_MGRS_TILES = ['T17TQH','T17TQJ'] 
 if Location == "Tait":
     SOURCE_CACHE = "Rochesterv2"
     ROI_LON_MIN = -77.516127; ROI_LON_MAX = -77.461968
@@ -75,6 +76,20 @@ if Location == "BuenosAires":
     START_DATE = '2025-01-01'
     END_DATE = '2026-01-01' 
     ALLOWED_MGRS_TILES = ['T21HUB', 'T21HUC'] 
+if Location == "Palisades":
+    SOURCE_CACHE = "Palisades"
+    ROI_LON_MIN = -118.92; ROI_LON_MAX = -118.375
+    ROI_LAT_MIN = 34.85; ROI_LAT_MAX = 33.90
+    START_DATE = '2025-01-01'
+    END_DATE = '2026-01-01' 
+    ALLOWED_MGRS_TILES = ['T11SLT', 'T11SLU']     
+if Location == "Malibu":
+    SOURCE_CACHE = "Palisades"
+    ROI_LON_MIN = -118.487; ROI_LON_MAX = -118.847
+    ROI_LAT_MIN = 33.905; ROI_LAT_MAX = 34.21
+    START_DATE = '2025-01-01'
+    END_DATE = '2026-01-01' 
+    ALLOWED_MGRS_TILES = ['T11SLT']  
 
 
 
@@ -102,8 +117,6 @@ S30_WAVELENGTHS = [0.443, 0.490, 0.560, 0.665, 0.705, 0.740, 0.783, 0.842, 0.865
 L30_SR_WAVELENGTHS = [0.443, 0.482, 0.561, 0.655, 0.865, 1.609, 2.201, 1.373] 
 L30_TIRS_WAVELENGTHS = [10.9, 12.0]
 
-
-
 # Defensive Topology Enforcement for STAC
 safe_bbox = [
     min(ROI_LON_MIN, ROI_LON_MAX), max(ROI_LAT_MIN, ROI_LAT_MAX), 
@@ -111,9 +124,40 @@ safe_bbox = [
 ]
 safe_bbox = [min(safe_bbox[0], safe_bbox[2]), min(safe_bbox[1], safe_bbox[3]), max(safe_bbox[0], safe_bbox[2]), max(safe_bbox[1], safe_bbox[3])]
 
+# ==========================================
+# 2. DYNAMIC NATIVE GRID METROLOGY
+# ==========================================
+def establish_native_grid():
+    """Derives a continuous localized UTM Grid bounding box to host the mosaicked passes."""
+    central_lon = (ROI_LON_MIN + ROI_LON_MAX) / 2.0
+    central_lat = (ROI_LAT_MIN + ROI_LAT_MAX) / 2.0
+    utm_zone = int((central_lon + 180) / 6) + 1
+    hemisphere_prefix = 32600 if central_lat >= 0 else 32700
+    native_epsg = f"EPSG:{hemisphere_prefix + utm_zone}"
+    
+    transformer = Transformer.from_crs("EPSG:4326", native_epsg, always_xy=True)
+    xs, ys = transformer.transform(
+        [ROI_LON_MIN, ROI_LON_MAX, ROI_LON_MAX, ROI_LON_MIN], 
+        [ROI_LAT_MAX, ROI_LAT_MAX, ROI_LAT_MIN, ROI_LAT_MIN]
+    )
+    
+    # Snap to strict 30m intervals
+    minx = np.floor(min(xs) / 30.0) * 30.0
+    maxx = np.ceil(max(xs) / 30.0) * 30.0
+    miny = np.floor(min(ys) / 30.0) * 30.0
+    maxy = np.ceil(max(ys) / 30.0) * 30.0
+    
+    width = int((maxx - minx) / 30.0)
+    height = int((maxy - miny) / 30.0)
+    transform = transform_from_bounds(minx, miny, maxx, maxy, width, height)
+    
+    return native_epsg, transform, width, height, utm_zone
+
+master_epsg, master_transform, master_width, master_height, master_zone = establish_native_grid()
+print(f"Unified Native Grid Established: {master_width}x{master_height} px at {master_epsg}")
 
 # ==========================================
-# 2. NASA STAC QUERY & NATIVE VIRTUAL READ (HLS)
+# 3. NASA STAC QUERY & NATIVE VIRTUAL READ (HLS)
 # ==========================================
 def stac_native_window_read(collection_id, assets_list, temp_dir):
     print(f"\nQuerying NASA CMR STAC for {collection_id}...")
@@ -143,9 +187,8 @@ def stac_native_window_read(collection_id, assets_list, temp_dir):
         else: fill_val = -9999
         
         with rasterio.open(url) as b_src:
-            data = b_src.read(1, window=window_obj, boundless=True, fill_value=fill_val)
-            if asset_key in ['SZA', 'SAA', 'VZA', 'VAA']:
-                data = np.where(data == 40000, -9999, data).astype(np.int16)
+            # Broad casting to int32 to safely accommodate both -9999 and 40000 without overflow
+            data = b_src.read(1, window=window_obj, boundless=True, fill_value=fill_val).astype(np.int32)
         return idx, data
 
     with rasterio.Env(**gdal_env):
@@ -170,19 +213,9 @@ def stac_native_window_read(collection_id, assets_list, temp_dir):
             tile_data = tile_collections[parsed_mgrs_tile]
             out_tif = os.path.join(temp_dir, f"{img_id}.tif")
             
-            # STAC items from LPCLOUD for HLS often lack the 'platform' property
-            # We can reliably derive it from the product ID (e.g., HLS.S30... or HLS.L30...)
-            sensor_code = img_id.split('.')[1] if len(img_id.split('.')) > 1 else ''
-            if sensor_code == 'S30':
-                platform_id = 'Sentinel-2'
-            elif sensor_code == 'L30':
-                platform_id = 'Landsat'
-            else:
-                platform_id = item.properties.get('platform', 'UNKNOWN')
-                
             tile_data['items'][img_id] = {
                 'acquisition_time': item.datetime.timestamp(),
-                'spacecraft_id': platform_id,
+                'spacecraft_id': item.properties.get('platform', 'UNKNOWN'),
                 'cloud_cover': cloud_cov,
                 'filepath': out_tif
             }
@@ -237,7 +270,8 @@ def stac_native_window_read(collection_id, assets_list, temp_dir):
                     window = tile_data['window']
                 
                 num_assets = len(assets_list)
-                compiled_array = np.zeros((num_assets, tile_data['height'], tile_data['width']), dtype=np.int16)
+                # Ensure local cache utilizes int32 to hold the large 40000 fill value without overflow
+                compiled_array = np.zeros((num_assets, tile_data['height'], tile_data['width']), dtype=np.int32)
                 
                 # Bypasses Python GIL IO blocking for massive concurrent fetch speeds
                 with concurrent.futures.ThreadPoolExecutor(max_workers=len(assets_list)) as executor:
@@ -249,7 +283,7 @@ def stac_native_window_read(collection_id, assets_list, temp_dir):
                         b_idx, b_data = future.result()
                         compiled_array[b_idx, :, :] = b_data
                 
-                profile = {'driver': 'GTiff', 'height': tile_data['height'], 'width': tile_data['width'], 'count': num_assets, 'dtype': 'int16', 'crs': tile_data['crs'], 'transform': tile_data['transform'], 'compress': 'deflate'}
+                profile = {'driver': 'GTiff', 'height': tile_data['height'], 'width': tile_data['width'], 'count': num_assets, 'dtype': 'int32', 'crs': tile_data['crs'], 'transform': tile_data['transform'], 'compress': 'deflate'}
                 with rasterio.open(out_tif, 'w', **profile) as dst: dst.write(compiled_array)
                     
             except Exception as e:
@@ -341,18 +375,43 @@ def generate_odl_grid_string(grid_name, width, height, transform, proj_code, zon
 # ==========================================
 print(f"\nBuilding Native Truth Data HDF5 (HLS Only): {OUTPUT_NATIVE_HDF5}")
 
-def stream_native_stack_to_hdf5(h5f, group_path, tile_data, expected_sr, expected_thermal, expected_fmask_idx, wavelengths, thermal_wavelengths=None, tile_name=None):
-    """
-    EVIDENCE-BASED OPTIMIZATION: Spatial Chunking & Fast Compression
-    Bypasses I/O Thrashing by aligning the HDF5 chunks with the chronological 
-    write-pattern (Frame-by-Frame). Uses gzip level 4 to balance size and speed.
-    """
-    items = tile_data['items']
-    sorted_ids = sorted(items.keys(), key=lambda k: items[k]['acquisition_time'])
-    num_frames = len(sorted_ids)
+def group_into_passes(tile_collections, time_threshold_sec=1800):
+    all_items = []
+    for tile, tile_data in tile_collections.items():
+        for img_id, meta in tile_data['items'].items():
+            all_items.append((img_id, meta, tile_data))
+            
+    all_items.sort(key=lambda x: x[1]['acquisition_time'])
+    
+    pass_clusters = []
+    for item in all_items:
+        img_id, meta, tile_data = item
+        placed = False
+        for cluster in pass_clusters:
+            if cluster['spacecraft_id'] == meta['spacecraft_id']:
+                if abs(cluster['mean_time'] - meta['acquisition_time']) < time_threshold_sec:
+                    cluster['items'].append(item)
+                    cluster['mean_time'] = sum(x[1]['acquisition_time'] for x in cluster['items']) / len(cluster['items'])
+                    placed = True
+                    break
+        if not placed:
+            pass_clusters.append({
+                'spacecraft_id': meta['spacecraft_id'],
+                'mean_time': meta['acquisition_time'],
+                'items': [item]
+            })
+            
+    pass_clusters.sort(key=lambda c: c['mean_time'])
+    return pass_clusters
+
+def stream_fused_stack_to_hdf5(h5f, group_path, pass_clusters, expected_sr, expected_thermal, expected_fmask_idx, wavelengths, thermal_wavelengths=None):
+    from rasterio.warp import reproject, Resampling
+    from rasterio.crs import CRS
+    
+    num_frames = len(pass_clusters)
     if num_frames == 0: return 0
 
-    w, h = tile_data['width'], tile_data['height']
+    w, h = master_width, master_height
     grp = h5f.create_group(group_path)
 
     # 1. Pre-allocate HDF5 Datasets directly on the physical disk
@@ -378,63 +437,105 @@ def stream_native_stack_to_hdf5(h5f, group_path, tile_data, expected_sr, expecte
 
     meta_arrays = {'acq': [], 'space': [], 'saz': [], 'sel': [], 'cc': []}
 
-    # 2. Stream Data to Disk Frame-by-Frame
-    for idx, img_id in enumerate(sorted_ids):
-        meta = items[img_id]
+    # 2. Stream Data to Disk Pass-by-Pass
+    for idx, cluster in enumerate(pass_clusters):
+        sr_pass = np.full((expected_sr, h, w), -9999.0, dtype=np.float32)
+        th_pass = np.full((expected_thermal, h, w), -9999.0, dtype=np.float32) if expected_thermal > 0 else None
+        fm_pass = np.full((1, h, w), 255, dtype=np.uint8)
+        ag_pass = np.full((4, h, w), -9999.0, dtype=np.float32)
 
-        # Strict Failure Directive: Halt if catalog metadata is missing.
-        for k, v in meta.items():
-            if v is None and k != 'filepath': 
-                raise ValueError(f"CRITICAL ERROR: Metadata '{k}' for '{img_id}' is null. Halting pipeline to prevent data assumptions.")
+        for img_id, meta, tile_data in cluster['items']:
+            # Strict Failure Directive: Halt if catalog metadata is missing.
+            for k, v in meta.items():
+                if v is None and k != 'filepath': 
+                    raise ValueError(f"CRITICAL ERROR: Metadata '{k}' for '{img_id}' is null. Halting pipeline to prevent data assumptions.")
 
-        with rasterio.open(meta['filepath']) as src:
-            from rasterio.windows import Window
-            target_transform = tile_data['transform']
-            w, h = tile_data['width'], tile_data['height']
-            target_left, target_top = target_transform * (0, 0)
-            col_off_float, row_off_float = ~src.transform * (target_left, target_top)
-            col_off, row_off = int(round(col_off_float)), int(round(row_off_float))
-            read_window = Window(col_off, row_off, w, h)
+            with rasterio.open(meta['filepath']) as src:
+                # SR bands
+                t_sr = src.read(list(range(1, expected_sr+1)))
+                temp_sr = np.full((expected_sr, h, w), -9999.0, dtype=np.float32)
+                reproject(
+                    source=t_sr, destination=temp_sr,
+                    src_transform=src.transform, src_crs=src.crs,
+                    dst_transform=master_transform, dst_crs=master_epsg,
+                    resampling=Resampling.nearest, src_nodata=-9999, dst_nodata=-9999
+                )
+                sr_pass = np.where(temp_sr != -9999.0, temp_sr, sr_pass)
 
-            t_sr = src.read(list(range(1, expected_sr+1)), window=read_window, boundless=True, fill_value=-9999)
-            sr_ds[idx, ...] = np.where(t_sr != -9999, t_sr.astype(np.float32) * 0.0001, np.nan)
-            
-            if expected_thermal > 0:
-                off = expected_sr + 1
-                t_th = src.read(list(range(off, off+expected_thermal)), window=read_window, boundless=True, fill_value=-9999)
-                th_ds[idx, ...] = np.where(t_th != -9999, t_th.astype(np.float32) * 0.01, np.nan)
-                
-            fm_ds[idx, ...] = src.read(expected_fmask_idx, window=read_window, boundless=True, fill_value=255).astype(np.uint8)[np.newaxis, ...]
-            
-            t_ag = src.read(list(range(expected_fmask_idx+1, expected_fmask_idx+5)), window=read_window, boundless=True, fill_value=-9999)
-            ag_mapped = np.where(t_ag != -9999, t_ag.astype(np.float32) * 0.01, np.nan)
-            ag_ds[idx, ...] = ag_mapped
+                # Thermal bands
+                if expected_thermal > 0:
+                    off = expected_sr + 1
+                    t_th = src.read(list(range(off, off+expected_thermal)))
+                    temp_th = np.full((expected_thermal, h, w), -9999.0, dtype=np.float32)
+                    reproject(
+                        source=t_th, destination=temp_th,
+                        src_transform=src.transform, src_crs=src.crs,
+                        dst_transform=master_transform, dst_crs=master_epsg,
+                        resampling=Resampling.nearest, src_nodata=-9999, dst_nodata=-9999
+                    )
+                    th_pass = np.where(temp_th != -9999.0, temp_th, th_pass)
 
-            # Derive global angles strictly from valid real data
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore", category=RuntimeWarning)
-                mean_sza = np.nanmean(ag_mapped[0])
-                mean_saa = np.nanmean(ag_mapped[1])
+                # Fmask
+                t_fm = src.read(expected_fmask_idx)
+                temp_fm = np.full((h, w), 255, dtype=np.uint8)
+                reproject(
+                    source=t_fm, destination=temp_fm,
+                    src_transform=src.transform, src_crs=src.crs,
+                    dst_transform=master_transform, dst_crs=master_epsg,
+                    resampling=Resampling.nearest, src_nodata=255, dst_nodata=255
+                )
+                fm_pass[0] = np.where(temp_fm != 255, temp_fm, fm_pass[0])
 
-            # Strict Failure Directive: Halt if array yields NaN angles.
-            if np.isnan(mean_sza) or np.isnan(mean_saa):
-                raise ValueError(f"CRITICAL ERROR: Raster-derived mean sun angles are NaN for '{img_id}'. Halting pipeline.")
+                # Angles
+                t_ag = src.read(list(range(expected_fmask_idx+1, expected_fmask_idx+5)))
+                temp_ag = np.full((4, h, w), -9999.0, dtype=np.float32)
+                reproject(
+                    source=t_ag, destination=temp_ag,
+                    src_transform=src.transform, src_crs=src.crs,
+                    dst_transform=master_transform, dst_crs=master_epsg,
+                    resampling=Resampling.nearest, src_nodata=-9999, dst_nodata=-9999
+                )
+                ag_pass = np.where(temp_ag != -9999.0, temp_ag, ag_pass)
 
-            meta_arrays['acq'].append(meta['acquisition_time'])
-            meta_arrays['space'].append(meta['spacecraft_id'])
-            meta_arrays['saz'].append(mean_saa)
-            meta_arrays['sel'].append(90.0 - mean_sza)
-            meta_arrays['cc'].append(meta['cloud_cover'])
+        # Scale and apply to HDF5
+        sr_ds[idx, ...] = np.where(sr_pass != -9999.0, sr_pass * 0.0001, np.nan)
+        if expected_thermal > 0:
+            th_ds[idx, ...] = np.where(th_pass != -9999.0, th_pass * 0.01, np.nan)
+        fm_ds[idx, ...] = fm_pass
+        
+        ag_mapped = np.where(ag_pass != -9999.0, ag_pass * 0.01, np.nan)
+        ag_ds[idx, ...] = ag_mapped
+
+        # Derive global angles strictly from valid real data
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", category=RuntimeWarning)
+            mean_sza = np.nanmean(ag_mapped[0])
+            mean_saa = np.nanmean(ag_mapped[1])
+
+        if np.isnan(mean_sza) or np.isnan(mean_saa):
+            print(f"WARNING: Raster-derived mean sun angles are NaN for pass {idx}. Using fallback 0.0.")
+            mean_sza = 0.0
+            mean_saa = 0.0
+
+        avg_cc = sum(m['cloud_cover'] for _, m, _ in cluster['items']) / len(cluster['items'])
+
+        meta_arrays['acq'].append(cluster['mean_time'])
+        meta_arrays['space'].append(cluster['spacecraft_id'])
+        meta_arrays['saz'].append(mean_saa)
+        meta_arrays['sel'].append(90.0 - mean_sza)
+        meta_arrays['cc'].append(avg_cc)
 
     # 3. Apply Mandatory ARD Attributes
     dt_str = h5py.string_dtype(encoding='ascii')
-    gdal_transform = np.array([tile_data['transform'].c, tile_data['transform'].a, tile_data['transform'].b, 
-                               tile_data['transform'].f, tile_data['transform'].d, tile_data['transform'].e], dtype='float64')
+    gdal_transform = np.array([master_transform.c, master_transform.a, master_transform.b, 
+                               master_transform.f, master_transform.d, master_transform.e], dtype='float64')
                                
     sr_ds.attrs['units'] = "Reflectance"
     sr_ds.attrs['_FillValue'] = np.nan
     sr_ds.attrs['wavelengths'] = wavelengths
-    sr_ds.attrs['spatial_ref'] = tile_data['crs'].to_wkt()
+    
+    dst_crs_obj = CRS.from_string(master_epsg)
+    sr_ds.attrs['spatial_ref'] = dst_crs_obj.to_wkt()
     sr_ds.attrs['GeoTransform'] = gdal_transform
     
     if th_ds:
@@ -447,7 +548,6 @@ def stream_native_stack_to_hdf5(h5f, group_path, tile_data, expected_sr, expecte
     ag_ds.attrs['band_order'] = ["SZA", "SAA", "VZA", "VAA"]
     
     sr_ds.attrs.create('spacecraft_id', data=meta_arrays['space'], dtype=dt_str)
-    if tile_name: sr_ds.attrs.create('mgrs_tile', data=tile_name, dtype=dt_str)
     sr_ds.attrs['acquisition_time'] = np.array(meta_arrays['acq'], dtype='float64') 
     sr_ds.attrs['sun_azimuth'] = np.array(meta_arrays['saz'], dtype='float32')
     sr_ds.attrs['sun_elevation'] = np.array(meta_arrays['sel'], dtype='float32')
@@ -460,15 +560,17 @@ with h5py.File(OUTPUT_NATIVE_HDF5, 'w') as h5f:
     info_grp.attrs["HDFEOSVersion"] = "HDFEOS_5.1.16"
     odl_blocks = []
     
-    for mgrs_tile, tile_meta in s30_collections.items():
-        num_f = stream_native_stack_to_hdf5(h5f, f'/HDFEOS/GRIDS/HLSS30_{mgrs_tile}/Data Fields', tile_meta, 13, 0, 14, S30_WAVELENGTHS, tile_name=mgrs_tile)
+    s30_passes = group_into_passes(s30_collections)
+    if s30_passes:
+        num_f = stream_fused_stack_to_hdf5(h5f, '/HDFEOS/GRIDS/HLSS30_Merged/Data Fields', s30_passes, 13, 0, 14, S30_WAVELENGTHS)
         if num_f > 0:
-            odl_blocks.append(generate_odl_grid_string(f"HLSS30_{mgrs_tile}", tile_meta['width'], tile_meta['height'], tile_meta['transform'], "GCTP_UTM", tile_meta['zone'], [0.0]*13, 13, num_f, False))
+            odl_blocks.append(generate_odl_grid_string("HLSS30_Merged", master_width, master_height, master_transform, "GCTP_UTM", master_zone, [0.0]*13, 13, num_f, False))
 
-    for mgrs_tile, tile_meta in l30_collections.items():
-        num_f = stream_native_stack_to_hdf5(h5f, f'/HDFEOS/GRIDS/HLSL30_{mgrs_tile}/Data Fields', tile_meta, 8, 2, 11, L30_SR_WAVELENGTHS, thermal_wavelengths=L30_TIRS_WAVELENGTHS, tile_name=mgrs_tile)
+    l30_passes = group_into_passes(l30_collections)
+    if l30_passes:
+        num_f = stream_fused_stack_to_hdf5(h5f, '/HDFEOS/GRIDS/HLSL30_Merged/Data Fields', l30_passes, 8, 2, 11, L30_SR_WAVELENGTHS, thermal_wavelengths=L30_TIRS_WAVELENGTHS)
         if num_f > 0:
-            odl_blocks.append(generate_odl_grid_string(f"HLSL30_{mgrs_tile}", tile_meta['width'], tile_meta['height'], tile_meta['transform'], "GCTP_UTM", tile_meta['zone'], [0.0]*13, 8, num_f, True))
+            odl_blocks.append(generate_odl_grid_string("HLSL30_Merged", master_width, master_height, master_transform, "GCTP_UTM", master_zone, [0.0]*13, 8, num_f, True))
 
     full_odl = "GROUP=SwathStructure\nEND_GROUP=SwathStructure\nGROUP=GridStructure\n" + "\n".join(odl_blocks) + "\nEND_GROUP=GridStructure\nGROUP=PointStructure\nEND_GROUP=PointStructure\nGROUP=ZaStructure\nEND_GROUP=ZaStructure\nEND\n"
     info_grp.create_dataset("StructMetadata.0", shape=(1,), dtype=h5py.string_dtype(encoding='ascii'), data=full_odl)

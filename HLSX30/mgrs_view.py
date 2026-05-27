@@ -9,8 +9,12 @@ import os
 #ROI_LAT_MIN = 42.961778; ROI_LAT_MAX = 43.342135
 #ROI_LON_MIN = -77.770166; ROI_LON_MAX = -77.376776
 #ROI_LAT_MIN = 42.961778; ROI_LAT_MAX = 43.342135
-ROI_LAT_MIN = -34.26; ROI_LAT_MAX = -34.80
-ROI_LON_MIN = -58.79; ROI_LON_MAX = -58.45
+#ROI_LON_MIN = -58.79; ROI_LON_MAX = -58.45
+#ROI_LAT_MIN = -34.26; ROI_LAT_MAX = -34.80
+#ROI_LON_MIN = -77.770166; ROI_LON_MAX = -77.376776
+#ROI_LAT_MIN = 42.961778; ROI_LAT_MAX = 43.342135
+ROI_LON_MIN = -118.487; ROI_LON_MAX = -118.847
+ROI_LAT_MIN = 33.905; ROI_LAT_MAX = 34.21
 
 
 safe_bbox = [
@@ -21,9 +25,9 @@ safe_bbox = [
 print("Querying NASA STAC for spatial footprints...")
 catalog = pystac_client.Client.open("https://cmr.earthdata.nasa.gov/stac/LPCLOUD")
 search = catalog.search(
-    collections=["HLSS30.v2.0"],
+    collections=["HLSL30.v2.0"],
     bbox=safe_bbox,
-    datetime="2020-12-01/2021-03-15", # Short timeframe just to grab spatial footprints
+    datetime="2025-01-01/2025-08-01", # Short timeframe just to grab spatial footprints
     limit=50
 )
 
