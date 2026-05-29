@@ -4,6 +4,12 @@ combined HARMONIZED grid to produce virtual constellation results.
 '''
 import os
 import shutil
+import platform
+# Monkeypatch platform._wmi_query to raise OSError immediately, bypassing Windows WMI hangs/KeyErrors in multiprocessing child processes
+def _dummy_wmi_query(*args, **kwargs):
+    raise OSError("WMI disabled to prevent hangs")
+platform._wmi_query = _dummy_wmi_query
+
 import h5py
 import numpy as np
 import tkinter as tk
@@ -416,18 +422,39 @@ def process_global_timeline(h5_out, orig_filepath):
             dsets['idx'].attrs['description'] = "Spatial 1D indices for extracted endmembers"
 
 if __name__ == "__main__":
-    root = tk.Tk()
-    root.withdraw()
+    import argparse
+    import yaml
     
-    print("Please select the HLST ARD Master Grid HDF5 Cube...")
-    file_path = tk.filedialog.askopenfilename(
-        title="Select HLST ARD Master Grid HDF5 Cube",
-        filetypes=[("HDF5 files", "*.h5")]
-    )
+    parser = argparse.ArgumentParser(description="Calculate Spectral Complexity Metrics")
+    parser.add_argument("--file", type=str, help="Path to HLST ARD Master Grid HDF5 Cube")
+    args = parser.parse_args()
+    
+    file_path = args.file
+    
+    if not file_path:
+        try:
+            from pathlib import Path
+            script_dir = Path(__file__).resolve().parent
+            with open(os.path.join(script_dir, "locations_config.yaml"), "r") as f:
+                config_data = yaml.safe_load(f)
+            location = config_data.get("current_run", {}).get("location")
+            if location:
+                file_path = f"C:/satelliteImagery/HLST30/HLST_{location}_Harmonized.h5"
+        except Exception:
+            pass
+            
+    if not file_path or not os.path.exists(file_path):
+        root = tk.Tk()
+        root.withdraw()
+        
+        print("Please select the HLST ARD Master Grid HDF5 Cube...")
+        file_path = tk.filedialog.askopenfilename(
+            title="Select HLST ARD Master Grid HDF5 Cube",
+            filetypes=[("HDF5 files", "*.h5")]
+        )
+        root.destroy()
     
     if file_path:
         process_ard_cube(file_path)
     else:
         print("No file selected. Exiting.")
-    
-    root.destroy()

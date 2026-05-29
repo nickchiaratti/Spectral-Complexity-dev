@@ -21,6 +21,8 @@ import warnings
 from pathlib import Path
 import re
 
+import yaml
+
 # ==========================================
 # 1. CONFIGURATION & AUTHENTICATION
 # ==========================================
@@ -29,67 +31,37 @@ cloud_threshold = 40
 print("Authenticating with NASA Earthdata...")
 earthaccess.login(strategy="all", persist=True)
 
-Location = "Palisades"
+# Load Configuration
+script_dir = Path(__file__).resolve().parent
+with open(os.path.join(script_dir, "locations_config.yaml"), "r") as f:
+    config_data = yaml.safe_load(f)
 
-# Define exactly which MGRS tiles cover the ROI. 
-# Excludes marginal edge-collision tiles.
-if Location == "Rochesterv2":
-    SOURCE_CACHE = "Rochesterv2"
-    ROI_LON_MIN = -77.770166; ROI_LON_MAX = -77.376776
-    ROI_LAT_MIN = 42.961778; ROI_LAT_MAX = 43.342135
-    START_DATE = '2022-01-01'
-    END_DATE = '2026-03-31'
-    ALLOWED_MGRS_TILES = ['T17TQH','T17TQJ'] 
-if Location == "Tait":
-    SOURCE_CACHE = "Rochesterv2"
-    ROI_LON_MIN = -77.516127; ROI_LON_MAX = -77.461968
-    ROI_LAT_MIN = 43.127698; ROI_LAT_MAX = 43.159168
-    START_DATE = '2014-01-01'
-    END_DATE = '2026-03-31' 
-    ALLOWED_MGRS_TILES = ['T17TQH'] 
-if Location == 'Guatemala-Debris':
-    SOURCE_CACHE = None
-    ROI_LON_MIN = -88.222000; ROI_LON_MAX = -87.822000
-    ROI_LAT_MIN = 15.636200; ROI_LAT_MAX = 16.036200
-    START_DATE = '2020-08-01'
-    END_DATE = '2020-10-31' 
-    ALLOWED_MGRS_TILES = ['T16PCC'] 
-if Location == "MtEtna":
-    SOURCE_CACHE = "MtEtna-Catania"
-    ROI_LON_MIN = 14.9100; ROI_LON_MAX = 15.0900
-    ROI_LAT_MIN = 37.6900; ROI_LAT_MAX = 37.8300
-    START_DATE = '2020-08-01'
-    END_DATE = '2021-07-31' 
-    ALLOWED_MGRS_TILES = ['T33SVB','T33SWB'] 
-if Location == "MtEtna-Catania":
-    SOURCE_CACHE = "MtEtna-Catania"
-    ROI_LON_MIN = 14.800; ROI_LON_MAX = 15.35
-    ROI_LAT_MIN = 37.400; ROI_LAT_MAX = 37.9
-    START_DATE = '2024-01-01'
-    END_DATE = '2025-01-01' 
-    ALLOWED_MGRS_TILES = ['T33SVB','T33SWB'] 
+Location = config_data.get("current_run", {}).get("location", "Palisades")
+config = config_data["locations"][Location]
 
-if Location == "BuenosAires":
-    SOURCE_CACHE = "BuenosAires"
-    ROI_LAT_MIN = -34.26; ROI_LAT_MAX = -34.80
-    ROI_LON_MIN = -58.79; ROI_LON_MAX = -58.45
-    START_DATE = '2025-01-01'
-    END_DATE = '2026-01-01' 
-    ALLOWED_MGRS_TILES = ['T21HUB', 'T21HUC'] 
-if Location == "Palisades":
-    SOURCE_CACHE = "Palisades"
-    ROI_LON_MIN = -118.92; ROI_LON_MAX = -118.375
-    ROI_LAT_MIN = 34.85; ROI_LAT_MAX = 33.90
-    START_DATE = '2025-01-01'
-    END_DATE = '2026-01-01' 
-    ALLOWED_MGRS_TILES = ['T11SLT', 'T11SLU']     
-if Location == "Malibu":
-    SOURCE_CACHE = "Palisades"
-    ROI_LON_MIN = -118.487; ROI_LON_MAX = -118.847
-    ROI_LAT_MIN = 33.905; ROI_LAT_MAX = 34.21
-    START_DATE = '2025-01-01'
-    END_DATE = '2026-01-01' 
-    ALLOWED_MGRS_TILES = ['T11SLT']  
+SOURCE_CACHE = config.get("SOURCE_CACHE")
+ROI_LON_MIN = config["ROI_LON_MIN"]
+ROI_LON_MAX = config["ROI_LON_MAX"]
+ROI_LAT_MIN = config["ROI_LAT_MIN"]
+ROI_LAT_MAX = config["ROI_LAT_MAX"]
+START_DATE = config["START_DATE"]
+END_DATE = config["END_DATE"]
+ALLOWED_MGRS_TILES = config["ALLOWED_MGRS_TILES"]
+
+if SOURCE_CACHE and SOURCE_CACHE in config_data["locations"]:
+    cache_config = config_data["locations"][SOURCE_CACHE]
+    cache_bbox = [
+        min(cache_config["ROI_LON_MIN"], cache_config["ROI_LON_MAX"]), 
+        max(cache_config["ROI_LAT_MIN"], cache_config["ROI_LAT_MAX"]),
+        max(cache_config["ROI_LON_MIN"], cache_config["ROI_LON_MAX"]), 
+        min(cache_config["ROI_LAT_MIN"], cache_config["ROI_LAT_MAX"])
+    ]
+else:
+    cache_bbox = [
+        min(ROI_LON_MIN, ROI_LON_MAX), max(ROI_LAT_MIN, ROI_LAT_MAX), 
+        max(ROI_LON_MIN, ROI_LON_MAX), min(ROI_LAT_MIN, ROI_LAT_MAX)
+    ]
+cache_bbox = [min(cache_bbox[0], cache_bbox[2]), min(cache_bbox[1], cache_bbox[3]), max(cache_bbox[0], cache_bbox[2]), max(cache_bbox[1], cache_bbox[3])]
 
 
 
@@ -110,14 +82,14 @@ os.makedirs(COMBINED_OUTPUT_DIR, exist_ok=True)
 
 OUTPUT_NATIVE_HDF5 = os.path.join(COMBINED_OUTPUT_DIR, f"HLS_{Location}_STAC_Native_2025.h5")
 
-ASSETS_S30 = ['B01', 'B02', 'B03', 'B04', 'B05', 'B06', 'B07', 'B08', 'B8A', 'B09', 'B10', 'B11', 'B12', 'Fmask', 'SZA', 'SAA', 'VZA', 'VAA']
-ASSETS_L30 = ['B01', 'B02', 'B03', 'B04', 'B05', 'B06', 'B07', 'B09', 'B10', 'B11', 'Fmask', 'SZA', 'SAA', 'VZA', 'VAA']
+ASSETS_S30 = ['B01', 'B02', 'B03', 'B04', 'B05', 'B06', 'B07', 'B08', 'B11', 'B12', 'Fmask', 'SZA', 'SAA', 'VZA', 'VAA']
+ASSETS_L30 = ['B01', 'B02', 'B03', 'B04', 'B05', 'B06', 'B07', 'B10', 'B11', 'Fmask', 'SZA', 'SAA', 'VZA', 'VAA']
 
-S30_WAVELENGTHS = [0.443, 0.490, 0.560, 0.665, 0.705, 0.740, 0.783, 0.842, 0.865, 0.945, 1.375, 1.610, 2.190]
-L30_SR_WAVELENGTHS = [0.443, 0.482, 0.561, 0.655, 0.865, 1.609, 2.201, 1.373] 
+S30_WAVELENGTHS = [0.443, 0.490, 0.560, 0.665, 0.705, 0.740, 0.783, 0.842, 1.610, 2.190]
+L30_SR_WAVELENGTHS = [0.443, 0.482, 0.561, 0.655, 0.865, 1.609, 2.201] 
 L30_TIRS_WAVELENGTHS = [10.9, 12.0]
 
-# Defensive Topology Enforcement for STAC
+# Defensive Topology Enforcement for Output Grid (Location ROI)
 safe_bbox = [
     min(ROI_LON_MIN, ROI_LON_MAX), max(ROI_LAT_MIN, ROI_LAT_MAX), 
     max(ROI_LON_MIN, ROI_LON_MAX), min(ROI_LAT_MIN, ROI_LAT_MAX)
@@ -162,12 +134,28 @@ print(f"Unified Native Grid Established: {master_width}x{master_height} px at {m
 def stac_native_window_read(collection_id, assets_list, temp_dir):
     print(f"\nQuerying NASA CMR STAC for {collection_id}...")
     catalog = pystac_client.Client.open("https://cmr.earthdata.nasa.gov/stac/LPCLOUD")
-    search = catalog.search(collections=[collection_id], bbox=safe_bbox, datetime=f"{START_DATE}/{END_DATE}", limit=500)
+    search = catalog.search(collections=[collection_id], bbox=cache_bbox, datetime=f"{START_DATE}/{END_DATE}", limit=500)
     filtered_items = [i for i in list(search.items()) if i.properties.get('eo:cloud_cover', 100) < cloud_threshold]
     
     total_items = len(filtered_items)
     print(f"Identified {total_items} STAC items for {collection_id} within temporal bounds and cloud thresholds.")
     
+    platform_mapping = {}
+    item_ids = [i.id for i in filtered_items]
+    if item_ids:
+        print(f"Fetching platform metadata via earthaccess for {len(item_ids)} items...")
+        short_name = collection_id.split('.')[0]
+        for chunk_start in range(0, len(item_ids), 100):
+            chunk = item_ids[chunk_start:chunk_start + 100]
+            try:
+                ea_results = earthaccess.search_data(short_name=short_name, granule_ur=chunk, count=len(chunk))
+                for g in ea_results:
+                    plats = g.get('umm', {}).get('Platforms', [])
+                    if plats:
+                        platform_mapping[g['umm']['GranuleUR']] = plats[0].get('ShortName', 'UNKNOWN')
+            except Exception as e:
+                print(f"Warning: Failed to fetch earthaccess metadata for chunk: {e}")
+
     tile_collections = {}
     
     # Environment configs to maximize throughput for GDAL's virtual file system
@@ -215,7 +203,7 @@ def stac_native_window_read(collection_id, assets_list, temp_dir):
             
             tile_data['items'][img_id] = {
                 'acquisition_time': item.datetime.timestamp(),
-                'spacecraft_id': item.properties.get('platform', 'UNKNOWN'),
+                'spacecraft_id': platform_mapping.get(img_id, item.properties.get('platform', 'UNKNOWN')),
                 'cloud_cover': cloud_cov,
                 'filepath': out_tif
             }
@@ -246,6 +234,7 @@ def stac_native_window_read(collection_id, assets_list, temp_dir):
                 with rasterio.open(item.assets[asset_key_ref].href) as src:
                     if tile_data.get('window') is None:
                         transformer = Transformer.from_crs("EPSG:4326", src.crs, always_xy=True)
+                        # We use safe_bbox (the location subset) to generate the window to be read and stored in local cache
                         xs, ys = transformer.transform([safe_bbox[0], safe_bbox[2], safe_bbox[2], safe_bbox[0]], [safe_bbox[3], safe_bbox[3], safe_bbox[1], safe_bbox[1]])
                         roi_minx, roi_maxx, roi_miny, roi_maxy = min(xs), max(xs), min(ys), max(ys)
                         window = from_bounds(roi_minx, roi_miny, roi_maxx, roi_maxy, transform=src.transform).round_offsets().round_lengths()
@@ -558,6 +547,12 @@ def stream_fused_stack_to_hdf5(h5f, group_path, pass_clusters, expected_sr, expe
 with h5py.File(OUTPUT_NATIVE_HDF5, 'w') as h5f:
     info_grp = h5f.create_group("HDFEOS INFORMATION")
     info_grp.attrs["HDFEOSVersion"] = "HDFEOS_5.1.16"
+    
+    # Store Configuration Metadata
+    meta_grp = h5f.create_group("METADATA/PIPELINE_CONFIG")
+    meta_grp.attrs["Location"] = Location
+    meta_grp.attrs["config_yaml"] = yaml.dump(config_data)
+
     odl_blocks = []
     
     s30_passes = group_into_passes(s30_collections)

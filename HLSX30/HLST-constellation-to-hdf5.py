@@ -6,6 +6,12 @@ coverage guardrail to reject marginal swath overlaps.
 '''
 
 import os
+import platform
+# Monkeypatch platform._wmi_query to raise OSError immediately, bypassing Windows WMI hangs/KeyErrors in multiprocessing child processes
+def _dummy_wmi_query(*args, **kwargs):
+    raise OSError("WMI disabled to prevent hangs")
+platform._wmi_query = _dummy_wmi_query
+
 import h5py
 import rasterio
 import numpy as np
@@ -19,64 +25,44 @@ import json
 import warnings
 import SpecComplex as sc
 
+import yaml
+
 # ==========================================
 # 1. CONFIGURATION & DIRECTORIES
 # ==========================================
-Location = "Palisades"
 
-if Location == "Rochesterv2":
-    SOURCE_CACHE = "Rochesterv2"
-    ROI_LON_MIN = -77.770166; ROI_LON_MAX = -77.376776
-    ROI_LAT_MIN = 42.961778; ROI_LAT_MAX = 43.342135
-    TANAGER_AVAILABLE = True
-if Location == "Tait":
-    SOURCE_CACHE = "Rochesterv2"
-    ROI_LON_MIN = -77.516127; ROI_LON_MAX = -77.461968
-    ROI_LAT_MIN = 43.127698; ROI_LAT_MAX = 43.159168
-    TANAGER_AVAILABLE = True
-if Location == 'Guatemala-Debris':
-    ROI_LON_MIN = -88.222000; ROI_LON_MAX = -87.822000
-    ROI_LAT_MIN = 15.636200; ROI_LAT_MAX = 16.036200
-    TANAGER_AVAILABLE = False
-if Location == "MtEtna":
-    SOURCE_CACHE = "MtEtna"
-    ROI_LON_MIN = 14.9100; ROI_LON_MAX = 15.0900
-    ROI_LAT_MIN = 37.6900; ROI_LAT_MAX = 37.8300
-    TANAGER_AVAILABLE = False
-if Location == "MtEtna-Catania":
-    SOURCE_CACHE = "MtEtna-Catania"
-    ROI_LON_MIN = 14.800; ROI_LON_MAX = 15.35
-    ROI_LAT_MIN = 37.400; ROI_LAT_MAX = 37.9
-    TANAGER_AVAILABLE = False
-if Location == "BuenosAires":
-    SOURCE_CACHE = "BuenosAires"
-    ROI_LAT_MIN = -34.26; ROI_LAT_MAX = -34.80
-    ROI_LON_MIN = -58.79; ROI_LON_MAX = -58.45
-    TANAGER_AVAILABLE = True
-if Location == "Palisades":
-    SOURCE_CACHE = "Palisades"
-    ROI_LON_MIN = -118.92; ROI_LON_MAX = -118.375
-    ROI_LAT_MIN = 34.85; ROI_LAT_MAX = 33.90
-    TANAGER_AVAILABLE = True
-if Location == "Malibu":
-    SOURCE_CACHE = "Palisades"
-    ROI_LON_MIN = -118.487; ROI_LON_MAX = -118.847
-    ROI_LAT_MIN = 33.905; ROI_LAT_MAX = 34.21
-    TANAGER_AVAILABLE = True
-    
+# Load Configuration
+script_dir = Path(__file__).resolve().parent
+with open(os.path.join(script_dir, "locations_config.yaml"), "r") as f:
+    config_data = yaml.safe_load(f)
+
+Location = config_data.get("current_run", {}).get("location", "Palisades")
+config = config_data["locations"][Location]
+
+SOURCE_CACHE = config.get("SOURCE_CACHE", Location)
+if SOURCE_CACHE is None:
+    SOURCE_CACHE = Location
+
+ROI_LON_MIN = config["ROI_LON_MIN"]
+ROI_LON_MAX = config["ROI_LON_MAX"]
+ROI_LAT_MIN = config["ROI_LAT_MIN"]
+ROI_LAT_MAX = config["ROI_LAT_MAX"]
+TANAGER_AVAILABLE = config.get("TANAGER_AVAILABLE", False)
+
 HLS_SOURCE_DIR = "C:/satelliteImagery/HLS30/"
-TANAGER_SOURCE_DIR = f"C:/satelliteImagery/Tanager/{Location}_SourceData"
-COMBINED_OUTPUT_DIR = "C:/satelliteImagery/HLST30/"
 
+TANAGER_SOURCE_DIR = f"C:/satelliteImagery/Tanager/{SOURCE_CACHE}_SourceData"
+COMBINED_OUTPUT_DIR = "C:/satelliteImagery/HLST30/"
+ 
 INPUT_NATIVE_HDF5 = os.path.join(HLS_SOURCE_DIR, f"HLS_{Location}_STAC_Native_2025.h5")
 if TANAGER_AVAILABLE:
-    INPUT_NATIVE_TANAGER_HDF5 = os.path.join(TANAGER_SOURCE_DIR, f"Tanager_Native_Stack_{Location}.h5")
+    INPUT_NATIVE_TANAGER_HDF5 = os.path.join(TANAGER_SOURCE_DIR, f"Tanager_Native_Stack_{SOURCE_CACHE}.h5")
 else:
     INPUT_NATIVE_TANAGER_HDF5 = os.path.join(TANAGER_SOURCE_DIR, "SKIP")#"Tanager_Native_Stack_HDFEOS.h5")
 OUTPUT_MASTER_HDF5 = os.path.join(COMBINED_OUTPUT_DIR, f"HLST_{Location}_Harmonized.h5")
 
-S30_WAVELENGTHS = [0.443, 0.490, 0.560, 0.665, 0.705, 0.740, 0.783, 0.842, 0.865, 0.945, 1.375, 1.610, 2.190]
-L30_SR_WAVELENGTHS = [0.443, 0.482, 0.561, 0.655, 0.865, 1.609, 2.201, 1.373] 
+S30_WAVELENGTHS = [0.443, 0.490, 0.560, 0.665, 0.705, 0.740, 0.783, 0.842, 1.610, 2.190]
+L30_SR_WAVELENGTHS = [0.443, 0.482, 0.561, 0.655, 0.865, 1.609, 2.201] 
 L30_TIRS_WAVELENGTHS = [10.9, 12.0]
 
 safe_bbox = [
@@ -476,6 +462,12 @@ master_tile_mapping_json = json.dumps(master_tile_mapping)
 with h5py.File(OUTPUT_MASTER_HDF5, 'w') as h5f:
     info_grp = h5f.create_group("HDFEOS INFORMATION")
     info_grp.attrs["HDFEOSVersion"] = "HDFEOS_5.1.16"
+    
+    # Store Configuration Metadata
+    meta_grp = h5f.create_group("METADATA/PIPELINE_CONFIG")
+    meta_grp.attrs["Location"] = Location
+    meta_grp.attrs["config_yaml"] = yaml.dump(config_data)
+
     odl_blocks = []
     
     # --- 5a. HLS Master Grid Stitching ---
@@ -624,6 +616,9 @@ with h5py.File(OUTPUT_MASTER_HDF5, 'w') as h5f:
                     mask_dset.attrs['description'] = "0 = Invalid/Masked, 1 = Valid. Generated from SpecComplex ARD rules."
                     datasets_created_info.append(("common_mask", np.uint8, 3, ["Time", "YDim", "XDim"]))
 
+                    # Flush the file to finalize all written compressed chunks on disk before reading them back
+                    h5f.flush()
+
                     for out_idx in range(num_frames):
                         valid_mask = sc.get_tanager_mask(grp_tanager, out_idx, (master_height, master_width),
                                                          sun_elevation_threshold=SUN_ELEVATION_THRESHOLD,
@@ -679,7 +674,16 @@ with h5py.File(OUTPUT_MASTER_HDF5, 'w') as h5f:
         for global_idx, meta in enumerate(timeline):
             grid_name = meta['grid']
             local_idx = meta['local_idx']
-            ortho_ds[global_idx, ...] = h5f[f"/HDFEOS/GRIDS/{grid_name}/Data Fields/ortho_visual"][local_idx, ...]
+            src_val = h5f[f"/HDFEOS/GRIDS/{grid_name}/Data Fields/ortho_visual"][local_idx, ...]
+            if src_val.shape[0] == 3:
+                # Add Alpha channel using common_mask (1 = valid, 0 = invalid) or default to 255 (fully opaque)
+                if "common_mask" in h5f[f"/HDFEOS/GRIDS/{grid_name}/Data Fields"]:
+                    mask = h5f[f"/HDFEOS/GRIDS/{grid_name}/Data Fields/common_mask"][local_idx, ...]
+                    alpha = np.where(mask == 1, 255, 0).astype('uint8')
+                else:
+                    alpha = np.full((src_val.shape[1], src_val.shape[2]), 255, dtype='uint8')
+                src_val = np.concatenate([src_val, alpha[np.newaxis, ...]], axis=0)
+            ortho_ds[global_idx, ...] = src_val
             
         print(f"  HARMONIZED ortho_visual created with {total_frames} frames.")
         

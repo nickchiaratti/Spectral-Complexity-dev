@@ -1,4 +1,10 @@
 import os
+import platform
+# Monkeypatch platform._wmi_query to raise OSError immediately, bypassing Windows WMI hangs/KeyErrors in multiprocessing child processes
+def _dummy_wmi_query(*args, **kwargs):
+    raise OSError("WMI disabled to prevent hangs")
+platform._wmi_query = _dummy_wmi_query
+
 import h5py
 import numpy as np
 import matplotlib.pyplot as plt
@@ -11,10 +17,21 @@ from tkinter import filedialog
 from scipy.stats import pearsonr, spearmanr, norm, skew, kurtosis
 from zoneinfo import ZoneInfo
 import rasterio.transform
+import rasterio.transform
 from pyproj import Transformer, CRS
+import yaml
+
+# Load Configuration
+try:
+    from pathlib import Path
+    script_dir = Path(__file__).resolve().parent
+    with open(os.path.join(script_dir, "locations_config.yaml"), "r") as f:
+        config_data = yaml.safe_load(f)
+    Location = config_data.get("current_run", {}).get("location", "Tait")
+except Exception:
+    Location = "Tait"
 
 # --- Configuration ---
-Location = "Tait"
 complexity_type = 'sliding_volume_z_score' # or 'sliding_volume_map'
 HULL_BANDS_LANDSAT = (6, 5, 4) 
 HULL_BANDS_TANAGER = (100, 50, 20) 
@@ -49,19 +66,56 @@ suffix += f'_{END_YEAR-START_YEAR}yr' if START_YEAR != 2025 else '_2025'
 
 SAVE_DIR = f"C:/satelliteImagery/MultiSensor_Analysis_{Location}_Harmonized" + suffix
 
+# Predefined Time Series Locations Map (Latitude, Longitude)
+TS_LOCATIONS_MAP = {
+    "Tait": [
+        {'latlon': (43.13927, -77.50340), 'label': "ROCX NITE Tarp",                  'color': 'tab:purple'},
+        {'latlon': (43.142856, -77.508451), 'label': "West Tait Forest",                'color': 'tab:green'},
+        {'latlon': (43.144861, -77.501176), 'label': "East Tait Forest",                'color': 'tab:olive'},
+        {'latlon': (43.151502, -77.485518), 'label': "Shadow Pines Grass Field",         'color': 'tab:red'},
+        {'latlon': (43.151219, -77.486637), 'label': "Shadow Pines Pickleball Court",    'color': 'tab:blue'},
+        {'latlon': (43.151877, -77.487111), 'label': "Shadow Pines Playground",          'color': 'tab:cyan'},
+    ],
+    "Rochesterv2": [
+        {'latlon': (43.13927, -77.50340), 'label': "ROCX NITE Tarp",                  'color': 'tab:purple'},
+        {'latlon': (43.142856, -77.508451), 'label': "West Tait Forest",                'color': 'tab:green'},
+        {'latlon': (43.144861, -77.501176), 'label': "East Tait Forest",                'color': 'tab:olive'},
+        {'latlon': (43.151502, -77.485518), 'label': "Shadow Pines Grass Field",         'color': 'tab:red'},
+        {'latlon': (43.151219, -77.486637), 'label': "Shadow Pines Pickleball Court",    'color': 'tab:blue'},
+        {'latlon': (43.151877, -77.487111), 'label': "Shadow Pines Playground",          'color': 'tab:cyan'},
+    ],
+    "Malibu": [
+        {'latlon': (34.059168, -118.573950), 'label': "Parker Mesa Overlook",                      'color': 'tab:purple'},
+        {'latlon': (34.058990, -118.613110), 'label': "Tuna Canyon",             'color': 'tab:green'},
+        {'latlon': (34.047931, -118.572716), 'label': "Surfwood Rd",            'color': 'tab:olive'},
+        {'latlon': (34.053249, -118.557091), 'label': "Paseo Miramar Viewpoint",                        'color': 'tab:cyan'},
+    ],
+    "Palisades": [
+        {'latlon': (34.05, -118.53), 'label': "Pacific Palisades",                 'color': 'tab:purple'},
+        {'latlon': (34.01, -118.49), 'label': "Santa Monica Pier",                 'color': 'tab:green'},
+        {'latlon': (34.09, -118.59), 'label': "Topanga State Park",                'color': 'tab:olive'},
+    ],
+    "MtEtna": [
+        {'latlon': (37.738, 14.970), 'label': "Etna West",                         'color': 'tab:green'},
+        {'latlon': (37.710, 15.000), 'label': "Etna South",                        'color': 'tab:purple'},
+        {'latlon': (37.738, 15.040), 'label': "Etna East",                         'color': 'tab:olive'},
+        {'latlon': (37.795, 15.005), 'label': "Etna North",                        'color': 'tab:blue'},
+    ],
+    "MtEtna-Catania": [
+        {'latlon': (37.738, 14.970), 'label': "Etna West",                         'color': 'tab:green'},
+        {'latlon': (37.710, 15.000), 'label': "Etna South",                        'color': 'tab:purple'},
+        {'latlon': (37.738, 15.040), 'label': "Etna East",                         'color': 'tab:olive'},
+        {'latlon': (37.795, 15.005), 'label': "Etna North",                        'color': 'tab:blue'},
+    ],
+    "BuenosAires": [
+        {'latlon': (-34.60, -58.38), 'label': "Buenos Aires Central",              'color': 'tab:purple'},
+        {'latlon': (-34.57, -58.42), 'label': "Palermo Woods",                     'color': 'tab:green'},
+        {'latlon': (-34.81, -58.53), 'label': "Ezeiza Airport",                    'color': 'tab:olive'},
+    ]
+}
+
 # Time Series Locations (Latitude, Longitude)
-TS_LOCATIONS = [
-    #{'latlon': (43.153519, -77.484902), 'label': "Whalen-Atlantic Intersection",      'color': 'tab:orange'},
-    {'latlon': (43.13927, -77.50340), 'label': "ROCX NITE Tarp",                  'color': 'tab:purple'},
-    {'latlon': (43.142856, -77.508451), 'label': "West Tait Forest",                'color': 'tab:green'},
-    {'latlon': (43.144861, -77.501176), 'label': "East Tait Forest",                'color': 'tab:olive'},
-    #{'latlon': (43.136910, -77.469462), 'label': "Artificial turf football field",  'color': 'tab:blue'},
-    #{'latlon': (43.138241, -77.470873), 'label': "Recently added artificial turf",  'color': 'tab:cyan'},
-    #{'latlon': (43.141297, -77.506256), 'label': "Tait Parking Lot",                'color': 'tab:red'},
-    {'latlon': (43.151502, -77.485518), 'label': "Shadow Pines Grass Field",         'color': 'tab:red'},
-    {'latlon': (43.151219, -77.486637), 'label': "Shadow Pines Pickleball Court",    'color': 'tab:blue'},
-    {'latlon': (43.151877, -77.487111), 'label': "Shadow Pines Playground",          'color': 'tab:cyan'},
-]
+TS_LOCATIONS = TS_LOCATIONS_MAP["Tait"]
 
 DISPLAY_NORMALIZATION = True
 DISPLAY_REDUNDANT_FIGURE = True 
@@ -118,6 +172,26 @@ class HarmonizedComplexityViewer:
         affine = rasterio.transform.Affine.from_gdal(*geo_transform)
         inv_affine = ~affine
         
+        # Determine location dynamically from the opened HDF5 file's name
+        filename = os.path.basename(file_path)
+        parts = filename.split('_')
+        resolved_location = Location
+        if len(parts) > 1 and parts[0] == "HLST":
+            resolved_location = parts[1]
+            
+        global TS_LOCATIONS
+        if resolved_location in TS_LOCATIONS_MAP:
+            TS_LOCATIONS = TS_LOCATIONS_MAP[resolved_location]
+        else:
+            # Fallback coordinate: Compute center of the image using project crs and affine
+            ul_x, ul_y = affine * (0, 0)
+            lr_x, lr_y = affine * (self.width, self.height)
+            transformer_back = Transformer.from_crs(crs, "EPSG:4326", always_xy=True)
+            center_x = (ul_x + lr_x) / 2.0
+            center_y = (ul_y + lr_y) / 2.0
+            center_lon, center_lat = transformer_back.transform(center_x, center_y)
+            TS_LOCATIONS = [{'latlon': (center_lat, center_lon), 'label': f"Grid Center ({resolved_location})", 'color': 'tab:purple'}]
+
         print("\n--- Coordinate Mapping ---")
         for loc in TS_LOCATIONS:
             lat, lon = loc['latlon']
@@ -127,7 +201,7 @@ class HarmonizedComplexityViewer:
             print(f"Mapped [{loc['label']}] Lat/Lon ({lat:.4f}, {lon:.4f}) -> Pixel (y={loc['yx'][0]}, x={loc['yx'][1]})")
 
         self.current_idx = 0
-        self.save_dir = SAVE_DIR
+        self.save_dir = SAVE_DIR.replace(Location, resolved_location)
 
         self.ts_start_date = TS_START_DATE
         self.ts_end_date = TS_END_DATE
@@ -339,9 +413,18 @@ class HarmonizedComplexityViewer:
         else:
             rgba = raw_vis.astype(np.float32)
             
+        if 'TANAGER' in grid_name.upper():
+            for c in range(3):
+                chan = rgba[..., c]
+                valid_pixels = chan[chan > 0]
+                if len(valid_pixels) > 0:
+                    p1, p99 = np.percentile(valid_pixels, (1, 99))
+                    if p99 > p1:
+                        rgba[..., c] = np.clip((chan - p1) / (p99 - p1), 0.0, 1.0)
+            
         if rgba.shape[-1] == 4:
             rgba[..., 3] = np.where(rgba[..., 3] > 0, 1.0, 0.0)
-        rgb = rgba
+        rgb = np.clip(rgba, 0.0, 1.0)
 
         hull_bands = HULL_BANDS_LANDSAT if 'HLS' in grid_name.upper() else HULL_BANDS_TANAGER
         h, w = sr_data.shape[1:]
@@ -372,13 +455,20 @@ class HarmonizedComplexityViewer:
 
         self.ax_spectral.clear()
         wl = self.wavelengths[grid_name]
+        sort_idx = np.argsort(wl)
+        sorted_wl = wl[sort_idx]
         for i in range(endmembers.shape[1]):
             if not np.all(np.isnan(endmembers[:, i])) and np.any(endmembers[:, i] != 0):
-                self.ax_spectral.plot(wl, endmembers[:, i], label=f'V{i}', lw=1)
+                sorted_em = endmembers[:, i][sort_idx]
+                self.ax_spectral.plot(sorted_wl, sorted_em, label=f'V{i}', lw=1)
         self.ax_spectral.set_title("Spectral Signatures")
         self.ax_spectral.set_xlabel("Wavelength (μm)") 
         self.ax_spectral.set_ylabel("Reflectance")
         self.ax_spectral.set_ylim(0, 1)
+        
+        all_wl = np.concatenate(list(self.wavelengths.values()))
+        self.ax_spectral.set_xlim(np.nanmin(all_wl) - 0.05, np.nanmax(all_wl) + 0.05)
+        
         self.ax_spectral.legend(loc='upper right')
         self.ax_spectral.grid(True, alpha=0.3)
 
@@ -761,20 +851,88 @@ class HarmonizedComplexityViewer:
         self.fig_scatter.show()
 
     def _on_auto_save(self, event):
-        pass # Optional batch processing...
+        try:
+            start_idx = int(self.txt_start.text)
+            end_idx = int(self.txt_end.text)
+        except ValueError:
+            print("Invalid range. Please enter valid integers for Start and End.")
+            return
+            
+        start_idx = max(0, start_idx)
+        end_idx = min(self.total_frames - 1, end_idx)
+        
+        if start_idx > end_idx:
+            print("Start index must be less than or equal to End index.")
+            return
+            
+        os.makedirs(self.save_dir, exist_ok=True)
+        original_idx = self.current_idx
+        
+        print(f"Starting batch save from frame {start_idx} to {end_idx} in {self.save_dir}...")
+        for i in range(start_idx, end_idx + 1):
+            self.current_idx = i
+            self.update_display()
+            dt_str = datetime.fromtimestamp(self.prov_time[i], tz=timezone.utc).strftime('%Y%m%d_%H%M%S')
+            grid = self.prov_grid[i]
+            filename = f"Frame_{i:03d}_{grid}_{dt_str}.png"
+            out_path = os.path.join(self.save_dir, filename)
+            self.fig_combined.savefig(out_path, dpi=150, bbox_inches='tight')
+            print(f"Saved [{i - start_idx + 1}/{end_idx - start_idx + 1}]: {filename}")
+            
+        self.current_idx = original_idx
+        self.update_display()
+        print("Batch processing complete.")
 
     def _on_save_images(self, event):
-        pass
+        os.makedirs(self.save_dir, exist_ok=True)
+        idx = self.current_idx
+        dt_str = datetime.fromtimestamp(self.prov_time[idx], tz=timezone.utc).strftime('%Y%m%d_%H%M%S')
+        grid = self.prov_grid[idx]
+        filename = f"Frame_{idx:03d}_{grid}_{dt_str}.png"
+        out_path = os.path.join(self.save_dir, filename)
+        
+        self.fig_combined.savefig(out_path, dpi=150, bbox_inches='tight')
+        print(f"Saved: {out_path}")
 
     def run(self): plt.show()
 
 if __name__ == "__main__":
-    root = tk.Tk(); root.withdraw()
-    file_path = tk.filedialog.askopenfilename(
-        title="Select HARMONIZED SC HDF5 Output",
-        initialfile=default_harmonized_path,
-        filetypes=[("HDF5 files", "*.h5")]
-    )
+    import argparse
+    parser = argparse.ArgumentParser(description="View Spectral Complexity Metrics")
+    parser.add_argument("--file", type=str, help="Path to HARMONIZED SC HDF5 Output")
+    parser.add_argument("--start_year", type=int, help="Start Year for time series")
+    parser.add_argument("--end_year", type=int, help="End Year for time series")
+    args = parser.parse_args()
+    
+    file_path = args.file
+    
+    if args.start_year is not None or args.end_year is not None:
+        if args.start_year is not None:
+            START_YEAR = args.start_year
+            TS_START_DATE = datetime(START_YEAR, 1, 1, tzinfo=timezone.utc)
+        if args.end_year is not None:
+            END_YEAR = args.end_year
+            TS_END_DATE = datetime(END_YEAR, 12, 31, tzinfo=timezone.utc)
+            
+        suffix = ''
+        if complexity_type == 'sliding_volume_z_score':
+            suffix = '_zscore'
+        elif complexity_type == 'sliding_volume_map':
+            suffix = '_SpecComplex'
+        if not MASKING:
+            suffix += '_unmasked'
+        suffix += f'_{END_YEAR-START_YEAR}yr' if START_YEAR != 2025 else '_2025'
+        SAVE_DIR = f"C:/satelliteImagery/MultiSensor_Analysis_{Location}_Harmonized" + suffix
+    
+    if not file_path:
+        root = tk.Tk(); root.withdraw()
+        file_path = tk.filedialog.askopenfilename(
+            title="Select HARMONIZED SC HDF5 Output",
+            initialfile=default_harmonized_path,
+            filetypes=[("HDF5 files", "*.h5")]
+        )
+        root.destroy()
+        
     if not file_path:
         file_path = default_harmonized_path
     
@@ -783,4 +941,3 @@ if __name__ == "__main__":
         viewer.run()
     else:
         print(f"File not found: {file_path}")
-    root.destroy()
