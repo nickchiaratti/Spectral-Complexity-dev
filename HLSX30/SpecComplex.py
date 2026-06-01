@@ -10,7 +10,7 @@ def get_landsat_mask(data_grp, f_idx, shape,
                      aerosol_accept_level='medium'):
     """
     Generates a boolean spatial mask for LANDSAT data using Quality Assessment (QA) bands.
-    Valid pixels return True, masked pixels return False.
+    True = Invalid/Masked, False = Valid.
     """
     # Mapped levels for Aerosol_Optical_Depth
     AEROSOL_DICT = {
@@ -18,24 +18,24 @@ def get_landsat_mask(data_grp, f_idx, shape,
         'medium': [2, 4, 32, 66, 68, 96, 100, 130, 132, 160, 164],
         'high': [2, 4, 32, 66, 68, 96, 100, 130, 132, 160, 164, 192, 194, 196, 224, 228] # Aerosol_Optical_Depth > 0.3
     }
-    valid_mask = np.ones(shape, dtype=bool)
+    invalid_mask = np.zeros(shape, dtype=bool)
     kernel = np.ones((3, 3), dtype=bool)
     
     # Sun Elevation Check (Fails loudly if attribute is missing)
     sun_elev_arr = data_grp['surface_reflectance'].attrs['sun_elevation']
     if sun_elev_arr[f_idx] < sun_elevation_threshold:
-        return np.zeros(shape, dtype=bool)
+        return np.ones(shape, dtype=bool)
 
     # QA Reject Mask
     qa_pixel = data_grp['QUALITY_L1_PIXEL'][f_idx, ...]
     bad_qa_mask = (qa_pixel & qa_reject_mask) != 0
     if cloud_dilation > 0:
         bad_qa_mask = ndimage.binary_dilation(bad_qa_mask, structure=kernel, iterations=cloud_dilation)
-    valid_mask &= ~bad_qa_mask
+    invalid_mask |= bad_qa_mask
 
     # RADSAT Accept Value
     bad_radsat = data_grp['RADIOMETRIC_SATURATION'][f_idx, ...] != radsat_accept_value
-    valid_mask &= ~bad_radsat
+    invalid_mask |= bad_radsat
 
     # Aerosol Accept Values
     if aerosol_accept_level != 'all':
@@ -48,9 +48,9 @@ def get_landsat_mask(data_grp, f_idx, shape,
         invalid_aerosol = ~np.isin(aerosol, accepted_values)
         if cloud_dilation > 0:
             invalid_aerosol = ndimage.binary_dilation(invalid_aerosol, structure=kernel, iterations=cloud_dilation)
-        valid_mask &= ~invalid_aerosol
+        invalid_mask |= invalid_aerosol
 
-    return valid_mask
+    return invalid_mask
 
 def get_tanager_mask(data_grp, f_idx, shape, 
                      sun_elevation_threshold=30, 
@@ -60,9 +60,9 @@ def get_tanager_mask(data_grp, f_idx, shape,
                      aerosol_depth_threshold=0.3):
     """
     Generates a boolean spatial mask for TANAGER data using beta masks and uncertainty.
-    Valid pixels return True, masked pixels return False.
+    True = Masked/Invalid, False = Valid.
     """
-    valid_mask = np.ones(shape, dtype=bool)
+    invalid_mask = np.zeros(shape, dtype=bool)
     kernel = np.ones((3, 3), dtype=bool)
     
     # Cloud Mask Check
@@ -72,18 +72,18 @@ def get_tanager_mask(data_grp, f_idx, shape,
         combined_cloud = c_mask | cirrus_mask
         if cloud_dilation > 0:
             combined_cloud = ndimage.binary_dilation(combined_cloud, structure=kernel, iterations=cloud_dilation)
-        valid_mask &= ~combined_cloud
+        invalid_mask |= combined_cloud
     
     # Sun Elevation Check (Derived from Sun Zenith)
     zenith = data_grp['sun_zenith'][f_idx, ...]
-    valid_mask &= (zenith != -9999.0) & ((90.0 - zenith) >= sun_elevation_threshold)
+    invalid_mask |= (zenith == -9999.0) | ((90.0 - zenith) < sun_elevation_threshold)
         
     # Aerosol Optical Depth Check
     aod = data_grp['aerosol_optical_depth'][f_idx, ...]
     bad_aod_mask = (aod == -9999.0) | (aod >= aerosol_depth_threshold) | np.isnan(aod)
     if cloud_dilation > 0:
         bad_aod_mask = ndimage.binary_dilation(bad_aod_mask, structure=kernel, iterations=cloud_dilation)
-    valid_mask &= ~bad_aod_mask
+    invalid_mask |= bad_aod_mask
         
     # Surface Reflectance Uncertainty Check
     gw_mask = data_grp['surface_reflectance'].attrs['all_good_wavelengths']
@@ -97,14 +97,15 @@ def get_tanager_mask(data_grp, f_idx, shape,
     unc_mask = (unc == -9999.0) | (unc >= uncertainty_threshold) | np.isnan(unc)
     if cloud_dilation > 0:
         unc_mask = ndimage.binary_dilation(unc_mask, structure=kernel, iterations=cloud_dilation)
-    valid_mask &= ~unc_mask
+    invalid_mask |= unc_mask
         
-    return valid_mask
+    return invalid_mask
 
 def get_hls_mask(data_grp, t, sun_elevation_threshold, cloud_dilation, qa_reject_mask, aerosol_accept_level):
     """
     Derives a strict validity mask based on HLS Fmask bits and Solar angles.
     Reference: HLS Product User Guide V2.0, Table 9.
+    True = Invalid/Masked, False = Valid.
     """
     # EVIDENCE-BASED FIX: Dimensionality Alignment
     # Fmask is stored in the ARD cube as a 3D array (Time, YDim, XDim) to eliminate 
@@ -116,36 +117,34 @@ def get_hls_mask(data_grp, t, sun_elevation_threshold, cloud_dilation, qa_reject
     
     # 1. QA Bitwise Rejection (Bits 0-5)
     # Reject conditions (e.g., if bit 1 (cloud) is 1, and it's in the reject mask, result > 0)
-    qa_valid = (fmask & qa_reject_mask) == 0
+    qa_invalid = (fmask & qa_reject_mask) != 0
     
     # 2. Aerosol Level Rejection (Bits 6-7)
     # Extract bits 6 & 7 as a 2-bit integer (0=Climatology, 1=Low, 2=Moderate, 3=High)
     aerosol_bits = (fmask >> 6) & 0b11
     
     if aerosol_accept_level == 'low':
-        aerosol_valid = aerosol_bits <= 1
+        aerosol_invalid = aerosol_bits > 1
     elif aerosol_accept_level == 'medium':
-        aerosol_valid = aerosol_bits <= 2
+        aerosol_invalid = aerosol_bits > 2
     else: # 'high'
-        aerosol_valid = aerosol_bits <= 3
+        aerosol_invalid = aerosol_bits > 3
         
     # 3. Sun Elevation Threshold
     # Angles array band order: ["SZA", "SAA", "VZA", "VAA"]
     sza = angles[0, :, :]
     sun_elev = 90.0 - sza
     # Note: np.nan values natively evaluate to False, perfectly rejecting nodata margins
-    sun_valid = sun_elev >= sun_elevation_threshold
+    sun_invalid = (sun_elev < sun_elevation_threshold) | np.isnan(sun_elev)
     
-    # Combine valid masks
-    valid_mask = qa_valid & aerosol_valid & sun_valid
+    # Combine invalid masks
+    invalid_mask = qa_invalid | aerosol_invalid | sun_invalid
     
     # 4. Custom Morphological Dilation
     if cloud_dilation > 0:
-        invalid_mask = ~valid_mask
-        dilated_invalid = binary_dilation(invalid_mask, iterations=cloud_dilation)
-        valid_mask = ~dilated_invalid
+        invalid_mask = binary_dilation(invalid_mask, iterations=cloud_dilation)
         
-    return valid_mask
+    return invalid_mask
 
 def maximumDistance(data, num_endmembers, chunk_size=50000):
     '''

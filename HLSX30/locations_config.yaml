@@ -1,16 +1,16 @@
 locations:
   Rochesterv2:
-    SOURCE_CACHE: Rochesterv2
+    SOURCE_CACHE: null
     ROI_LON_MIN: -77.770166
     ROI_LON_MAX: -77.376776
     ROI_LAT_MIN: 42.961778
     ROI_LAT_MAX: 43.342135
-    START_DATE: '2022-01-01'
-    END_DATE: '2026-03-31'
-    ALLOWED_MGRS_TILES:
-    - T17TQH
-    - T17TQJ
+    START_DATE: '2024-01-01'
+    END_DATE: '2026-06-01'
     TANAGER_AVAILABLE: true
+    TANAGER_STAC_URL: https://www.planet.com/data/stac/tanager-core-imagery/ROCX2025/collection.json
+    DRAGONETTE_AVAILABLE: true
+    DRAGONETTE_STAC_URL: https://wyvern-odp.com/industry/spatio_temporal/collection.json
   Tait:
     SOURCE_CACHE: Rochesterv2
     ROI_LON_MIN: -77.516127
@@ -19,9 +19,8 @@ locations:
     ROI_LAT_MAX: 43.159168
     START_DATE: '2014-01-01'
     END_DATE: '2026-03-31'
-    ALLOWED_MGRS_TILES:
-    - T17TQH
     TANAGER_AVAILABLE: true
+    TANAGER_STAC_URL: https://www.planet.com/data/stac/tanager-core-imagery/ROCX2025/collection.json
   Guatemala-Debris:
     SOURCE_CACHE: null
     ROI_LON_MIN: -88.222
@@ -30,8 +29,6 @@ locations:
     ROI_LAT_MAX: 16.0362
     START_DATE: '2020-08-01'
     END_DATE: '2020-10-31'
-    ALLOWED_MGRS_TILES:
-    - T16PCC
     TANAGER_AVAILABLE: false
   MtEtna:
     SOURCE_CACHE: MtEtna-Catania
@@ -41,9 +38,6 @@ locations:
     ROI_LAT_MAX: 37.83
     START_DATE: '2020-08-01'
     END_DATE: '2021-07-31'
-    ALLOWED_MGRS_TILES:
-    - T33SVB
-    - T33SWB
     TANAGER_AVAILABLE: false
   MtEtna-Catania:
     SOURCE_CACHE: MtEtna-Catania
@@ -53,9 +47,6 @@ locations:
     ROI_LAT_MAX: 37.9
     START_DATE: '2024-01-01'
     END_DATE: '2025-01-01'
-    ALLOWED_MGRS_TILES:
-    - T33SVB
-    - T33SWB
     TANAGER_AVAILABLE: false
   BuenosAires:
     SOURCE_CACHE: BuenosAires
@@ -65,10 +56,8 @@ locations:
     ROI_LAT_MAX: -34.26
     START_DATE: '2025-01-01'
     END_DATE: '2026-01-01'
-    ALLOWED_MGRS_TILES:
-    - T21HUB
-    - T21HUC
     TANAGER_AVAILABLE: true
+    TANAGER_STAC_URL: https://www.planet.com/data/stac/tanager-core-imagery/urban/collection.json
   Palisades:
     SOURCE_CACHE: Palisades
     ROI_LON_MIN: -118.92
@@ -77,10 +66,8 @@ locations:
     ROI_LAT_MAX: 34.85
     START_DATE: '2024-01-01'
     END_DATE: '2026-01-01'
-    ALLOWED_MGRS_TILES:
-    - T11SLT
-    - T11SLU
     TANAGER_AVAILABLE: true
+    TANAGER_STAC_URL: https://www.planet.com/data/stac/tanager-core-imagery/fire/collection.json
   Malibu:
     SOURCE_CACHE: Palisades
     ROI_LON_MIN: -118.847
@@ -89,8 +76,7 @@ locations:
     ROI_LAT_MAX: 34.21
     START_DATE: '2021-01-01'
     END_DATE: '2026-01-01'
-    ALLOWED_MGRS_TILES:
-    - T11SLT
     TANAGER_AVAILABLE: true
+    TANAGER_STAC_URL: https://www.planet.com/data/stac/tanager-core-imagery/fire/collection.json
 current_run:
-  location: Malibu
+  location: Rochesterv2

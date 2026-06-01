@@ -46,7 +46,7 @@ ROI_LAT_MIN = config["ROI_LAT_MIN"]
 ROI_LAT_MAX = config["ROI_LAT_MAX"]
 START_DATE = config["START_DATE"]
 END_DATE = config["END_DATE"]
-ALLOWED_MGRS_TILES = config["ALLOWED_MGRS_TILES"]
+
 
 if SOURCE_CACHE and SOURCE_CACHE in config_data["locations"]:
     cache_config = config_data["locations"][SOURCE_CACHE]
@@ -83,11 +83,10 @@ os.makedirs(COMBINED_OUTPUT_DIR, exist_ok=True)
 OUTPUT_NATIVE_HDF5 = os.path.join(COMBINED_OUTPUT_DIR, f"HLS_{Location}_STAC_Native_2025.h5")
 
 ASSETS_S30 = ['B01', 'B02', 'B03', 'B04', 'B05', 'B06', 'B07', 'B08', 'B11', 'B12', 'Fmask', 'SZA', 'SAA', 'VZA', 'VAA']
-ASSETS_L30 = ['B01', 'B02', 'B03', 'B04', 'B05', 'B06', 'B07', 'B10', 'B11', 'Fmask', 'SZA', 'SAA', 'VZA', 'VAA']
+ASSETS_L30 = ['B01', 'B02', 'B03', 'B04', 'B05', 'B06', 'B07', 'Fmask', 'SZA', 'SAA', 'VZA', 'VAA']
 
 S30_WAVELENGTHS = [0.443, 0.490, 0.560, 0.665, 0.705, 0.740, 0.783, 0.842, 1.610, 2.190]
 L30_SR_WAVELENGTHS = [0.443, 0.482, 0.561, 0.655, 0.865, 1.609, 2.201] 
-L30_TIRS_WAVELENGTHS = [10.9, 12.0]
 
 # Defensive Topology Enforcement for Output Grid (Location ROI)
 safe_bbox = [
@@ -184,10 +183,6 @@ def stac_native_window_read(collection_id, assets_list, temp_dir):
             img_id = item.id 
             parsed_mgrs_tile = img_id.split('.')[2] 
             
-            # Strict Filtering Directive: Drop unapproved marginal tiles
-            if parsed_mgrs_tile not in ALLOWED_MGRS_TILES:
-                print(f"  [{i}/{total_items}] [{img_id}] Dropping frame: Tile {parsed_mgrs_tile} is not in the approved whitelist.")
-                continue
                 
             cloud_cov = item.properties.get('eo:cloud_cover')
             
@@ -281,9 +276,8 @@ def stac_native_window_read(collection_id, assets_list, temp_dir):
                 if img_id in tile_data['items']:
                     del tile_data['items'][img_id]
                 
-    # Strict Failure Handling: Halt if whitelist + bounds yield no data
     if not tile_collections:
-        raise ValueError(f"CRITICAL ERROR: No valid tiles found for {collection_id} after enforcing ALLOWED_MGRS_TILES whitelist.")
+        raise ValueError(f"CRITICAL ERROR: No valid tiles found for {collection_id} after enforcing spatial bounds.")
         
     return tile_collections
 
@@ -364,7 +358,7 @@ def generate_odl_grid_string(grid_name, width, height, transform, proj_code, zon
 # ==========================================
 print(f"\nBuilding Native Truth Data HDF5 (HLS Only): {OUTPUT_NATIVE_HDF5}")
 
-def group_into_passes(tile_collections, time_threshold_sec=1800):
+def group_into_passes(tile_collections, time_threshold_sec=3000):
     all_items = []
     for tile, tile_data in tile_collections.items():
         for img_id, meta in tile_data['items'].items():
@@ -393,7 +387,7 @@ def group_into_passes(tile_collections, time_threshold_sec=1800):
     pass_clusters.sort(key=lambda c: c['mean_time'])
     return pass_clusters
 
-def stream_fused_stack_to_hdf5(h5f, group_path, pass_clusters, expected_sr, expected_thermal, expected_fmask_idx, wavelengths, thermal_wavelengths=None):
+def stream_fused_stack_to_hdf5(h5f, group_path, pass_clusters, expected_sr, expected_fmask_idx, wavelengths):
     from rasterio.warp import reproject, Resampling
     from rasterio.crs import CRS
     
@@ -418,20 +412,15 @@ def stream_fused_stack_to_hdf5(h5f, group_path, pass_clusters, expected_sr, expe
                                chunks=(1, 4, chunk_h, chunk_w),
                                dtype=np.float32, compression='gzip', compression_opts=4)
 
-    th_ds = None
-    if expected_thermal > 0:
-        th_ds = grp.create_dataset('thermal_infrared', shape=(num_frames, expected_thermal, h, w), 
-                                   chunks=(1, expected_thermal, chunk_h, chunk_w),
-                                   dtype=np.float32, compression='gzip', compression_opts=4)
+
 
     meta_arrays = {'acq': [], 'space': [], 'saz': [], 'sel': [], 'cc': []}
 
     # 2. Stream Data to Disk Pass-by-Pass
     for idx, cluster in enumerate(pass_clusters):
-        sr_pass = np.full((expected_sr, h, w), -9999.0, dtype=np.float32)
-        th_pass = np.full((expected_thermal, h, w), -9999.0, dtype=np.float32) if expected_thermal > 0 else None
+        sr_pass = np.full((expected_sr, h, w), -9999, dtype=np.int32)
         fm_pass = np.full((1, h, w), 255, dtype=np.uint8)
-        ag_pass = np.full((4, h, w), -9999.0, dtype=np.float32)
+        ag_pass = np.full((4, h, w), 40000, dtype=np.uint16)
 
         for img_id, meta, tile_data in cluster['items']:
             # Strict Failure Directive: Halt if catalog metadata is missing.
@@ -442,27 +431,15 @@ def stream_fused_stack_to_hdf5(h5f, group_path, pass_clusters, expected_sr, expe
             with rasterio.open(meta['filepath']) as src:
                 # SR bands
                 t_sr = src.read(list(range(1, expected_sr+1)))
-                temp_sr = np.full((expected_sr, h, w), -9999.0, dtype=np.float32)
+                temp_sr = np.full((expected_sr, h, w), -9999, dtype=np.int32)
                 reproject(
                     source=t_sr, destination=temp_sr,
                     src_transform=src.transform, src_crs=src.crs,
                     dst_transform=master_transform, dst_crs=master_epsg,
                     resampling=Resampling.nearest, src_nodata=-9999, dst_nodata=-9999
                 )
-                sr_pass = np.where(temp_sr != -9999.0, temp_sr, sr_pass)
+                sr_pass = np.where(temp_sr != -9999, temp_sr, sr_pass)
 
-                # Thermal bands
-                if expected_thermal > 0:
-                    off = expected_sr + 1
-                    t_th = src.read(list(range(off, off+expected_thermal)))
-                    temp_th = np.full((expected_thermal, h, w), -9999.0, dtype=np.float32)
-                    reproject(
-                        source=t_th, destination=temp_th,
-                        src_transform=src.transform, src_crs=src.crs,
-                        dst_transform=master_transform, dst_crs=master_epsg,
-                        resampling=Resampling.nearest, src_nodata=-9999, dst_nodata=-9999
-                    )
-                    th_pass = np.where(temp_th != -9999.0, temp_th, th_pass)
 
                 # Fmask
                 t_fm = src.read(expected_fmask_idx)
@@ -473,26 +450,28 @@ def stream_fused_stack_to_hdf5(h5f, group_path, pass_clusters, expected_sr, expe
                     dst_transform=master_transform, dst_crs=master_epsg,
                     resampling=Resampling.nearest, src_nodata=255, dst_nodata=255
                 )
-                fm_pass[0] = np.where(temp_fm != 255, temp_fm, fm_pass[0])
+                
+                # Derive valid footprint from SR to prevent swath-edge Fmask artifacts 
+                # (e.g. false cloud/shadows at the boundary) from overwriting valid tiles
+                sr_valid = temp_sr[0] != -9999
+                fm_pass[0] = np.where((temp_fm != 255) & sr_valid, temp_fm, fm_pass[0])
 
                 # Angles
                 t_ag = src.read(list(range(expected_fmask_idx+1, expected_fmask_idx+5)))
-                temp_ag = np.full((4, h, w), -9999.0, dtype=np.float32)
+                
+                temp_ag = np.full((4, h, w), 40000, dtype=np.uint16)
                 reproject(
                     source=t_ag, destination=temp_ag,
                     src_transform=src.transform, src_crs=src.crs,
                     dst_transform=master_transform, dst_crs=master_epsg,
-                    resampling=Resampling.nearest, src_nodata=-9999, dst_nodata=-9999
+                    resampling=Resampling.nearest, src_nodata=40000, dst_nodata=40000
                 )
-                ag_pass = np.where(temp_ag != -9999.0, temp_ag, ag_pass)
+                ag_pass = np.where((temp_ag != 40000) & sr_valid, temp_ag, ag_pass)
 
-        # Scale and apply to HDF5
-        sr_ds[idx, ...] = np.where(sr_pass != -9999.0, sr_pass * 0.0001, np.nan)
-        if expected_thermal > 0:
-            th_ds[idx, ...] = np.where(th_pass != -9999.0, th_pass * 0.01, np.nan)
+        sr_ds[idx, ...] = np.where(sr_pass != -9999, sr_pass.astype(np.float32) * 0.0001, np.nan)
         fm_ds[idx, ...] = fm_pass
         
-        ag_mapped = np.where(ag_pass != -9999.0, ag_pass * 0.01, np.nan)
+        ag_mapped = np.where(ag_pass != 40000, ag_pass * 0.01, np.nan)
         ag_ds[idx, ...] = ag_mapped
 
         # Derive global angles strictly from valid real data
@@ -527,10 +506,7 @@ def stream_fused_stack_to_hdf5(h5f, group_path, pass_clusters, expected_sr, expe
     sr_ds.attrs['spatial_ref'] = dst_crs_obj.to_wkt()
     sr_ds.attrs['GeoTransform'] = gdal_transform
     
-    if th_ds:
-        th_ds.attrs['units'] = "Kelvin/Celsius Apparent"
-        th_ds.attrs['_FillValue'] = np.nan
-        th_ds.attrs['wavelengths'] = thermal_wavelengths
+
         
     fm_ds.attrs['_FillValue'] = 255
     ag_ds.attrs['_FillValue'] = np.nan
@@ -557,15 +533,15 @@ with h5py.File(OUTPUT_NATIVE_HDF5, 'w') as h5f:
     
     s30_passes = group_into_passes(s30_collections)
     if s30_passes:
-        num_f = stream_fused_stack_to_hdf5(h5f, '/HDFEOS/GRIDS/HLSS30_Merged/Data Fields', s30_passes, 13, 0, 14, S30_WAVELENGTHS)
+        num_f = stream_fused_stack_to_hdf5(h5f, '/HDFEOS/GRIDS/HLSS30_Merged/Data Fields', s30_passes, 10, 11, S30_WAVELENGTHS)
         if num_f > 0:
-            odl_blocks.append(generate_odl_grid_string("HLSS30_Merged", master_width, master_height, master_transform, "GCTP_UTM", master_zone, [0.0]*13, 13, num_f, False))
+            odl_blocks.append(generate_odl_grid_string("HLSS30_Merged", master_width, master_height, master_transform, "GCTP_UTM", master_zone, [0.0]*13, 10, num_f, False))
 
     l30_passes = group_into_passes(l30_collections)
     if l30_passes:
-        num_f = stream_fused_stack_to_hdf5(h5f, '/HDFEOS/GRIDS/HLSL30_Merged/Data Fields', l30_passes, 8, 2, 11, L30_SR_WAVELENGTHS, thermal_wavelengths=L30_TIRS_WAVELENGTHS)
+        num_f = stream_fused_stack_to_hdf5(h5f, '/HDFEOS/GRIDS/HLSL30_Merged/Data Fields', l30_passes, 7, 8, L30_SR_WAVELENGTHS)
         if num_f > 0:
-            odl_blocks.append(generate_odl_grid_string("HLSL30_Merged", master_width, master_height, master_transform, "GCTP_UTM", master_zone, [0.0]*13, 8, num_f, True))
+            odl_blocks.append(generate_odl_grid_string("HLSL30_Merged", master_width, master_height, master_transform, "GCTP_UTM", master_zone, [0.0]*13, 7, num_f, False))
 
     full_odl = "GROUP=SwathStructure\nEND_GROUP=SwathStructure\nGROUP=GridStructure\n" + "\n".join(odl_blocks) + "\nEND_GROUP=GridStructure\nGROUP=PointStructure\nEND_GROUP=PointStructure\nGROUP=ZaStructure\nEND_GROUP=ZaStructure\nEND\n"
     info_grp.create_dataset("StructMetadata.0", shape=(1,), dtype=h5py.string_dtype(encoding='ascii'), data=full_odl)

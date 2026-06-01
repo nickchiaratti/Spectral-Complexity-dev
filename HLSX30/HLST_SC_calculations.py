@@ -85,7 +85,7 @@ def compute_frame_metrics(payload):
                 slide_map = None
                 
         telemetry['I/O_Read'] = time.perf_counter() - t0
-        valid_mask = frame_mask == 1 if MASKING else np.ones((height, width), dtype=bool)
+        valid_mask = frame_mask == 0 if MASKING else np.ones((height, width), dtype=bool)
 
         # --- 2. Spectral Indices ---
         ndvi, ndbi = None, None

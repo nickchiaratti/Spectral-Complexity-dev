@@ -243,7 +243,7 @@ class HarmonizedComplexityViewer:
             if 0 <= y < self.height and 0 <= x < self.width:
                 # Extract 1D array over time
                 vals = all_comp[:, y, x]
-                masks = all_mask[:, y, x] == 1
+                masks = all_mask[:, y, x] == 0
                 
                 for i in range(self.total_frames):
                     if masks[i] and not np.isnan(vals[i]):
@@ -402,7 +402,7 @@ class HarmonizedComplexityViewer:
         comp_data = self.base_dset[idx, ...].copy()
         mask_data = self.common_mask_dset[idx, ...]
         if MASKING:
-            comp_data[mask_data == 0] = np.nan
+            comp_data[mask_data == 1] = np.nan
 
         # RGB handling
         if raw_vis.shape[0] in [3, 4]:
@@ -795,10 +795,10 @@ class HarmonizedComplexityViewer:
             return
 
         l_data = self.base_dset[l_idx, ...].copy()
-        if MASKING: l_data[self.common_mask_dset[l_idx] == 0] = np.nan
+        if MASKING: l_data[self.common_mask_dset[l_idx] == 1] = np.nan
             
         t_data = self.base_dset[t_idx, ...].copy()
-        if MASKING: t_data[self.common_mask_dset[t_idx] == 0] = np.nan
+        if MASKING: t_data[self.common_mask_dset[t_idx] == 1] = np.nan
 
         h = min(l_data.shape[0], t_data.shape[0])
         w = min(l_data.shape[1], t_data.shape[1])

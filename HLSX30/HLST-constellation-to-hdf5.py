@@ -62,8 +62,7 @@ else:
 OUTPUT_MASTER_HDF5 = os.path.join(COMBINED_OUTPUT_DIR, f"HLST_{Location}_Harmonized.h5")
 
 S30_WAVELENGTHS = [0.443, 0.490, 0.560, 0.665, 0.705, 0.740, 0.783, 0.842, 1.610, 2.190]
-L30_SR_WAVELENGTHS = [0.443, 0.482, 0.561, 0.655, 0.865, 1.609, 2.201] 
-L30_TIRS_WAVELENGTHS = [10.9, 12.0]
+L30_SR_WAVELENGTHS = [0.443, 0.482, 0.561, 0.655, 0.865, 1.609, 2.201]
 
 safe_bbox = [
     min(ROI_LON_MIN, ROI_LON_MAX), max(ROI_LAT_MIN, ROI_LAT_MAX), 
@@ -79,7 +78,7 @@ SUN_ELEVATION_THRESHOLD = 30
 # HLS Specific Configuration (Unified Fmask for both S30 and L30)
 # Bits 0-5: cirrus, cloud, adj cloud/shadow, cloud shadow, snow/ice, water
 HLS_CLOUD_DILATION =0
-QA_REJECT_MASK = 0b111111 
+QA_REJECT_MASK = 0b11111 
 AEROSOL_ACCEPT_LEVEL = 'medium' # 'low' (0-1), 'medium' (0-2), 'high' (0-3)
 
 # TANAGER Specific Configuration
@@ -126,21 +125,16 @@ print(f"Master Grid Established: {master_width}x{master_height} at Dynamic Alber
 # ==========================================
 # 3. HDFEOS5 ODL GENERATORS
 # ==========================================
-def generate_odl_grid_string(grid_name, width, height, transform, proj_code, zone, proj_params, num_sr_bands, num_frames, has_thermal, has_tile_mask=False):
+def generate_odl_grid_string(grid_name, width, height, transform, proj_code, zone, proj_params, num_sr_bands, num_frames, has_tile_mask=False):
     ul_x, ul_y = transform.c, transform.f
     lr_x = transform.c + (transform.a * width)
     lr_y = transform.f + (transform.e * height)
     p_str = str(tuple(proj_params)).replace(' ', '').replace('(', '').replace(')', '')
     
-    thermal_dim = f"""            OBJECT=Dimension_3\n                DimensionName="ThermalBands"\n                Size=2\n            END_OBJECT=Dimension_3""" if has_thermal else ""
-    
     fields = []
     idx = 1
     fields.append(f"""            OBJECT=DataField_{idx}\n                DataFieldName="surface_reflectance"\n                DataType=HDF5T_NATIVE_FLOAT\n                DimList=("Time","Bands","YDim","XDim")\n            END_OBJECT=DataField_{idx}""")
     idx += 1
-    if has_thermal:
-        fields.append(f"""            OBJECT=DataField_{idx}\n                DataFieldName="thermal_infrared"\n                DataType=HDF5T_NATIVE_FLOAT\n                DimList=("Time","ThermalBands","YDim","XDim")\n            END_OBJECT=DataField_{idx}""")
-        idx += 1
     fields.append(f"""            OBJECT=DataField_{idx}\n                DataFieldName="Fmask"\n                DataType=HDF5T_NATIVE_UINT8\n                DimList=("Time","YDim","XDim")\n            END_OBJECT=DataField_{idx}""")
     idx += 1
     fields.append(f"""            OBJECT=DataField_{idx}\n                DataFieldName="solar_view_angles"\n                DataType=HDF5T_NATIVE_FLOAT\n                DimList=("Time","AngleBands","YDim","XDim")\n            END_OBJECT=DataField_{idx}""")
@@ -150,7 +144,7 @@ def generate_odl_grid_string(grid_name, width, height, transform, proj_code, zon
         idx += 1
     fields.append(f"""            OBJECT=DataField_{idx}\n                DataFieldName="ortho_visual"\n                DataType=HDF5T_NATIVE_UINT8\n                DimList=("Time","VisBand","YDim","XDim")\n            END_OBJECT=DataField_{idx}""")
     idx += 1
-    fields.append(f"""            OBJECT=DataField_{idx}\n                DataFieldName="common_mask"\n                DataType=HDF5T_NATIVE_UINT8\n                DimList=("Time","YDim","XDim")\n            END_OBJECT=DataField_{idx}""")
+    fields.append(f"""            OBJECT=DataField_{idx}\n                DataFieldName="common_mask"\n                DataType=HDF5T_NATIVE_B8\n                DimList=("Time","YDim","XDim")\n            END_OBJECT=DataField_{idx}""")
     
     data_fields_str = "\n".join(fields)
     
@@ -173,7 +167,6 @@ def generate_odl_grid_string(grid_name, width, height, transform, proj_code, zon
                 DimensionName="Bands"
                 Size={num_sr_bands}
             END_OBJECT=Dimension_2
-{thermal_dim}
             OBJECT=Dimension_4
                 DimensionName="YDim"
                 Size={height}
@@ -212,6 +205,7 @@ def generate_tanager_odl_string(grid_name, width, height, transform, proj_code, 
         elif "uint" in str(dtype): eos_type = "HDF5T_NATIVE_UINT"
         elif "int" in str(dtype): eos_type = "HDF5T_NATIVE_INT"
         elif "float64" in str(dtype) or "double" in str(dtype): eos_type = "HDF5T_NATIVE_DOUBLE"
+        elif "bool" in str(dtype): eos_type = "HDF5T_NATIVE_B8"
         
         dims_list = ",".join([f"\"{d}\"" for d in dim_names])
         block = f"""            OBJECT=DataField_{i+1}
@@ -260,7 +254,7 @@ def generate_tanager_odl_string(grid_name, width, height, transform, proj_code, 
         END_GROUP=MergedFields
     END_GROUP={grid_name}"""
 
-def write_hdf_sensor_group(h5f, group_path, data_dict, wavelengths, crs, transform, thermal_wavelengths=None, tile_mapping_json=None):
+def write_hdf_sensor_group(h5f, group_path, data_dict, wavelengths, crs, transform, tile_mapping_json=None):
     if not data_dict or data_dict['count'] == 0: return
     grp = h5f.create_group(group_path)
     gdal_transform = np.array([transform.c, transform.a, transform.b, transform.f, transform.d, transform.e], dtype='float64')
@@ -273,11 +267,6 @@ def write_hdf_sensor_group(h5f, group_path, data_dict, wavelengths, crs, transfo
     sr_ds.attrs['units'] = "Reflectance"; sr_ds.attrs['_FillValue'] = np.nan; sr_ds.attrs['wavelengths'] = wavelengths
     sr_ds.attrs['spatial_ref'] = crs.to_wkt(); sr_ds.attrs['GeoTransform'] = gdal_transform
     
-    if thermal_wavelengths and data_dict['th'] is not None:
-        th_bands = data_dict['th'].shape[1]
-        th_ds = grp.create_dataset('thermal_infrared', data=data_dict['th'], compression='gzip', compression_opts=4, chunks=(1, th_bands, chunk_h, chunk_w))
-        th_ds.attrs['units'] = "Kelvin/Celsius Apparent"; th_ds.attrs['_FillValue'] = np.nan; th_ds.attrs['wavelengths'] = thermal_wavelengths
-        
     fmask_ds = grp.create_dataset('Fmask', data=data_dict['fm'][:, 0, :, :], dtype='uint8', compression='gzip', compression_opts=4, chunks=(1, chunk_h, chunk_w))
     fmask_ds.attrs['_FillValue'] = 255
     ang_ds = grp.create_dataset('solar_view_angles', data=data_dict['ag'], compression='gzip', compression_opts=4, chunks=(1, 4, chunk_h, chunk_w))
@@ -287,11 +276,14 @@ def write_hdf_sensor_group(h5f, group_path, data_dict, wavelengths, crs, transfo
     vis_ds.attrs['spatial_ref'] = crs.to_wkt()
     vis_ds.attrs['GeoTransform'] = gdal_transform
 
-    mask_ds = grp.create_dataset('common_mask', data=data_dict['mask'], dtype='uint8', compression='gzip', compression_opts=4, chunks=(1, chunk_h, chunk_w))
-    mask_ds.attrs['_FillValue'] = 0
-    mask_ds.attrs['description'] = "0 = Invalid/Masked, 1 = Valid. Generated from SpecComplex ARD rules."
+    mask_ds = grp.create_dataset('common_mask', data=data_dict['mask'], dtype=bool, compression='gzip', compression_opts=4, chunks=(1, chunk_h, chunk_w))
+    mask_ds.attrs['description'] = "True = Invalid/Masked, False = Valid."
     mask_ds.attrs['spatial_ref'] = crs.to_wkt()
     mask_ds.attrs['GeoTransform'] = gdal_transform
+    mask_ds.attrs['qa_reject_mask'] = QA_REJECT_MASK
+    mask_ds.attrs['cloud_dilation'] = HLS_CLOUD_DILATION
+    mask_ds.attrs['aerosol_accept_level'] = AEROSOL_ACCEPT_LEVEL
+    mask_ds.attrs['sun_elevation_threshold'] = SUN_ELEVATION_THRESHOLD
 
     if 'tm' in data_dict and data_dict['tm'] is not None:
         tm_ds = grp.create_dataset('source_tile_mask', data=data_dict['tm'][:, 0, :, :], dtype='uint8', compression='gzip', compression_opts=4, chunks=(1, chunk_h, chunk_w))
@@ -332,18 +324,17 @@ def fetch_native_hls_groups(native_h5_path, sensor_prefix):
                 
     return daily_groups, unique_tiles
 
-def process_hls_master_stack(native_h5_path, daily_groups, expected_sr, expected_thermal, tile_map):
+def process_hls_master_stack(native_h5_path, daily_groups, expected_sr, tile_map):
     """Harmonizes unprojected native arrays into the Master Grid directly in-memory."""
     sorted_dates = sorted(daily_groups.keys())
     num_frames = len(sorted_dates)
     if num_frames == 0: return None
     
     stk_sr = np.full((num_frames, expected_sr, master_height, master_width), np.nan, dtype=np.float32)
-    stk_th = np.full((num_frames, expected_thermal, master_height, master_width), np.nan, dtype=np.float32) if expected_thermal > 0 else None
     stk_fm = np.full((num_frames, 1, master_height, master_width), 255, dtype=np.uint8)
-    stk_tm = np.full((num_frames, 1, master_height, master_width), 0, dtype=np.uint8)
+    stk_tm = np.zeros((num_frames, 1, master_height, master_width), dtype=np.uint16)
     stk_ag = np.full((num_frames, 4, master_height, master_width), np.nan, dtype=np.float32)
-    stk_mask = np.zeros((num_frames, master_height, master_width), dtype=np.uint8)
+    stk_mask = np.ones((num_frames, master_height, master_width), dtype=bool)
     vis_data = np.zeros((num_frames, 4, master_height, master_width), dtype=np.uint8)
     meta_arrays = {'acq': [], 'space': [], 'saz': [], 'sel': [], 'cc': []}
     
@@ -377,13 +368,6 @@ def process_hls_master_stack(native_h5_path, daily_groups, expected_sr, expected
                 mask_sr = ~np.isnan(tmp_sr)
                 stk_sr[idx][mask_sr] = tmp_sr[mask_sr]
                 
-                if expected_thermal > 0:
-                    src_th = h5f[f'{df_path}/thermal_infrared'][fidx]
-                    tmp_th = np.full((expected_thermal, master_height, master_width), np.nan, dtype=np.float32)
-                    reproject(source=src_th, destination=tmp_th, src_transform=src_tf, src_crs=src_crs, dst_transform=master_transform, dst_crs=master_crs, resampling=Resampling.cubic, src_nodata=np.nan, dst_nodata=np.nan)
-                    mask_th = ~np.isnan(tmp_th)
-                    stk_th[idx][mask_th] = tmp_th[mask_th]
-
                 src_fm = h5f[f'{df_path}/Fmask'][fidx]
                 tmp_fm = np.full((1, master_height, master_width), 255, dtype=np.uint8)
                 reproject(source=src_fm, destination=tmp_fm, src_transform=src_tf, src_crs=src_crs, dst_transform=master_transform, dst_crs=master_crs, resampling=Resampling.nearest, src_nodata=255, dst_nodata=255)
@@ -412,7 +396,7 @@ def process_hls_master_stack(native_h5_path, daily_groups, expected_sr, expected
                                             sun_elevation_threshold=SUN_ELEVATION_THRESHOLD,
                                             cloud_dilation=HLS_CLOUD_DILATION,
                                             qa_reject_mask=QA_REJECT_MASK,
-                                            aerosol_accept_level=AEROSOL_ACCEPT_LEVEL).astype(np.uint8)
+                                            aerosol_accept_level=AEROSOL_ACCEPT_LEVEL).astype(bool)
             
             rgba_img = sc.generate_rgba_image(stk_sr[idx])
             vis_data[idx, ...] = np.transpose(rgba_img, (2, 0, 1))
@@ -431,8 +415,6 @@ def process_hls_master_stack(native_h5_path, daily_groups, expected_sr, expected
         
     num_valid = len(valid_indices)
     stk_sr = stk_sr[valid_indices]
-    if expected_thermal > 0:
-        stk_th = stk_th[valid_indices]
     stk_fm = stk_fm[valid_indices]
     stk_tm = stk_tm[valid_indices]
     stk_ag = stk_ag[valid_indices]
@@ -445,7 +427,7 @@ def process_hls_master_stack(native_h5_path, daily_groups, expected_sr, expected
     meta_arrays['sel'] = [meta_arrays['sel'][i] for i in valid_indices]
     meta_arrays['cc'] = [meta_arrays['cc'][i] for i in valid_indices]
 
-    return {'sr': stk_sr, 'th': stk_th, 'fm': stk_fm, 'ag': stk_ag, 'tm': stk_tm, 'vis': vis_data, 'mask': stk_mask, 'meta': meta_arrays, 'count': num_valid}
+    return {'sr': stk_sr, 'fm': stk_fm, 'ag': stk_ag, 'tm': stk_tm, 'vis': vis_data, 'mask': stk_mask, 'meta': meta_arrays, 'count': num_valid}
 
 # ==========================================
 # 5. MASTER EXECUTION
@@ -472,16 +454,16 @@ with h5py.File(OUTPUT_MASTER_HDF5, 'w') as h5f:
     
     # --- 5a. HLS Master Grid Stitching ---
     print("Harmonizing HLSS30...")
-    s30_master_data = process_hls_master_stack(INPUT_NATIVE_HDF5, s30_daily, 13, 0, master_tile_mapping)
+    s30_master_data = process_hls_master_stack(INPUT_NATIVE_HDF5, s30_daily, 10, master_tile_mapping)
     if s30_master_data:
         write_hdf_sensor_group(h5f, '/HDFEOS/GRIDS/HLSS30/Data Fields', s30_master_data, S30_WAVELENGTHS, master_crs, master_transform, tile_mapping_json=master_tile_mapping_json)
-        odl_blocks.append(generate_odl_grid_string("HLSS30", master_width, master_height, master_transform, master_proj, master_zone, master_gctp, 13, s30_master_data['count'], False, has_tile_mask=True))
+        odl_blocks.append(generate_odl_grid_string("HLSS30", master_width, master_height, master_transform, master_proj, master_zone, master_gctp, 10, s30_master_data['count'], has_tile_mask=True))
 
     print("Harmonizing HLSL30...")
-    l30_master_data = process_hls_master_stack(INPUT_NATIVE_HDF5, l30_daily, 8, 2, master_tile_mapping)
+    l30_master_data = process_hls_master_stack(INPUT_NATIVE_HDF5, l30_daily, 7, master_tile_mapping)
     if l30_master_data:
-        write_hdf_sensor_group(h5f, '/HDFEOS/GRIDS/HLSL30/Data Fields', l30_master_data, L30_SR_WAVELENGTHS, master_crs, master_transform, L30_TIRS_WAVELENGTHS, tile_mapping_json=master_tile_mapping_json)
-        odl_blocks.append(generate_odl_grid_string("HLSL30", master_width, master_height, master_transform, master_proj, master_zone, master_gctp, 8, l30_master_data['count'], True, has_tile_mask=True))
+        write_hdf_sensor_group(h5f, '/HDFEOS/GRIDS/HLSL30/Data Fields', l30_master_data, L30_SR_WAVELENGTHS, master_crs, master_transform, tile_mapping_json=master_tile_mapping_json)
+        odl_blocks.append(generate_odl_grid_string("HLSL30", master_width, master_height, master_transform, master_proj, master_zone, master_gctp, 7, l30_master_data['count'], has_tile_mask=True))
 
     # --- 5b. TANAGER Hyperspectral Processing (From Native Stack) ---
     if os.path.exists(INPUT_NATIVE_TANAGER_HDF5):
@@ -610,11 +592,11 @@ with h5py.File(OUTPUT_MASTER_HDF5, 'w') as h5f:
 
                     # Generate the final Harmonized 'common_mask' utilizing the master grid data
                     print("  Generating Common Mask for Tanager on Master Grid...")
-                    mask_dset = grp_tanager.create_dataset('common_mask', shape=(num_frames, master_height, master_width), dtype='uint8', compression="gzip", compression_opts=4, fillvalue=0, chunks=(1, chunk_h, chunk_w))
-                    mask_dset.attrs['spatial_ref'] = master_crs.to_wkt()
-                    mask_dset.attrs['GeoTransform'] = gdal_transform
-                    mask_dset.attrs['description'] = "0 = Invalid/Masked, 1 = Valid. Generated from SpecComplex ARD rules."
-                    datasets_created_info.append(("common_mask", np.uint8, 3, ["Time", "YDim", "XDim"]))
+                    mask_ds = grp_tanager.create_dataset('common_mask', shape=(num_frames, master_height, master_width), dtype=bool, compression="gzip", compression_opts=4, chunks=(1, chunk_h, chunk_w))
+                    mask_ds.attrs['spatial_ref'] = master_crs.to_wkt()
+                    mask_ds.attrs['GeoTransform'] = gdal_transform
+                    mask_ds.attrs['description'] = "True = Invalid/Masked, False = Valid. Generated from SpecComplex ARD rules."
+                    datasets_created_info.append(("common_mask", bool, 3, ["Time", "YDim", "XDim"]))
 
                     # Flush the file to finalize all written compressed chunks on disk before reading them back
                     h5f.flush()
@@ -626,7 +608,7 @@ with h5py.File(OUTPUT_MASTER_HDF5, 'w') as h5f:
                                                          apply_cloud_mask=True,
                                                          uncertainty_threshold=TANAGER_UNCERTAINTY_THRESHOLD,
                                                          aerosol_depth_threshold=TANAGER_AEROSOL_THRESHOLD)
-                        mask_dset[out_idx, ...] = valid_mask.astype(np.uint8)
+                        mask_ds[out_idx, ...] = valid_mask.astype(bool)
 
                     odl_blocks.append(generate_tanager_odl_string("TANAGER", master_width, master_height, master_transform, master_proj, master_zone, master_gctp, datasets_created_info, num_frames, band_count))
                 else:
@@ -676,10 +658,10 @@ with h5py.File(OUTPUT_MASTER_HDF5, 'w') as h5f:
             local_idx = meta['local_idx']
             src_val = h5f[f"/HDFEOS/GRIDS/{grid_name}/Data Fields/ortho_visual"][local_idx, ...]
             if src_val.shape[0] == 3:
-                # Add Alpha channel using common_mask (1 = valid, 0 = invalid) or default to 255 (fully opaque)
+                # Add Alpha channel using common_mask (False = valid -> alpha=1, True = invalid -> alpha=0)
                 if "common_mask" in h5f[f"/HDFEOS/GRIDS/{grid_name}/Data Fields"]:
                     mask = h5f[f"/HDFEOS/GRIDS/{grid_name}/Data Fields/common_mask"][local_idx, ...]
-                    alpha = np.where(mask == 1, 255, 0).astype('uint8')
+                    alpha = np.where(mask, 0, 255).astype('uint8')
                 else:
                     alpha = np.full((src_val.shape[1], src_val.shape[2]), 255, dtype='uint8')
                 src_val = np.concatenate([src_val, alpha[np.newaxis, ...]], axis=0)
