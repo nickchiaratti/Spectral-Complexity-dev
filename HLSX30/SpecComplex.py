@@ -864,27 +864,30 @@ def calc_ndbi_frame(frame_data, swir_idx=5, nir_idx=4):
     
     return ndbi
 
-def calc_evi_frame(frame_data):
+def calc_evi_frame(frame_data, blue_idx=1, red_idx=3, nir_idx=4):
     """
     Calculates the Enhanced Vegetation Index (EVI) per pixel for a given frame.
     
     Formula: EVI = G * ((NIR - Red) / (NIR + C1 * Red - C2 * Blue + L))
     where G=2.5, C1=6, C2=7.5, L=1 (Reference: Huete et al., 2002).
     
-    Assumes standard Landsat 8/9 Level-2 stacker band order:
-    Index 1: Blue  (L8/9 Band 2)
-    Index 3: Red   (L8/9 Band 4)
-    Index 4: NIR   (L8/9 Band 5)
+    Args:
+        frame_data (np.ndarray): 3D image cube [bands, height, width]
+        blue_idx (int): Index of the Blue band. Defaults to 1 (Landsat 8/9 Band 2).
+        red_idx (int): Index of the Red band. Defaults to 3 (Landsat 8/9 Band 4).
+        nir_idx (int): Index of the Near-Infrared (NIR) band. Defaults to 4 (Landsat 8/9 Band 5).
+                       For hyperspectral data (Tanager), these indices must be explicitly 
+                       provided.
     """
     bands, height, width = frame_data.shape
     
-    if bands < 5:
-        warnings.warn("Insufficient bands to calculate EVI. Returning NaNs.")
+    if max(blue_idx, red_idx, nir_idx) >= bands:
+        warnings.warn(f"Insufficient bands to calculate EVI. Requires bands at indices {blue_idx}, {red_idx}, and {nir_idx}. Returning NaNs.")
         return np.full((height, width), np.nan, dtype=np.float32)
         
-    blue = frame_data[1, :, :]
-    red = frame_data[3, :, :]
-    nir = frame_data[4, :, :]
+    blue = frame_data[blue_idx, :, :]
+    red = frame_data[red_idx, :, :]
+    nir = frame_data[nir_idx, :, :]
     
     # Standard EVI coefficients (Huete et al., 2002)
     G = 2.5
@@ -896,7 +899,8 @@ def calc_evi_frame(frame_data):
     denominator = nir + (C1 * red) - (C2 * blue) + L
     
     # Safely calculate EVI avoiding division by zero
-    evi = G * ((nir - red) / denominator)
+    with np.errstate(divide='ignore', invalid='ignore'):
+        evi = G * ((nir - red) / denominator)
     
     # Mask out infinity caused by extreme outliers or zeros
     evi[np.isinf(evi)] = np.nan

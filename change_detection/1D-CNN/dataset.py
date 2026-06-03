@@ -40,8 +40,7 @@ class SITSDataset(Dataset):
             # Read and transpose arrays to (h, w, frames) for CPU cache-friendly contiguous memory
             z_score = np.ascontiguousarray(np.transpose(z_score, (1, 2, 0)))
             unified_masks = harm_grp['common_mask'][:]
-            qa_mask = ~(unified_masks == 1)
-            valid_mask = ~qa_mask
+            valid_mask = ~unified_masks.astype(bool)
             valid_mask = np.ascontiguousarray(np.transpose(valid_mask, (1, 2, 0)))
             valid_mask &= ~np.isnan(z_score)
             

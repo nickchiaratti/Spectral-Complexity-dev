@@ -17,11 +17,11 @@ TARGET_RED_NM = 670.0
 TARGET_GREEN_NM = 550.0
 TARGET_BLUE_NM = 480.0
 
-SOURCE_DIR = "C:/satelliteImagery/Tanager/BuenosAires_SourceData"
+SOURCE_DIR = "C:/satelliteImagery/Tanager/Palisades_SourceData"
 OUTPUT_DIR = SOURCE_DIR
 if not os.path.exists(OUTPUT_DIR):
     os.makedirs(OUTPUT_DIR)
-OUTPUT_FILE = os.path.join(OUTPUT_DIR, "Tanager_Native_Stack_BuenosAires.h5")
+OUTPUT_FILE = os.path.join(OUTPUT_DIR, "Tanager_Native_Stack_Palisades.h5")
 
 def extract_georeferencing_from_h5(h5_path):
     """
@@ -356,10 +356,10 @@ def process_native_stack():
         sr_dt = sr_info['dtype']
         sr_fill = sr_info['fill']
 
-        ortho_vis_dset = grp_tanager.create_dataset("ortho_visual", shape=(len(grouped_scenes), 3, height, width), dtype=sr_dt, compression="gzip", fillvalue=sr_fill)
+        ortho_vis_dset = grp_tanager.create_dataset("ortho_visual", shape=(len(grouped_scenes), 3, height, width), dtype='uint8', compression="gzip", fillvalue=0)
         ortho_vis_dset.attrs['spatial_ref'] = global_crs
         ortho_vis_dset.attrs['GeoTransform'] = np.array(gdal_transform, dtype='float64')
-        datasets_created_info.append(("ortho_visual", sr_dt, 3, ["Time", "RGBBand", "YDim", "XDim"]))
+        datasets_created_info.append(("ortho_visual", np.dtype('uint8'), 3, ["Time", "RGBBand", "YDim", "XDim"]))
         
         sr_path_in_first = [d['h5_path'] for d in dataset_info_list if d['name'] == 'surface_reflectance'][0]
         with h5py.File(first_h5, 'r') as f0:
@@ -373,9 +373,27 @@ def process_native_stack():
         sr_dset_ref = grp_tanager["surface_reflectance"]
 
         for t_idx in tqdm(range(len(grouped_scenes)), desc=f"  Creating ortho_visual with indices R={r_idx}, G={g_idx}, B={b_idx}"):            
-            ortho_vis_dset[t_idx, 0, :, :] = sr_dset_ref[t_idx, r_idx, :, :]
-            ortho_vis_dset[t_idx, 1, :, :] = sr_dset_ref[t_idx, g_idx, :, :]
-            ortho_vis_dset[t_idx, 2, :, :] = sr_dset_ref[t_idx, b_idx, :, :]
+            r_band = sr_dset_ref[t_idx, r_idx, :, :]
+            g_band = sr_dset_ref[t_idx, g_idx, :, :]
+            b_band = sr_dset_ref[t_idx, b_idx, :, :]
+            
+            try: r_stretched = percentile_stretch(r_band, sr_fill, 1, 99)
+            except ValueError: r_stretched = np.zeros((height, width), dtype=np.uint8)
+            
+            try: g_stretched = percentile_stretch(g_band, sr_fill, 1, 99)
+            except ValueError: g_stretched = np.zeros((height, width), dtype=np.uint8)
+            
+            try: b_stretched = percentile_stretch(b_band, sr_fill, 1, 99)
+            except ValueError: b_stretched = np.zeros((height, width), dtype=np.uint8)
+            
+            mask = (r_band == sr_fill)
+            r_stretched[mask] = 0
+            g_stretched[mask] = 0
+            b_stretched[mask] = 0
+            
+            ortho_vis_dset[t_idx, 0, :, :] = r_stretched
+            ortho_vis_dset[t_idx, 1, :, :] = g_stretched
+            ortho_vis_dset[t_idx, 2, :, :] = b_stretched
 
         # Write struct metadata
         struct_meta = generate_struct_metadata("TANAGER", width, height, ul_coords, lr_coords, datasets_created_info, len(grouped_scenes), band_count, global_zone)

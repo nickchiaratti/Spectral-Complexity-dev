@@ -26,7 +26,7 @@ import yaml
 # ==========================================
 # 1. CONFIGURATION & AUTHENTICATION
 # ==========================================
-cloud_threshold = 40
+cloud_threshold = 80
 
 print("Authenticating with NASA Earthdata...")
 earthaccess.login(strategy="all", persist=True)
@@ -133,7 +133,7 @@ print(f"Unified Native Grid Established: {master_width}x{master_height} px at {m
 def stac_native_window_read(collection_id, assets_list, temp_dir):
     print(f"\nQuerying NASA CMR STAC for {collection_id}...")
     catalog = pystac_client.Client.open("https://cmr.earthdata.nasa.gov/stac/LPCLOUD")
-    search = catalog.search(collections=[collection_id], bbox=cache_bbox, datetime=f"{START_DATE}/{END_DATE}", limit=500)
+    search = catalog.search(collections=[collection_id], bbox=safe_bbox, datetime=f"{START_DATE}/{END_DATE}", limit=500)
     filtered_items = [i for i in list(search.items()) if i.properties.get('eo:cloud_cover', 100) < cloud_threshold]
     
     total_items = len(filtered_items)
@@ -229,8 +229,8 @@ def stac_native_window_read(collection_id, assets_list, temp_dir):
                 with rasterio.open(item.assets[asset_key_ref].href) as src:
                     if tile_data.get('window') is None:
                         transformer = Transformer.from_crs("EPSG:4326", src.crs, always_xy=True)
-                        # We use safe_bbox (the location subset) to generate the window to be read and stored in local cache
-                        xs, ys = transformer.transform([safe_bbox[0], safe_bbox[2], safe_bbox[2], safe_bbox[0]], [safe_bbox[3], safe_bbox[3], safe_bbox[1], safe_bbox[1]])
+                        # We use cache_bbox (the source cache region) to generate the window to be read and stored in local cache
+                        xs, ys = transformer.transform([cache_bbox[0], cache_bbox[2], cache_bbox[2], cache_bbox[0]], [cache_bbox[3], cache_bbox[3], cache_bbox[1], cache_bbox[1]])
                         roi_minx, roi_maxx, roi_miny, roi_maxy = min(xs), max(xs), min(ys), max(ys)
                         window = from_bounds(roi_minx, roi_miny, roi_maxx, roi_maxy, transform=src.transform).round_offsets().round_lengths()
                         
@@ -480,8 +480,11 @@ def stream_fused_stack_to_hdf5(h5f, group_path, pass_clusters, expected_sr, expe
             mean_sza = np.nanmean(ag_mapped[0])
             mean_saa = np.nanmean(ag_mapped[1])
 
+        has_valid_sr = np.any(sr_pass != -9999)
+
         if np.isnan(mean_sza) or np.isnan(mean_saa):
-            print(f"WARNING: Raster-derived mean sun angles are NaN for pass {idx}. Using fallback 0.0.")
+            if has_valid_sr:
+                print(f"WARNING: Raster-derived mean sun angles are NaN for pass {idx} despite having valid SR data. Using fallback 0.0.")
             mean_sza = 0.0
             mean_saa = 0.0
 

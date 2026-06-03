@@ -148,8 +148,11 @@ class HarmonizedComplexityViewer:
         # Extract sensor-specific wavelengths for plotting
         self.wavelengths = {}
         for g in np.unique(self.prov_grid):
-            sr_ds = self.h5[f'/HDFEOS/GRIDS/{g}/Data Fields/surface_reflectance']
-            raw_wl = sr_ds.attrs['wavelengths'][:]
+            data_grp = self.h5[f'/HDFEOS/GRIDS/{g}/Data Fields']
+            if 'wavelengths' in data_grp.attrs:
+                raw_wl = data_grp.attrs['wavelengths'][:]
+            else:
+                raw_wl = self.h5[f'/HDFEOS/GRIDS/{g}/Data Fields/surface_reflectance'].attrs['wavelengths'][:]
             if 'TANAGER' in g.upper():
                 self.wavelengths[g] = raw_wl / 1000.0
             else:
@@ -160,9 +163,15 @@ class HarmonizedComplexityViewer:
         self.t_file_idx = next((i for i, g in enumerate(self.prov_grid) if 'TANAGER' in g.upper()), None)
         
         # Map Geographic Coordinates to Pixel Coordinates
-        sr_attrs = self.h5[f'/HDFEOS/GRIDS/{self.prov_grid[0]}/Data Fields/surface_reflectance'].attrs
-        geo_transform = sr_attrs['GeoTransform']
-        spatial_ref = sr_attrs['spatial_ref']
+        data_grp0 = self.h5[f'/HDFEOS/GRIDS/{self.prov_grid[0]}/Data Fields']
+        if 'GeoTransform' in data_grp0.attrs:
+            geo_transform = data_grp0.attrs['GeoTransform']
+            spatial_ref = data_grp0.attrs['spatial_ref']
+        else:
+            sr_attrs = data_grp0['surface_reflectance'].attrs
+            geo_transform = sr_attrs['GeoTransform']
+            spatial_ref = sr_attrs['spatial_ref']
+            
         if isinstance(spatial_ref, bytes):
             spatial_ref = spatial_ref.decode('utf-8')
             
@@ -392,8 +401,8 @@ class HarmonizedComplexityViewer:
 
         # Pull native data
         src_grp = self.h5[f'/HDFEOS/GRIDS/{grid_name}/Data Fields']
-        sr_data = src_grp['surface_reflectance'][src_idx, ...]
-        raw_vis = src_grp['ortho_visual'][src_idx, ...]
+        
+        raw_vis = self.harm_grp['ortho_visual'][idx, ...]
         endmembers = src_grp['frame_endmembers'][src_idx, ...]
         em_indices = src_grp['frame_endmember_indices'][src_idx, ...]
         vols = src_grp['frame_endmember_volumes'][src_idx, ...]
@@ -427,7 +436,7 @@ class HarmonizedComplexityViewer:
         rgb = np.clip(rgba, 0.0, 1.0)
 
         hull_bands = HULL_BANDS_LANDSAT if 'HLS' in grid_name.upper() else HULL_BANDS_TANAGER
-        h, w = sr_data.shape[1:]
+        h, w = self.height, self.width
 
         # Row 1
         self.ax_spatial.clear()
@@ -697,45 +706,10 @@ class HarmonizedComplexityViewer:
 
         # 3D Hull
         self.ax_hull.clear()
-        pixel_data = sr_data.reshape(sr_data.shape[0], -1).T
-        valid_mask = ~np.isnan(pixel_data).any(axis=1)
-        pixel_data = pixel_data[valid_mask]
-        b1, b2, b3 = [min(b, sr_data.shape[0]-1) for b in hull_bands]
         
-        if pixel_data.shape[0] > 0: mean_dataset_full = np.mean(pixel_data[:, [b1, b2, b3]], axis=0)
-        else: mean_dataset_full = np.array([0.0, 0.0, 0.0])
-            
-        if pixel_data.shape[0] > 1500:
-            pixel_data = pixel_data[np.random.choice(pixel_data.shape[0], 4000, replace=False)]
-        
-        self.ax_hull.scatter(pixel_data[:, b1], pixel_data[:, b2], pixel_data[:, b3], c='gray', alpha=0.1, s=1)
-        
-        em_xyz = endmembers[[b1, b2, b3], :].T
-        valid_em_mask = ~np.all(em_xyz == 0, axis=1) & ~np.isnan(em_xyz).any(axis=1)
-        valid_em_xyz = em_xyz[valid_em_mask]
-        self.ax_hull.scatter(valid_em_xyz[:, 0], valid_em_xyz[:, 1], valid_em_xyz[:, 2], c='red', s=40, label='Endmembers')
-        
-        origin = np.array([0.0, 0.0, 0.0])
-        v1 = v2 = v3 = None
-        
-        if self.localization_mode == 'datasetMean':
-            origin = mean_dataset_full
-            if valid_em_xyz.shape[0] >= 3:
-                v1, v2, v3 = valid_em_xyz[0] - origin, valid_em_xyz[1] - origin, valid_em_xyz[2] - origin
-        elif self.localization_mode == 'minEndmember':
-            if valid_em_xyz.shape[0] >= 4:
-                origin = valid_em_xyz[1]
-                v1, v2, v3 = valid_em_xyz[0] - origin, valid_em_xyz[2] - origin, valid_em_xyz[3] - origin
-        else:
-            if valid_em_xyz.shape[0] >= 3:
-                v1, v2, v3 = valid_em_xyz[0], valid_em_xyz[1], valid_em_xyz[2]
-                
-        if v1 is not None and v2 is not None and v3 is not None:
-            self.ax_hull.plot([origin[0], origin[0] + v1[0]], [origin[1], origin[1] + v1[1]], [origin[2], origin[2] + v1[2]], 'r--', alpha=0.8, linewidth=2)
-            self.ax_hull.plot([origin[0], origin[0] + v2[0]], [origin[1], origin[1] + v2[1]], [origin[2], origin[2] + v2[2]], 'r--', alpha=0.8, linewidth=2)
-            self.ax_hull.plot([origin[0], origin[0] + v3[0]], [origin[1], origin[1] + v3[1]], [origin[2], origin[2] + v3[2]], 'r--', alpha=0.8, linewidth=2)
-        
-        self.ax_hull.set_xlabel(f"B{b1}"); self.ax_hull.set_ylabel(f"B{b2}"); self.ax_hull.set_zlabel(f"B{b3}")
+        self.ax_hull.text2D(0.5, 0.5, "3D Hull Disabled\n(surface_reflectance removed to save storage space)", 
+                            ha='center', va='center', transform=self.ax_hull.transAxes, fontsize=12)
+        self.ax_hull.set_axis_off()
         
         figs_to_draw = [self.fig_controls, self.fig_combined, self.fig_hull]
         if DISPLAY_REDUNDANT_FIGURE: figs_to_draw.extend([self.fig_redundant, self.fig_transect])

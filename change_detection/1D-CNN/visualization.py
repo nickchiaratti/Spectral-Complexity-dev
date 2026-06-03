@@ -16,7 +16,7 @@ def plot_pixel_sits(pixel_y, pixel_x, source_h5_path, inference_results_h5, ax=N
         z_score = np.clip(z_score, -5.0, 5.0)
         
         unified_masks = harm_grp['common_mask'][:, pixel_y, pixel_x]
-        is_invalid = ~(unified_masks == 1)
+        is_invalid = unified_masks.astype(bool)
         
         spacecraft_bytes = harm_grp['sliding_volume_z_score'].attrs['source_spacecraft'][:]
         spacecrafts = [s.decode('utf-8') if isinstance(s, bytes) else str(s) for s in spacecraft_bytes]
@@ -124,30 +124,18 @@ def plot_spatial_anomaly_overlay(source_h5_path, inference_results_h5, train_end
         acq_time = harm_grp['sliding_volume_z_score'].attrs['acquisition_time'][:]
         
         unified_masks = harm_grp['common_mask'][:]
-        full_valid_mask = (unified_masks == 1)
+        full_valid_mask = ~unified_masks.astype(bool)
         
     def get_ortho(idx):
         with h5py.File(source_h5_path, 'r') as f:
             harm_grp = f['/HDFEOS/GRIDS/HARMONIZED/Data Fields']
-            sg = harm_grp['sliding_volume_z_score'].attrs['source_grid'][idx]
-            sg = sg.decode('utf-8') if isinstance(sg, bytes) else str(sg)
             spc = harm_grp['sliding_volume_z_score'].attrs['source_spacecraft'][idx]
             spc = spc.decode('utf-8') if isinstance(spc, bytes) else str(spc)
-            t_loc = int(harm_grp['sliding_volume_z_score'].attrs['source_frame_index'][idx])
-            o = f[f'/HDFEOS/GRIDS/{sg}/Data Fields/ortho_visual'][t_loc]
-            o = np.transpose(o, (1, 2, 0)).astype(np.float32)
-            if o.shape[2] == 4:
-                o = o[:,:,:3]
+            
+            o = harm_grp['ortho_visual'][idx]
+            o = np.transpose(o, (1, 2, 0)).astype(np.float32) / 255.0
                 
-            valid_mask = np.all(o > -9000, axis=-1)
-            
-            if np.any(valid_mask):
-                p1 = np.percentile(o[valid_mask], 1)
-                p99 = np.percentile(o[valid_mask], 99)
-                if p99 > p1:
-                    o[valid_mask] = (o[valid_mask] - p1) / (p99 - p1)
-            
-            o[valid_mask] = np.clip(o[valid_mask], 0.0, 1.0)
+            valid_mask = np.all(o > 0, axis=-1)
             o[~valid_mask] = 0.0 # Set NoData to black to avoid white backgrounds
             
             return o, spc

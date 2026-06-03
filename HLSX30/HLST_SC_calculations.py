@@ -72,6 +72,7 @@ def compute_frame_metrics(payload):
             data_grp = h5_in[f"/HDFEOS/GRIDS/{grid_name}/Data Fields"]
             frame_sr = data_grp["surface_reflectance"][t_local, ...]
             frame_mask = data_grp["common_mask"][t_local, ...]
+            raw_frame_ortho = data_grp["ortho_visual"][t_local, ...]
 
             if sensor_type == "TANAGER":
                 gw_mask = data_grp["surface_reflectance"].attrs.get("all_good_wavelengths")[t_local].astype(bool)
@@ -115,7 +116,7 @@ def compute_frame_metrics(payload):
         if flags['volume']:
             t0 = time.perf_counter()
             # Note: process_volume_sliding_tile prunes invalid pixels internally
-            slide_map = scQR.process_volume_sliding_tile(frame_sr, TILE_SIZE, SLIDING_STRIDE, NUM_ENDMEMBERS, 'minEndmember', NORM_PARAM)
+            slide_map = sc.process_volume_sliding_tile(frame_sr, TILE_SIZE, SLIDING_STRIDE, NUM_ENDMEMBERS, 'minEndmember', NORM_PARAM)
             telemetry['Sliding_Volume_Map'] = time.perf_counter() - t0
         
         # --- 5. Mean Spectral Distance ---
@@ -132,6 +133,24 @@ def compute_frame_metrics(payload):
             z_map = sc.calculate_global_z_score(slide_map, valid_mask)
             telemetry['Z_Score'] = time.perf_counter() - t0
 
+        # --- 7. Ortho Visual Consolidation ---
+        t0 = time.perf_counter()
+        frame_ortho = raw_frame_ortho
+        if frame_ortho.shape[0] in [3, 4]:
+            frame_ortho = frame_ortho[:3, :, :]
+        else:
+            frame_ortho = np.transpose(frame_ortho[..., :3], (2, 0, 1))
+            
+        if frame_ortho.dtype != np.uint8:
+            fo = frame_ortho.astype(np.float32)
+            valid = fo > -9000
+            if np.any(valid):
+                p1, p99 = np.percentile(fo[valid], (1, 99))
+                if p99 > p1:
+                    fo[valid] = (fo[valid] - p1) / (p99 - p1)
+            frame_ortho = np.clip(fo * 255, 0, 255).astype(np.uint8)
+        telemetry['Ortho_Visual'] = time.perf_counter() - t0
+
         telemetry['Total_Worker_Time'] = time.perf_counter() - t_start_total
 
         return {
@@ -139,6 +158,7 @@ def compute_frame_metrics(payload):
             'grid_name': grid_name,
             't_local': t_local,
             'mask': frame_mask,
+            'ortho': frame_ortho,
             'ndvi': ndvi,
             'ndbi': ndbi,
             'slide': slide_map,
@@ -167,16 +187,24 @@ def process_ard_cube(filepath):
         print(f"Modifying Existing Pipeline Output.")
         print(f"Cloning read-only cache for parallel workers: {worker_cache_path}")
         shutil.copy2(filepath, worker_cache_path)
+        mode = 'r+'
     else:
         out_path = filepath.replace(".h5", f"{suffix}.h5")
         worker_cache_path = filepath
-        print(f"New Pipeline Run. Cloning to Target Output File: {out_path}")
-        shutil.copy2(filepath, out_path)
+        print(f"New Pipeline Run. Creating Target Output File: {out_path}")
+        mode = 'w'
 
-    with h5py.File(out_path, 'r+') as h5_out:
-        if '/HDFEOS/GRIDS' not in h5_out:
-            raise ValueError(f"CRITICAL ERROR: No /HDFEOS/GRIDS group found. Not a valid ARD Cube.")
-            
+    with h5py.File(out_path, mode) as h5_out:
+        if mode == 'w':
+            with h5py.File(worker_cache_path, 'r') as h5_in:
+                for g in h5_in['/HDFEOS/GRIDS'].keys():
+                    if g == 'HARMONIZED': continue
+                    grp_out = h5_out.create_group(f'/HDFEOS/GRIDS/{g}/Data Fields')
+                    sr = h5_in[f'/HDFEOS/GRIDS/{g}/Data Fields/surface_reflectance']
+                    if 'spatial_ref' in sr.attrs: grp_out.attrs['spatial_ref'] = sr.attrs['spatial_ref']
+                    if 'GeoTransform' in sr.attrs: grp_out.attrs['GeoTransform'] = sr.attrs['GeoTransform']
+                    if 'wavelengths' in sr.attrs: grp_out.attrs['wavelengths'] = sr.attrs['wavelengths']
+
         print("\n" + "="*50)
         print("Initializing Chronological Multi-Sensor Fusion (Parallel)")
         print("="*50)
@@ -205,78 +233,78 @@ def overwrite_dset(data_grp, name, shape, dtype='float32', spatial_ref=None, geo
 # ==========================================
 def process_global_timeline(h5_out, orig_filepath):
     global CALC_SLIDING_VOLUME
-    
-    grids = [g for g in h5_out['/HDFEOS/GRIDS'].keys() if g != 'HARMONIZED']
-    if not grids:
-        raise ValueError("CRITICAL ERROR: No sensor grids found to process.")
 
-    timeline = []
-    for grid in grids:
-        base_path = f"/HDFEOS/GRIDS/{grid}/Data Fields"
-        if base_path not in h5_out:
-            raise ValueError(f"CRITICAL ERROR: Data Fields missing for {grid}")
-            
-        data_grp = h5_out[base_path]
-        
-        for req_ds in ["surface_reflectance", "common_mask"]:
-            if req_ds not in data_grp:
-                raise ValueError(f"CRITICAL ERROR: '{req_ds}' missing in {grid}. Ensure ARD Harmonizer ran successfully.")
+    with h5py.File(orig_filepath, 'r') as h5_orig:
+        grids = [g for g in h5_orig['/HDFEOS/GRIDS'].keys() if g != 'HARMONIZED']
+        if not grids:
+            raise ValueError("CRITICAL ERROR: No sensor grids found to process.")
+
+        timeline = []
+        for grid in grids:
+            base_path = f"/HDFEOS/GRIDS/{grid}/Data Fields"
+            if base_path not in h5_orig:
+                raise ValueError(f"CRITICAL ERROR: Data Fields missing for {grid}")
                 
-        acq_times = data_grp["surface_reflectance"].attrs['acquisition_time']
-        spacecraft_ids = data_grp["surface_reflectance"].attrs['spacecraft_id']
-        
-        for i, ts in enumerate(acq_times):
-            sp_id = spacecraft_ids[i]
-            sp_str = sp_id.decode('utf-8') if isinstance(sp_id, bytes) else str(sp_id)
-            timeline.append({'time': ts, 'grid': grid, 'local_idx': i, 'spacecraft': sp_str})
+            data_grp = h5_orig[base_path]
+            
+            for req_ds in ["surface_reflectance", "common_mask"]:
+                if req_ds not in data_grp:
+                    raise ValueError(f"CRITICAL ERROR: '{req_ds}' missing in {grid}. Ensure ARD Harmonizer ran successfully.")
+                    
+            acq_times = data_grp["surface_reflectance"].attrs['acquisition_time']
+            spacecraft_ids = data_grp["surface_reflectance"].attrs['spacecraft_id']
+            
+            for i, ts in enumerate(acq_times):
+                sp_id = spacecraft_ids[i]
+                sp_str = sp_id.decode('utf-8') if isinstance(sp_id, bytes) else str(sp_id)
+                timeline.append({'time': ts, 'grid': grid, 'local_idx': i, 'spacecraft': sp_str})
 
-    timeline.sort(key=lambda x: x['time'])
-    total_frames = len(timeline)
-    print(f"Global Timeline Established: {total_frames} frames across {len(grids)} sensors.")
+        timeline.sort(key=lambda x: x['time'])
+        total_frames = len(timeline)
+        print(f"Global Timeline Established: {total_frames} frames across {len(grids)} sensors.")
 
-    # Mathematical Dependency Resolution
-    harm_path = '/HDFEOS/GRIDS/HARMONIZED/Data Fields'
-    if CALC_Z_SCORE and not CALC_SLIDING_VOLUME:
-        if harm_path in h5_out and 'sliding_volume_map' in h5_out[harm_path]:
-            print("  -> Dependency Resolved: 'sliding_volume_map' found in existing file. Bypassing volume calculation.")
-        else:
+        # Mathematical Dependency Resolution
+        harm_path = '/HDFEOS/GRIDS/HARMONIZED/Data Fields'
+        if CALC_Z_SCORE and not CALC_SLIDING_VOLUME:
             print("  -> Dependency Warning: Z-score requested but 'sliding_volume_map' not found in file. Forcing CALC_SLIDING_VOLUME = True.")
             CALC_SLIDING_VOLUME = True
 
-    ref_sr = h5_out[f"/HDFEOS/GRIDS/{grids[0]}/Data Fields/surface_reflectance"]
-    _, _, height, width = ref_sr.shape
-    spatial_ref = ref_sr.attrs.get('spatial_ref')
-    geo_transform = ref_sr.attrs.get('GeoTransform')
+        ref_sr = h5_orig[f"/HDFEOS/GRIDS/{grids[0]}/Data Fields/surface_reflectance"]
+        _, _, height, width = ref_sr.shape
+        spatial_ref = ref_sr.attrs.get('spatial_ref')
+        geo_transform = ref_sr.attrs.get('GeoTransform')
 
-    chunk_h, chunk_w = min(height, 256), min(width, 256)
-    chunks_3d = (1, chunk_h, chunk_w)
+        chunk_h, chunk_w = min(height, 256), min(width, 256)
+        chunks_3d = (1, chunk_h, chunk_w)
 
-    if harm_path in h5_out:
-        harm_grp = h5_out[harm_path]
-    else:
-        h5_out.create_group('/HDFEOS/GRIDS/HARMONIZED')
-        harm_grp = h5_out.create_group(harm_path)
+        if harm_path in h5_out:
+            harm_grp = h5_out[harm_path]
+        else:
+            h5_out.create_group('/HDFEOS/GRIDS/HARMONIZED')
+            harm_grp = h5_out.create_group(harm_path)
 
-    # Pre-allocate ONLY requested datasets
-    ds_harm_mask = overwrite_dset(harm_grp, 'common_mask', (total_frames, height, width), dtype='uint8', spatial_ref=spatial_ref, geo_transform=geo_transform, chunks=chunks_3d)
-    ds_harm_slide = overwrite_dset(harm_grp, 'sliding_volume_map', (total_frames, height, width), spatial_ref=spatial_ref, geo_transform=geo_transform, chunks=chunks_3d) if CALC_SLIDING_VOLUME else None
-    ds_harm_ndvi = overwrite_dset(harm_grp, 'ndvi_map', (total_frames, height, width), spatial_ref=spatial_ref, geo_transform=geo_transform, chunks=chunks_3d) if CALC_NDVI else None
-    ds_harm_ndbi = overwrite_dset(harm_grp, 'ndbi_map', (total_frames, height, width), spatial_ref=spatial_ref, geo_transform=geo_transform, chunks=chunks_3d) if CALC_NDBI else None
-    ds_harm_msd = overwrite_dset(harm_grp, 'msd_map', (total_frames, height, width), spatial_ref=spatial_ref, geo_transform=geo_transform, chunks=chunks_3d) if CALC_MSD else None
-    ds_harm_z = overwrite_dset(harm_grp, 'sliding_volume_z_score', (total_frames, height, width), spatial_ref=spatial_ref, geo_transform=geo_transform, chunks=chunks_3d) if CALC_Z_SCORE else None
+        # Pre-allocate ONLY requested datasets
+        ds_harm_mask = overwrite_dset(harm_grp, 'common_mask', (total_frames, height, width), dtype='uint8', spatial_ref=spatial_ref, geo_transform=geo_transform, chunks=chunks_3d)
+        ds_harm_ortho = overwrite_dset(harm_grp, 'ortho_visual', (total_frames, 3, height, width), dtype='uint8', spatial_ref=spatial_ref, geo_transform=geo_transform, chunks=(1, 3, chunk_h, chunk_w))
+        ds_harm_slide = overwrite_dset(harm_grp, 'sliding_volume_map', (total_frames, height, width), spatial_ref=spatial_ref, geo_transform=geo_transform, chunks=chunks_3d) if CALC_SLIDING_VOLUME else None
+        ds_harm_ndvi = overwrite_dset(harm_grp, 'ndvi_map', (total_frames, height, width), spatial_ref=spatial_ref, geo_transform=geo_transform, chunks=chunks_3d) if CALC_NDVI else None
+        ds_harm_ndbi = overwrite_dset(harm_grp, 'ndbi_map', (total_frames, height, width), spatial_ref=spatial_ref, geo_transform=geo_transform, chunks=chunks_3d) if CALC_NDBI else None
+        ds_harm_msd = overwrite_dset(harm_grp, 'msd_map', (total_frames, height, width), spatial_ref=spatial_ref, geo_transform=geo_transform, chunks=chunks_3d) if CALC_MSD else None
+        ds_harm_z = overwrite_dset(harm_grp, 'sliding_volume_z_score', (total_frames, height, width), spatial_ref=spatial_ref, geo_transform=geo_transform, chunks=chunks_3d) if CALC_Z_SCORE else None
 
-    sensor_dsets = {}
-    if CALC_GLOBAL_ENDMEMBERS:
-        for grid in grids:
-            data_grp = h5_out[f"/HDFEOS/GRIDS/{grid}/Data Fields"]
-            sr_shape = data_grp["surface_reflectance"].shape
-            n_frames, n_bands = sr_shape[0], sr_shape[1]
-            
-            em_ds = overwrite_dset(data_grp, 'frame_endmembers', (n_frames, n_bands, NUM_ENDMEMBERS), spatial_ref=spatial_ref, geo_transform=geo_transform, chunks=(1, n_bands, NUM_ENDMEMBERS))
-            idx_ds = overwrite_dset(data_grp, 'frame_endmember_indices', (n_frames, NUM_ENDMEMBERS), dtype='int32', chunks=(1, NUM_ENDMEMBERS))
-            vol_ds = overwrite_dset(data_grp, 'frame_endmember_volumes', (n_frames, NUM_ENDMEMBERS), chunks=(1, NUM_ENDMEMBERS))
-            
-            sensor_dsets[grid] = {'em': em_ds, 'idx': idx_ds, 'vol': vol_ds, 'num_bands': n_bands}
+        sensor_dsets = {}
+        if CALC_GLOBAL_ENDMEMBERS:
+            for grid in grids:
+                orig_data_grp = h5_orig[f"/HDFEOS/GRIDS/{grid}/Data Fields"]
+                sr_shape = orig_data_grp["surface_reflectance"].shape
+                n_frames, n_bands = sr_shape[0], sr_shape[1]
+                
+                data_grp = h5_out[f"/HDFEOS/GRIDS/{grid}/Data Fields"]
+                em_ds = overwrite_dset(data_grp, 'frame_endmembers', (n_frames, n_bands, NUM_ENDMEMBERS), spatial_ref=spatial_ref, geo_transform=geo_transform, chunks=(1, n_bands, NUM_ENDMEMBERS))
+                idx_ds = overwrite_dset(data_grp, 'frame_endmember_indices', (n_frames, NUM_ENDMEMBERS), dtype='int32', chunks=(1, NUM_ENDMEMBERS))
+                vol_ds = overwrite_dset(data_grp, 'frame_endmember_volumes', (n_frames, NUM_ENDMEMBERS), chunks=(1, NUM_ENDMEMBERS))
+                
+                sensor_dsets[grid] = {'em': em_ds, 'idx': idx_ds, 'vol': vol_ds, 'num_bands': n_bands}
 
     payloads = []
     for global_idx, meta in enumerate(timeline):
@@ -312,7 +340,6 @@ def process_global_timeline(h5_out, orig_filepath):
             }
         })
 
-    # Dynamic Telemetry Aggregator
     agg_telemetry = {'Total_Worker_Time': []}
 
     completed_frames = 0
@@ -338,11 +365,17 @@ def process_global_timeline(h5_out, orig_filepath):
             
             # Write selectively based on configuration
             ds_harm_mask[global_idx, ...] = result['mask']
-            if CALC_NDVI: ds_harm_ndvi[global_idx, ...] = result['ndvi']
-            if CALC_NDBI: ds_harm_ndbi[global_idx, ...] = result['ndbi']
-            if CALC_MSD: ds_harm_msd[global_idx, ...] = result['msd']
-            if CALC_SLIDING_VOLUME: ds_harm_slide[global_idx, ...] = result['slide']
-            if CALC_Z_SCORE: ds_harm_z[global_idx, ...] = result['z_map']
+            ds_harm_ortho[global_idx, ...] = result['ortho']
+            if CALC_NDVI: 
+                ds_harm_ndvi[global_idx, ...] = result['ndvi']
+            if CALC_NDBI: 
+                ds_harm_ndbi[global_idx, ...] = result['ndbi']
+            if CALC_MSD: 
+                ds_harm_msd[global_idx, ...] = result['msd']
+            if CALC_SLIDING_VOLUME: 
+                ds_harm_slide[global_idx, ...] = result['slide']
+            if CALC_Z_SCORE: 
+                ds_harm_z[global_idx, ...] = result['z_map']
             
             if CALC_GLOBAL_ENDMEMBERS:
                 sensor_dsets[grid_name]['em'][t_local, ...] = result['em']
@@ -384,7 +417,7 @@ def process_global_timeline(h5_out, orig_filepath):
     prov_idx = np.array([m['local_idx'] for m in timeline], dtype='int32')
     
     # Only tag the datasets that were actually generated in this run
-    created_harm_dsets = [ds for ds in [ds_harm_mask, ds_harm_slide, ds_harm_ndvi, ds_harm_ndbi, ds_harm_msd, ds_harm_z] if ds is not None]
+    created_harm_dsets = [ds for ds in [ds_harm_mask, ds_harm_ortho, ds_harm_slide, ds_harm_ndvi, ds_harm_ndbi, ds_harm_msd, ds_harm_z] if ds is not None]
     
     for ds in created_harm_dsets:
         ds.attrs.create('source_grid', data=prov_grid)

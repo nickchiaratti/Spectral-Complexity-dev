@@ -1,0 +1,490 @@
+﻿diff --git a/change_detection/1D-CNN/SpecComplex.py b/HLSX30/SpecComplex.py
+index cba7280..2d03dcb 100644
+--- a/change_detection/1D-CNN/SpecComplex.py
++++ b/HLSX30/SpecComplex.py
+@@ -1,45 +1,41 @@
+ import numpy as np
+-import math
+ import warnings
+-from skimage import exposure
+ from scipy import ndimage
+ 
+-
+-# Mapped levels for Aerosol_Optical_Depth
+-AEROSOL_DICT = {
+-    'low': [2, 4, 32, 66, 68, 96, 100],
+-    'medium': [2, 4, 32, 66, 68, 96, 100, 130, 132, 160, 164],
+-    'high': [2, 4, 32, 66, 68, 96, 100, 130, 132, 160, 164, 192, 194, 196, 224, 228] # Aerosol_Optical_Depth > 0.3
+-}
+-
+ def get_landsat_mask(data_grp, f_idx, shape, 
+                      sun_elevation_threshold=30, 
+                      cloud_dilation=2, 
+-                     qa_reject_mask=191, 
++                     qa_reject_mask=0b111111, 
+                      radsat_accept_value=0, 
+                      aerosol_accept_level='medium'):
+     """
+     Generates a boolean spatial mask for LANDSAT data using Quality Assessment (QA) bands.
+-    Valid pixels return True, masked pixels return False.
++    True = Invalid/Masked, False = Valid.
+     """
+-    valid_mask = np.ones(shape, dtype=bool)
++    # Mapped levels for Aerosol_Optical_Depth
++    AEROSOL_DICT = {
++        'low': [2, 4, 32, 66, 68, 96, 100],
++        'medium': [2, 4, 32, 66, 68, 96, 100, 130, 132, 160, 164],
++        'high': [2, 4, 32, 66, 68, 96, 100, 130, 132, 160, 164, 192, 194, 196, 224, 228] # Aerosol_Optical_Depth > 0.3
++    }
++    invalid_mask = np.zeros(shape, dtype=bool)
+     kernel = np.ones((3, 3), dtype=bool)
+     
+     # Sun Elevation Check (Fails loudly if attribute is missing)
+     sun_elev_arr = data_grp['surface_reflectance'].attrs['sun_elevation']
+     if sun_elev_arr[f_idx] < sun_elevation_threshold:
+-        return np.zeros(shape, dtype=bool)
++        return np.ones(shape, dtype=bool)
+ 
+     # QA Reject Mask
+     qa_pixel = data_grp['QUALITY_L1_PIXEL'][f_idx, ...]
+-    bad_qa_mask = (qa_pixel & qa_reject_mask) > 0
++    bad_qa_mask = (qa_pixel & qa_reject_mask) != 0
+     if cloud_dilation > 0:
+         bad_qa_mask = ndimage.binary_dilation(bad_qa_mask, structure=kernel, iterations=cloud_dilation)
+-    valid_mask &= ~bad_qa_mask
++    invalid_mask |= bad_qa_mask
+ 
+     # RADSAT Accept Value
+     bad_radsat = data_grp['RADIOMETRIC_SATURATION'][f_idx, ...] != radsat_accept_value
+-    valid_mask &= ~bad_radsat
++    invalid_mask |= bad_radsat
+ 
+     # Aerosol Accept Values
+     if aerosol_accept_level != 'all':
+@@ -52,21 +48,21 @@ def get_landsat_mask(data_grp, f_idx, shape,
+         invalid_aerosol = ~np.isin(aerosol, accepted_values)
+         if cloud_dilation > 0:
+             invalid_aerosol = ndimage.binary_dilation(invalid_aerosol, structure=kernel, iterations=cloud_dilation)
+-        valid_mask &= ~invalid_aerosol
++        invalid_mask |= invalid_aerosol
+ 
+-    return valid_mask
++    return invalid_mask
+ 
+ def get_tanager_mask(data_grp, f_idx, shape, 
+                      sun_elevation_threshold=30, 
+                      cloud_dilation=2, 
+                      apply_cloud_mask=True, 
+                      uncertainty_threshold=0.1, 
+-                     aerosol_depth_threshold=0.35):
++                     aerosol_depth_threshold=0.3):
+     """
+     Generates a boolean spatial mask for TANAGER data using beta masks and uncertainty.
+-    Valid pixels return True, masked pixels return False.
++    True = Masked/Invalid, False = Valid.
+     """
+-    valid_mask = np.ones(shape, dtype=bool)
++    invalid_mask = np.zeros(shape, dtype=bool)
+     kernel = np.ones((3, 3), dtype=bool)
+     
+     # Cloud Mask Check
+@@ -76,18 +72,18 @@ def get_tanager_mask(data_grp, f_idx, shape,
+         combined_cloud = c_mask | cirrus_mask
+         if cloud_dilation > 0:
+             combined_cloud = ndimage.binary_dilation(combined_cloud, structure=kernel, iterations=cloud_dilation)
+-        valid_mask &= ~combined_cloud
++        invalid_mask |= combined_cloud
+     
+     # Sun Elevation Check (Derived from Sun Zenith)
+     zenith = data_grp['sun_zenith'][f_idx, ...]
+-    valid_mask &= (zenith != -9999.0) & ((90.0 - zenith) >= sun_elevation_threshold)
++    invalid_mask |= (zenith == -9999.0) | ((90.0 - zenith) < sun_elevation_threshold)
+         
+     # Aerosol Optical Depth Check
+     aod = data_grp['aerosol_optical_depth'][f_idx, ...]
+     bad_aod_mask = (aod == -9999.0) | (aod >= aerosol_depth_threshold) | np.isnan(aod)
+     if cloud_dilation > 0:
+         bad_aod_mask = ndimage.binary_dilation(bad_aod_mask, structure=kernel, iterations=cloud_dilation)
+-    valid_mask &= ~bad_aod_mask
++    invalid_mask |= bad_aod_mask
+         
+     # Surface Reflectance Uncertainty Check
+     gw_mask = data_grp['surface_reflectance'].attrs['all_good_wavelengths']
+@@ -101,20 +97,65 @@ def get_tanager_mask(data_grp, f_idx, shape,
+     unc_mask = (unc == -9999.0) | (unc >= uncertainty_threshold) | np.isnan(unc)
+     if cloud_dilation > 0:
+         unc_mask = ndimage.binary_dilation(unc_mask, structure=kernel, iterations=cloud_dilation)
+-    valid_mask &= ~unc_mask
++    invalid_mask |= unc_mask
+         
+-    return valid_mask
++    return invalid_mask
+ 
+-def maximumDistance(data, num_endmembers):
++def get_hls_mask(data_grp, t, sun_elevation_threshold, cloud_dilation, qa_reject_mask, aerosol_accept_level):
++    """
++    Derives a strict validity mask based on HLS Fmask bits and Solar angles.
++    Reference: HLS Product User Guide V2.0, Table 9.
++    True = Invalid/Masked, False = Valid.
++    """
++    # EVIDENCE-BASED FIX: Dimensionality Alignment
++    # Fmask is stored in the ARD cube as a 3D array (Time, YDim, XDim) to eliminate 
++    # the singleton band dimension. We slice it with 3 indices accordingly.
++    fmask = data_grp["Fmask"][t, :, :]
++    
++    # Angles are stored as 4D (Time, AngleBands, YDim, XDim)
++    angles = data_grp["solar_view_angles"][t, :, :, :]
++    
++    # 1. QA Bitwise Rejection (Bits 0-5)
++    # Reject conditions (e.g., if bit 1 (cloud) is 1, and it's in the reject mask, result > 0)
++    qa_invalid = (fmask & qa_reject_mask) != 0
++    
++    # 2. Aerosol Level Rejection (Bits 6-7)
++    # Extract bits 6 & 7 as a 2-bit integer (0=Climatology, 1=Low, 2=Moderate, 3=High)
++    aerosol_bits = (fmask >> 6) & 0b11
++    
++    if aerosol_accept_level == 'low':
++        aerosol_invalid = aerosol_bits > 1
++    elif aerosol_accept_level == 'medium':
++        aerosol_invalid = aerosol_bits > 2
++    else: # 'high'
++        aerosol_invalid = aerosol_bits > 3
++        
++    # 3. Sun Elevation Threshold
++    # Angles array band order: ["SZA", "SAA", "VZA", "VAA"]
++    sza = angles[0, :, :]
++    sun_elev = 90.0 - sza
++    # Note: np.nan values natively evaluate to False, perfectly rejecting nodata margins
++    sun_invalid = (sun_elev < sun_elevation_threshold) | np.isnan(sun_elev)
++    
++    # Combine invalid masks
++    invalid_mask = qa_invalid | aerosol_invalid | sun_invalid
++    
++    # 4. Custom Morphological Dilation
++    if cloud_dilation > 0:
++        invalid_mask = binary_dilation(invalid_mask, iterations=cloud_dilation)
++        
++    return invalid_mask
++
++def maximumDistance(data, num_endmembers, chunk_size=50000):
+     '''
+-    Args:
+-        data (np.ndarray): 3D image cube [nPixels0, nPixels1, nbands]
+-        num_endmembers (int): number of endmembers to be calculated (choose more than expected to find)
++    Memory-optimized MaxD geometric simplex extraction.
++    Utilizes strict float32 typing and chunked vector broadcasting to 
++    prevent ArrayMemoryErrors on hyperspectral (300+ band) datasets.
++    
+     Returns:
+         endmembers [bands, num_endmembers]
+         endmembers_index [1, num_endmembers]
+     '''      
+-    # Flatten 3D cube [rows, cols, bands] -> 2D [pixels, bands]
+     image2D = np.reshape(data, (data.shape[0] * data.shape[1], data.shape[2]), order="F")
+ 
+     if np.min(image2D) < 0:
+@@ -124,61 +165,62 @@ def maximumDistance(data, num_endmembers):
+         warnings.warn('Data contains values greater than 1')
+         image2D = np.clip(image2D, 0, 1)
+ 
+-    # --- NaN Handling ---
+     valid_mask = ~np.isnan(image2D).any(axis=1)
+     
+     if np.sum(valid_mask) < num_endmembers:
+-        print(f"Not enough valid pixels (no NaNs) to find {num_endmembers} endmembers. Found {np.sum(valid_mask)} valid pixels.")
+         return np.full((image2D.shape[1], num_endmembers), np.nan), np.full((1, num_endmembers), np.nan)
+ 
+-    valid_data = image2D[valid_mask]
++    valid_data = image2D[valid_mask].astype(np.float32)
+     valid_indices = np.where(valid_mask)[0]
+ 
+-    # Transpose to [bands, pixels]
+     data_t = np.transpose(valid_data)
+     num_bands, num_pix = data_t.shape
+ 
+-    # calculate magnitude of all vectors to find min and max
+     magnitude = np.linalg.norm(data_t, axis=0)
+     idx1 = np.argmax(magnitude)
+     idx2 = np.argmin(magnitude)
+ 
+-    # create empty output arrays for endmembers
+-    endmembers = np.zeros([num_bands, num_endmembers])
++    endmembers = np.zeros([num_bands, num_endmembers], dtype=np.float32)
+     endmembers_index = np.zeros([1, num_endmembers], dtype=int)   
+ 
+-    # assign largest and smallest vector as first and second endmembers
+     endmembers[:, 0] = data_t[:, idx1]
+     endmembers[:, 1] = data_t[:, idx2]
+     
+     endmembers_index[0, 0] = valid_indices[idx1]
+     endmembers_index[0, 1] = valid_indices[idx2]
+ 
+-    # Use standard ndarray instead of deprecated np.matrix. 
+-    # Create a copy so we don't modify the original data_t needed for extraction
++    # Pre-allocate strictly as float32 to prevent memory doubling
+     data_proj = data_t.copy()
+-    identity_matrix = np.identity(num_bands)
++    identity_matrix = np.identity(num_bands, dtype=np.float32)
+ 
+     for i in range(2, num_endmembers):
+-        # Extract difference vector as 2D column array (bands, 1) to maintain shape for broadcasting
+         diff = data_proj[:, idx2:idx2+1] - data_proj[:, idx1:idx1+1]
+-        # calculate pseudo inverse of difference vector
+-        pseudo = np.linalg.pinv(diff)
+-        data_proj = np.matmul((identity_matrix - np.matmul(diff, pseudo)), data_proj)
++        
++        # Enforce float32 on the pseudoinverse to prevent float64 upcasting during matmul
++        pseudo = np.linalg.pinv(diff).astype(np.float32)
++        proj_operator = (identity_matrix - np.matmul(diff, pseudo)).astype(np.float32)
++
++        # EVIDENCE-BASED FIX: Chunked In-Place Projection
++        # Applies the projection matrix in memory-safe chunks rather than generating 
++        # a new massive array across the entire image space simultaneously.
++        for c in range(0, num_pix, chunk_size):
++            c_end = min(c + chunk_size, num_pix)
++            data_proj[:, c:c_end] = np.matmul(proj_operator, data_proj[:, c:c_end])
+ 
+         idx1 = idx2
+-        vec = data_proj[:, idx2:idx2+1] # Shape (bands, 1)
++        vec = data_proj[:, idx2:idx2+1] 
++            
++        # EVIDENCE-BASED FIX: Chunked Distance Calculation
++        # Prevents NumPy from allocating a massive intermediate array for np.square()
++        diff_new = np.zeros(num_pix, dtype=np.float32)
++        for c in range(0, num_pix, chunk_size):
++            c_end = min(c + chunk_size, num_pix)
++            chunk = data_proj[:, c:c_end]
++            diff_new[c:c_end] = np.sum(np.square(vec - chunk), axis=0)
+             
+-        diff_new = np.sum(np.square(vec - data_proj), axis=0)
+-
+-        # find the maximum distance for next endmember
+-        # np.argmax returns the index of the first occurrence of the maximum value
+         idx2 = np.argmax(diff_new)
+ 
+-        # assign to endmember file
+         endmembers[:, i] = data_t[:, idx2]
+-        
+-        # Map back to original index
+         endmembers_index[0, i] = valid_indices[idx2]
+ 
+     return endmembers, endmembers_index
+@@ -293,16 +335,17 @@ def process_volume_frame(frame_data, num_endmembers, gram_type, norm_type):
+     Pixel Filtering: Only valid pixels are extracted into the 2D matrix.
+     Returns the full volume curve, endmembers, and indices.
+     """
++    #print("Calculating Full FrameSpectral Complexity")
+     bands, height, width = frame_data.shape
+     img = np.transpose(frame_data, (1, 2, 0))
+     image2D = np.reshape(img, (height * width, bands))
+     # Check gram type
+-    if gram_type == 'datasetMean': print("Localizing Gram to dataset mean")
+-    elif gram_type == 'minEndmember': print("Localizing Gram to second endmember")
+-    else: print("Localizing Gram to 0")
++    #if gram_type == 'datasetMean': print("Localizing Gram to dataset mean")
++    #elif gram_type == 'minEndmember': print("Localizing Gram to second endmember")
++    #else: print("Localizing Gram to 0")
+     # Check norm type
+-    if norm_type == 'bandCount': print(f"Normalizing Endmembers by ΓêÜ{bands}")
+-    else: print("No Endmember Normalization Applied")
++    #if norm_type == 'bandCount': print(f"Normalizing Endmembers by ΓêÜ{bands}")
++    #else: print("No Endmember Normalization Applied")
+     # Find endmembers
+     endmembers, endmember_indices = maximumDistance(img, num_endmembers)
+     meanVector = img.mean(axis=(0, 1))
+@@ -330,16 +373,17 @@ def process_volume_tiles(frame_data, tile_size, num_endmembers, gram_type, norm_
+     Strict Validity: Window is only processed if ALL pixels are valid.
+     Any pixel that is part of an invalid tile is set to NaN.
+     """
++    #print("Calculating Tiled Spectral Complexity")
+     bands, height, width = frame_data.shape
+     img = np.transpose(frame_data, (1, 2, 0))
+     output_map = np.full((height, width), np.nan, dtype=np.float32)
+     # Check gram type
+-    if gram_type == 'datasetMean': print("Localizing Gram to dataset mean")
+-    elif gram_type == 'minEndmember': print("Localizing Gram to second endmember")
+-    else: print("Localizing Gram to 0")
+-    # Check norm type
+-    if norm_type == 'bandCount': print(f"Normalizing Endmembers by ΓêÜ{bands}")
+-    else: print("No Endmember Normalization Applied")
++    #if gram_type == 'datasetMean': print("Localizing Gram to dataset mean")
++    #elif gram_type == 'minEndmember': print("Localizing Gram to second endmember")
++    #else: print("Localizing Gram to 0")
++    ## Check norm type
++    #if norm_type == 'bandCount': print(f"Normalizing Endmembers by ΓêÜ{bands}")
++    #else: print("No Endmember Normalization Applied")
+     
+     for y in range(0, height, tile_size):
+         for x in range(0, width, tile_size):
+@@ -349,6 +393,8 @@ def process_volume_tiles(frame_data, tile_size, num_endmembers, gram_type, norm_
+                 meanVector = tile.mean(axis=(0, 1))
+                 volume = np.zeros(num_endmembers)
+                 endmembers, _ = maximumDistance(tile, num_endmembers)
++                if np.isnan(endmembers).any():
++                    continue
+                 localizationVec = endmembers[:,1]
+ 
+                 if gram_type == 'datasetMean':
+@@ -374,22 +420,23 @@ def process_volume_sliding_tile(frame_data, tile_size, stride, num_endmembers, g
+     Strict Validity: Window is only processed if ALL pixels are valid.
+     Output is masked with NaN for any pixel identified as invalid.
+     """
++    #print("Calculating Sliding Window Spectral Complexity")
+     bands, height, width = frame_data.shape
+     img = np.transpose(frame_data, (1, 2, 0))
+     
+     sum_map = np.zeros((height, width), dtype=np.float32)
+     count_map = np.zeros((height, width), dtype=np.int8)
+-    if gram_type == 'datasetMean':
+-        print("Localizing Gram to dataset mean")
+-    elif gram_type == 'minEndmember':
+-        print("Localizing Gram to second endmember")
+-    else:
+-        print("Localizing Gram to 0")
+-
+-    if norm_type == 'bandCount':
+-        print(f"Normalizing Endmembers by ΓêÜ{bands}")
+-    else:
+-        print("No Endmember Normalization Applied")
++    #if gram_type == 'datasetMean':
++    #    print("Localizing Gram to dataset mean")
++    #elif gram_type == 'minEndmember':
++    #    print("Localizing Gram to second endmember")
++    #else:
++    #    print("Localizing Gram to 0")
++#
++    #if norm_type == 'bandCount':
++    #    print(f"Normalizing Endmembers by ΓêÜ{bands}")
++    #else:
++    #    print("No Endmember Normalization Applied")
+     
+     for y_start in range(0, height - tile_size + 1, stride):
+         for x_start in range(0, width - tile_size + 1, stride):
+@@ -398,6 +445,8 @@ def process_volume_sliding_tile(frame_data, tile_size, stride, num_endmembers, g
+             tile = img[y_start:y_end, x_start:x_end, :]
+             meanVector = tile.mean(axis=(0, 1))
+             endmembers, _ = maximumDistance(tile, num_endmembers)
++            if np.isnan(endmembers).any():
++                    continue
+             localizationVec = endmembers[:,1]
+ 
+             if gram_type == 'datasetMean':
+@@ -509,7 +558,7 @@ def calculate_global_z_score(volume_array, valid_pixel_mask):
+     calculating the mean and standard deviation from radiometrically valid pixels, 
+     preventing artifacts from skewing the background model.
+     """
+-    print("Calculating global Z-score for frame")
++    #print("Calculating global Z-score for frame")
+     height, width = volume_array.shape
+     z_scores = np.full((height, width), np.nan, dtype=np.float32)
+     
+@@ -551,7 +600,7 @@ def calculate_local_z_score(volume_array, window_size, stride):
+     Uses a sum_map and count_map to average the Z-scores across all overlapping sliding windows,
+     creating an ensemble anomaly detection map.
+     """
+-    print(f"Calculating local {window_size}x{window_size} neighborhood Z-score for frame")
++    #print(f"Calculating local {window_size}x{window_size} neighborhood Z-score for frame")
+     height, width = volume_array.shape
+     
+     sum_map = np.zeros((height, width), dtype=np.float32)
+@@ -720,6 +769,100 @@ def process_msd_sliding_tile(frame_data, tile_size, stride):
+     output_map = np.where(count_map > 0, sum_map / count_map, np.nan)
+     return output_map
+ 
++def calc_ndvi_frame(frame_data, red_idx=3, nir_idx=4):
++    """
++    Calculates the Normalized Difference Vegetation Index (NDVI) per pixel.
++    
++    Formula: NDVI = (NIR - Red) / (NIR + Red)
++    
++    Args:
++        frame_data (np.ndarray): 3D image cube [bands, height, width]
++        red_idx (int): Index of the Red band. Defaults to 3 (Landsat 8/9 Band 4).
++        nir_idx (int): Index of the Near-Infrared (NIR) band. Defaults to 4 (Landsat 8/9 Band 5).
++                       For hyperspectral data (Tanager), these indices must be explicitly 
++                       provided by matching wavelengths to ~670nm (Red) and ~860nm (NIR).
++                       
++    Returns:
++        ndvi (np.ndarray): 2D array [height, width] containing NDVI values bound between [-1.0, 1.0].
++                           Invalid pixels (0/0) evaluate strictly to np.nan.
++    """
++    bands, height, width = frame_data.shape
++    
++    # Ensure indices exist within the provided data cube
++    if max(red_idx, nir_idx) >= bands:
++        warnings.warn(f"Insufficient bands to calculate NDVI. Requires bands at indices {red_idx} and {nir_idx}. Returning NaNs.")
++        return np.full((height, width), np.nan, dtype=np.float32)
++        
++    red = frame_data[red_idx, :, :]
++    nir = frame_data[nir_idx, :, :]
++    
++    # Calculate denominator
++    denominator = nir + red
++    
++    # Safely calculate NDVI avoiding division by zero or invalid (0/0) operations.
++    # NumPy will natively assign np.nan to 0/0, adhering to strict failure-handling directives.
++    with np.errstate(divide='ignore', invalid='ignore'):
++        ndvi = (nir - red) / denominator
++        
++    # Mask out infinity caused by extreme outliers (x/0)
++    ndvi[np.isinf(ndvi)] = np.nan
++    
++    # Atmospheric over-correction can occasionally push surface reflectance < 0.0, 
++    # which can violate the physical boundaries of the NDVI index. 
++    # Clip back to the strict physical domain to prevent NN feature contamination.
++    # Note: np.clip safely ignores np.nan values.
++    ndvi = np.clip(ndvi, -1.0, 1.0)
++    
++    return ndvi
++
++def calc_ndbi_frame(frame_data, swir_idx=5, nir_idx=4):
++    """
++    Calculates the Normalized Difference Built-up Index (NDBI) per pixel.
++    
++    Formula: NDBI = (SWIR - NIR) / (SWIR + NIR)
++    (Reference: Zha, Y., Gao, J., & Ni, S., 2003. International Journal of Remote Sensing)
++    
++    Args:
++        frame_data (np.ndarray): 3D image cube [bands, height, width]
++        swir_idx (int): Index of the Shortwave Infrared (SWIR) band. 
++                        Defaults to 5 (Landsat 8/9 Band 6, ~1.6 ┬╡m).
++        nir_idx (int): Index of the Near-Infrared (NIR) band. 
++                       Defaults to 4 (Landsat 8/9 Band 5, ~0.86 ┬╡m).
++                       For hyperspectral data (Tanager), these indices must be explicitly 
++                       provided by matching wavelengths to ~1.6┬╡m (SWIR) and ~0.86┬╡m (NIR).
++                       
++    Returns:
++        ndbi (np.ndarray): 2D array [height, width] containing NDBI values bound between [-1.0, 1.0].
++                           Invalid pixels (0/0) evaluate strictly to np.nan.
++    """
++    bands, height, width = frame_data.shape
++    
++    # Ensure indices exist within the provided data cube
++    if max(swir_idx, nir_idx) >= bands:
++        warnings.warn(f"Insufficient bands to calculate NDBI. Requires bands at indices {swir_idx} and {nir_idx}. Returning NaNs.")
++        return np.full((height, width), np.nan, dtype=np.float32)
++        
++    swir = frame_data[swir_idx, :, :]
++    nir = frame_data[nir_idx, :, :]
++    
++    # Calculate denominator
++    denominator = swir + nir
++    
++    # Safely calculate NDBI avoiding division by zero or invalid (0/0) operations.
++    # NumPy will natively assign np.nan to 0/0, adhering to strict failure-handling directives.
++    with np.errstate(divide='ignore', invalid='ignore'):
++        ndbi = (swir - nir) / denominator
++        
++    # Mask out infinity caused by extreme outliers (x/0)
++    ndbi[np.isinf(ndbi)] = np.nan
++    
++    # Atmospheric over-correction can occasionally push surface reflectance < 0.0, 
++    # which can mathematically violate the physical boundaries of the index. 
++    # Clip back to the strict physical domain to prevent NN feature contamination.
++    # Note: np.clip safely ignores np.nan values.
++    ndbi = np.clip(ndbi, -1.0, 1.0)
++    
++    return ndbi
+ 
+ def calc_evi_frame(frame_data):
+     """

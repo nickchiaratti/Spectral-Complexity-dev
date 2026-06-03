@@ -5,7 +5,7 @@ locations:
     ROI_LON_MAX: -77.376776
     ROI_LAT_MIN: 42.961778
     ROI_LAT_MAX: 43.342135
-    START_DATE: '2024-01-01'
+    START_DATE: '2015-01-01'
     END_DATE: '2026-06-01'
     TANAGER_AVAILABLE: true
     TANAGER_STAC_URL: https://www.planet.com/data/stac/tanager-core-imagery/ROCX2025/collection.json
@@ -18,9 +18,11 @@ locations:
     ROI_LAT_MIN: 43.127698
     ROI_LAT_MAX: 43.159168
     START_DATE: '2014-01-01'
-    END_DATE: '2026-03-31'
+    END_DATE: '2026-06-01'
     TANAGER_AVAILABLE: true
     TANAGER_STAC_URL: https://www.planet.com/data/stac/tanager-core-imagery/ROCX2025/collection.json
+    DRAGONETTE_AVAILABLE: true
+    DRAGONETTE_STAC_URL: https://wyvern-odp.com/industry/spatio_temporal/collection.json
   Guatemala-Debris:
     SOURCE_CACHE: null
     ROI_LON_MIN: -88.222
@@ -79,4 +81,4 @@ locations:
     TANAGER_AVAILABLE: true
     TANAGER_STAC_URL: https://www.planet.com/data/stac/tanager-core-imagery/fire/collection.json
 current_run:
-  location: Rochesterv2
+  location: Tait 

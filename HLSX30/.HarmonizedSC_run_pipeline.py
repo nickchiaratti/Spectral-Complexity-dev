@@ -11,7 +11,7 @@ script_dir = Path(__file__).resolve().parent
 # If TARGET_LOCATION is None, it will fall back to 'current_run' in the YAML
 TARGET_LOCATION = None
 CONFIG_FILE_PATH = os.path.join(script_dir, "locations_config.yaml")
-SKIP_VIEW = False  # Set to True to skip the interactive mgrs_view step
+SKIP_VIEW = True  # Set to True to skip the interactive mgrs_view step
 
 def load_config(config_path="locations_config.yaml", location=None):
     with open(config_path, 'r') as f:
