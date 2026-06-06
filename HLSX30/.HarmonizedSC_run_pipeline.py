@@ -9,9 +9,10 @@ from pathlib import Path
 # ==========================================
 script_dir = Path(__file__).resolve().parent
 # If TARGET_LOCATION is None, it will fall back to 'current_run' in the YAML
-TARGET_LOCATION = None
+TARGET_LOCATION = 'Malibu'
 CONFIG_FILE_PATH = os.path.join(script_dir, "locations_config.yaml")
-SKIP_VIEW = False  # Set to True to skip the interactive mgrs_view step
+SKIP_VIEW = True  # Set to True to skip the interactive mgrs_view step
+SATELLITE_DATA_DIR = "C:/satelliteImagery/HLST30"
 
 def load_config(config_path="locations_config.yaml", location=None):
     with open(config_path, 'r') as f:
@@ -68,7 +69,7 @@ def main():
         elif os.path.basename(script) == "HLST_specComplex_viewer.py":
             print(f"Launching SpecComplex Viewer for {location_name}...")
             # Compute file path based on default naming convention in calculation script
-            file_path = f"C:/satelliteImagery/HLST30/HLST_{location_name}_Harmonized_SC_EM-7_Norm-bandCount.h5"
+            file_path = f"{SATELLITE_DATA_DIR}/HLST_{location_name}_Harmonized_SC_EM-7_Norm-bandCount.h5"
             
             # Extract start and end year from config
             start_date_str = loc_config.get("START_DATE", "2024-01-01")

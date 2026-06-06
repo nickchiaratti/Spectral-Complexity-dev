@@ -1,4 +1,5 @@
 import os
+import sys
 import json
 import h5py
 import numpy as np
@@ -10,6 +11,9 @@ from pathlib import Path
 from datetime import datetime
 from tqdm import tqdm
 
+sys.path.append(os.path.join(os.path.dirname(__file__), "..", "HLSX30"))
+from SpecComplex import get_tanager_mask
+
 # --- Configuration ---
 TIME_THRESHOLD_SECONDS = 60
 TARGET_RESOLUTION = 30.0
@@ -17,11 +21,11 @@ TARGET_RED_NM = 670.0
 TARGET_GREEN_NM = 550.0
 TARGET_BLUE_NM = 480.0
 
-SOURCE_DIR = "C:/satelliteImagery/Tanager/Palisades_SourceData"
+SOURCE_DIR = "C:/satelliteImagery/Tanager/Rochesterv2_SourceData"
 OUTPUT_DIR = SOURCE_DIR
 if not os.path.exists(OUTPUT_DIR):
     os.makedirs(OUTPUT_DIR)
-OUTPUT_FILE = os.path.join(OUTPUT_DIR, "Tanager_Native_Stack_Palisades.h5")
+OUTPUT_FILE = os.path.join(OUTPUT_DIR, "Tanager_Native_Stack_Rochesterv2.h5")
 
 def extract_georeferencing_from_h5(h5_path):
     """
@@ -85,7 +89,7 @@ def generate_struct_metadata(grid_name, width, height, ul_mtrs, lr_mtrs, dataset
     data_fields_blocks = []
     for i, (name, dtype, rank, dim_names) in enumerate(datasets_info):
         eos_type = "H5T_NATIVE_FLOAT"
-        if "uint8" in str(dtype): eos_type = "H5T_NATIVE_UINT8"
+        if "uint8" in str(dtype) or "bool" in str(dtype): eos_type = "H5T_NATIVE_UINT8"
         elif "uint16" in str(dtype): eos_type = "H5T_NATIVE_UINT16"
         elif "uint" in str(dtype): eos_type = "H5T_NATIVE_UINT"
         elif "int" in str(dtype): eos_type = "H5T_NATIVE_INT"
@@ -158,7 +162,7 @@ END
 """
     return odl
 
-def percentile_stretch(band_data, fill_value, lower_pct=0, upper_pct=100):
+def percentile_stretch(band_data, fill_value, lower_pct=1, upper_pct=99):
     """
     Applies strict linear contrast stretch based on data percentiles.
     """
@@ -187,16 +191,17 @@ def process_native_stack():
     for subfolder in root_path.iterdir():
         if not subfolder.is_dir(): continue
         json_path = list(subfolder.glob("*.json"))
-        h5_path = list(subfolder.glob("*_ortho_sr_hdf5.h5"))
+        h5_sr_path = list(subfolder.glob("*_ortho_sr_hdf5.h5"))
+        h5_rad_path = list(subfolder.glob("*_ortho_radiance_hdf5.h5"))
         
-        if json_path and h5_path:
+        if json_path and h5_sr_path and h5_rad_path:
             with open(json_path[0], 'r') as f:
                 stac_data = json.load(f)
             dt = datetime.fromisoformat(stac_data['properties']['datetime'].replace('Z', '+00:00'))
-            raw_scenes.append({'h5_file': str(h5_path[0]), 'time': dt, 'json': stac_data})
+            raw_scenes.append({'h5_sr': str(h5_sr_path[0]), 'h5_rad': str(h5_rad_path[0]), 'time': dt, 'json': stac_data})
 
     if not raw_scenes: 
-        raise FileNotFoundError(f"No valid Tanager JSON/HDF5 pairs found in {SOURCE_DIR}")
+        raise FileNotFoundError(f"No valid Tanager JSON/SR/RAD pairs found in {SOURCE_DIR}")
         
     raw_scenes.sort(key=lambda x: x['time'])
 
@@ -219,7 +224,7 @@ def process_native_stack():
     global_zone = None
     
     for scene in raw_scenes:
-        bounds, crs, zone, dims = extract_georeferencing_from_h5(scene['h5_file'])
+        bounds, crs, zone, dims = extract_georeferencing_from_h5(scene['h5_sr'])
         all_bounds.append(bounds)
         
         # Enforce strict CRS alignment across the entire temporal stack
@@ -227,33 +232,36 @@ def process_native_stack():
             global_crs = crs
             global_zone = zone
         elif crs != global_crs:
-            raise ValueError(f"CRITICAL CRS MISMATCH: Expected {global_crs}, but {os.path.basename(scene['h5_file'])} is {crs}. Native stitching impossible without interpolation.")
+            raise ValueError(f"CRITICAL CRS MISMATCH: Expected {global_crs}, but {os.path.basename(scene['h5_sr'])} is {crs}. Native stitching impossible without interpolation.")
 
     tf_target, width, height, ul_coords, lr_coords = calculate_global_grid(all_bounds)
     print(f"Global Native Grid Established: {width}x{height} pixels (UTM Zone {global_zone})")
 
     # 2. Extract Dataset schemas and assert required attributes exist
-    first_h5 = grouped_scenes[0][0]['h5_file']
+    first_h5_sr = grouped_scenes[0][0]['h5_sr']
+    first_h5_rad = grouped_scenes[0][0]['h5_rad']
     dataset_info_list = []
     band_count = 0
     
-    with h5py.File(first_h5, 'r') as f:
-        src_grp = f["HDFEOS/GRIDS/HYP/Data Fields"]
-        for name in src_grp.keys():
-            dset = src_grp[name]
-            
-            # Explicit failure on missing FillValue to enforce strict data integrity
-            if "_FillValue" not in dset.attrs:
-                raise AttributeError(f"Dataset '{name}' is missing '_FillValue' attribute in source HDF5.")
+    with h5py.File(first_h5_sr, 'r') as f_sr, h5py.File(first_h5_rad, 'r') as f_rad:
+        for f, grp_path, file_key in [(f_sr, "HDFEOS/GRIDS/HYP/Data Fields", 'h5_sr'), (f_rad, "HDFEOS/GRIDS/HYP/Data Fields", 'h5_rad')]:
+            src_grp = f[grp_path]
+            for name in src_grp.keys():
+                if any(d['name'] == name for d in dataset_info_list):
+                    continue
+                dset = src_grp[name]
                 
-            fill_attr = dset.attrs["_FillValue"]
-            f_val = fill_attr[0] if isinstance(fill_attr, (np.ndarray, list, tuple)) else fill_attr
-            
-            dataset_info_list.append({
-                'name': name, 'h5_path': f"HDFEOS/GRIDS/HYP/Data Fields/{name}", 
-                'dtype': dset.dtype, 'shape': dset.shape, 'fill': f_val
-            })
-            if name == "surface_reflectance": band_count = dset.shape[0]
+                if "_FillValue" not in dset.attrs:
+                    raise AttributeError(f"Dataset '{name}' is missing '_FillValue' attribute in source HDF5.")
+                    
+                fill_attr = dset.attrs["_FillValue"]
+                f_val = fill_attr[0] if isinstance(fill_attr, (np.ndarray, list, tuple)) else fill_attr
+                
+                dataset_info_list.append({
+                    'name': name, 'h5_path': f"{grp_path}/{name}", 
+                    'dtype': dset.dtype, 'shape': dset.shape, 'fill': f_val, 'file_key': file_key
+                })
+                if name == "surface_reflectance": band_count = dset.shape[0]
 
     datasets_created_info = []
     acqTime_attr = np.zeros(len(grouped_scenes), dtype='float64')
@@ -278,12 +286,15 @@ def process_native_stack():
                 datasets_created_info.append(("sr_invalid", np.dtype('uint8'), 3, ["Time", "YDim", "XDim"]))
 
             per_frame_good_wavelengths = []
+            
+            is_float = np.issubdtype(d_info['dtype'], np.floating)
+            resampling_method = Resampling.cubic_spline if is_float else Resampling.nearest
 
             for t_idx, group in enumerate(grouped_scenes):
                 pass_canvas = np.full(out_shape[1:], d_info['fill'], dtype=d_info['dtype'])
                 
                 for scene in group:
-                    fpath = scene["h5_file"].replace("\\", "/")
+                    fpath = scene[d_info['file_key']].replace("\\", "/")
                     src_tf_bounds, src_crs, _, src_dims = extract_georeferencing_from_h5(fpath)
                     
                     # Construct source affine from bounds
@@ -293,10 +304,9 @@ def process_native_stack():
                         src_data = src_h5[d_info["h5_path"]][...]
                         incoming = np.full(out_shape[1:], d_info['fill'], dtype=d_info['dtype'])
                         
-                        # CRITICAL: Resampling.nearest enforces zero spectral mixing during spatial translation
                         reproject(source=src_data, destination=incoming, 
                                   src_transform=src_tf, src_crs=src_crs, dst_transform=tf_target, dst_crs=global_crs,
-                                  resampling=Resampling.nearest,
+                                  resampling=resampling_method,
                                   src_nodata=d_info['fill'], dst_nodata=d_info['fill'])
                         
                         if "mask" in name.lower() or "nodata" in name.lower():
@@ -321,14 +331,15 @@ def process_native_stack():
                     ds_invalid[t_idx, ...] = invalid_mask
                 
                 if name == "surface_reflectance":
-                    with h5py.File(group[0]["h5_file"], 'r') as f_attr:
+                    with h5py.File(group[0]["h5_sr"], 'r') as f_attr:
                         if "good_wavelengths" not in f_attr[d_info['h5_path']].attrs:
-                            raise AttributeError(f"Missing 'good_wavelengths' in {os.path.basename(group[0]['h5_file'])}")
+                            raise AttributeError(f"Missing 'good_wavelengths' in {os.path.basename(group[0]['h5_sr'])}")
                         per_frame_good_wavelengths.append(f_attr[d_info['h5_path']].attrs["good_wavelengths"])
                     meta_grp.attrs[f"frame_{t_idx}_json"] = json.dumps(group[0]['json'])
 
             # Attribute Mapping
-            with h5py.File(first_h5, 'r') as f0:
+            source_file = first_h5_sr if d_info['file_key'] == 'h5_sr' else first_h5_rad
+            with h5py.File(source_file, 'r') as f0:
                 src_ds = f0[d_info['h5_path']]
                 for k, v in src_ds.attrs.items():
                     if k not in ["DIMENSION_LIST", "REFERENCE_LIST", "CLASS", "PALETTE", "good_wavelengths"]:
@@ -350,6 +361,19 @@ def process_native_stack():
             grp_tanager["surface_reflectance"].attrs["acquisition_time"] = acqTime_attr
             grp_tanager["surface_reflectance"].attrs["spacecraft_id"] = np.array(['Tanager-1']*len(grouped_scenes), dtype='S20')
 
+        # --- Generate common_mask ---
+        print("  Generating common_mask (boolean)...")
+        common_mask_dset = grp_tanager.create_dataset("common_mask", shape=(len(grouped_scenes), height, width), dtype=bool, compression="gzip", fillvalue=False)
+        common_mask_dset.attrs['spatial_ref'] = global_crs
+        common_mask_dset.attrs['GeoTransform'] = np.array(gdal_transform, dtype='float64')
+        datasets_created_info.append(("common_mask", np.dtype(bool), 3, ["Time", "YDim", "XDim"]))
+        
+        for t_idx in range(len(grouped_scenes)):
+            c_mask = get_tanager_mask(grp_tanager, t_idx, shape=(height, width), 
+                                      sun_elevation_threshold=30, cloud_dilation=2, 
+                                      apply_cloud_mask=True, uncertainty_threshold=0.1, aerosol_depth_threshold=0.35)
+            common_mask_dset[t_idx, :, :] = c_mask
+
         # --- Generate native ortho_visual directly from surface_reflectance ---
         print("  Generating strict 'ortho_visual' RGB composite from SR...")
         sr_info = next(d for d in dataset_info_list if d['name'] == 'surface_reflectance')
@@ -362,7 +386,7 @@ def process_native_stack():
         datasets_created_info.append(("ortho_visual", np.dtype('uint8'), 3, ["Time", "RGBBand", "YDim", "XDim"]))
         
         sr_path_in_first = [d['h5_path'] for d in dataset_info_list if d['name'] == 'surface_reflectance'][0]
-        with h5py.File(first_h5, 'r') as f0:
+        with h5py.File(first_h5_sr, 'r') as f0:
             if 'wavelengths' not in f0[sr_path_in_first].attrs:
                 raise AttributeError("Missing 'wavelengths' attribute for RGB extraction.")
             wavelengths = f0[sr_path_in_first].attrs['wavelengths']

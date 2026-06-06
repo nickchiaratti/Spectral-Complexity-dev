@@ -74,6 +74,11 @@ def compute_frame_metrics(payload):
             frame_mask = data_grp["common_mask"][t_local, ...]
             raw_frame_ortho = data_grp["ortho_visual"][t_local, ...]
 
+            persistent_water_mask = payload.get('persistent_water_mask', None)
+            if persistent_water_mask is not None:
+                # Flag persistent open water as masked/invalid in the frame's common_mask
+                frame_mask[persistent_water_mask] = 1
+
             if sensor_type == "TANAGER":
                 gw_mask = data_grp["surface_reflectance"].attrs.get("all_good_wavelengths")[t_local].astype(bool)
             else:
@@ -274,6 +279,26 @@ def process_global_timeline(h5_out, orig_filepath):
         spatial_ref = ref_sr.attrs.get('spatial_ref')
         geo_transform = ref_sr.attrs.get('GeoTransform')
 
+        print("Pre-calculating global persistent water mask from Fmask history...")
+        water_sum = np.zeros((height, width), dtype=np.int32)
+        valid_sum = np.zeros((height, width), dtype=np.int32)
+        
+        for meta in timeline:
+            g_name = meta['grid']
+            l_idx = meta['local_idx']
+            fmask_path = f"/HDFEOS/GRIDS/{g_name}/Data Fields/Fmask"
+            if fmask_path in h5_orig:
+                fmask_frame = h5_orig[fmask_path][l_idx, :, :]
+                valid_pixels = (fmask_frame != 255)
+                water_pixels = ((fmask_frame & 32) > 0)
+                water_sum[valid_pixels] += water_pixels[valid_pixels]
+                valid_sum[valid_pixels] += 1
+                
+        water_sum_masked = np.ma.masked_where(valid_sum == 0, water_sum)
+        binary_mask_masked = water_sum_masked >= (1/3 * np.max(water_sum))
+        persistent_water_mask = binary_mask_masked.filled(False)
+        print(f"Persistent water mask computed. Marked {np.sum(persistent_water_mask)} pixels as persistent water.")
+
         chunk_h, chunk_w = min(height, 256), min(width, 256)
         chunks_3d = (1, chunk_h, chunk_w)
 
@@ -334,6 +359,7 @@ def process_global_timeline(h5_out, orig_filepath):
             'num_bands': sensor_dsets[grid_name]['num_bands'] if CALC_GLOBAL_ENDMEMBERS else 0,
             'height': height,
             'width': width,
+            'persistent_water_mask': persistent_water_mask,
             'calc_flags': {
                 'ndvi': CALC_NDVI, 'ndbi': CALC_NDBI, 'msd': CALC_MSD,
                 'endmembers': CALC_GLOBAL_ENDMEMBERS, 'volume': CALC_SLIDING_VOLUME, 'z_score': CALC_Z_SCORE

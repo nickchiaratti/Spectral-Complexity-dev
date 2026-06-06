@@ -7,10 +7,11 @@ os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
 # ==========================================
 # IDE CONFIGURATION
 # ==========================================
-H5_PATH = "C:/satelliteImagery/HLST30/HLST_Rochesterv2_Harmonized_SC_EM-7_Norm-bandCount.h5"
-OUTPUT_DIR = "c:/satelliteImagery/HLST30/1D-CNN-Rochesterv2-TrainEnd2023"
-TRAIN_END_DATE = "2023-01-01"
-SKIP_TRAIN = True
+LOCATION = "Rochesterv2"
+H5_PATH = f"C:/satelliteImagery/HLST30/HLST_{LOCATION}_Harmonized_SC_EM-7_Norm-bandCount.h5"
+OUTPUT_DIR = f"C:/satelliteImagery/HLST30/1D-CNN-{LOCATION}-TrainEnd2024"
+TRAIN_END_DATE = "2024-01-01"
+SKIP_TRAIN = False
 
 def main():
     if not os.path.exists(OUTPUT_DIR):
