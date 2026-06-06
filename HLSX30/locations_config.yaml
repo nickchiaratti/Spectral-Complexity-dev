@@ -5,7 +5,7 @@ locations:
     ROI_LON_MAX: -77.376776
     ROI_LAT_MIN: 42.961778
     ROI_LAT_MAX: 43.342135
-    START_DATE: '2015-01-01'
+    START_DATE: '2014-01-01'
     END_DATE: '2026-06-01'
     TANAGER_AVAILABLE: true
     TANAGER_STAC_URL: https://www.planet.com/data/stac/tanager-core-imagery/ROCX2025/collection.json
@@ -72,13 +72,15 @@ locations:
     TANAGER_STAC_URL: https://www.planet.com/data/stac/tanager-core-imagery/fire/collection.json
   Malibu:
     SOURCE_CACHE: Palisades
-    ROI_LON_MIN: -118.847
-    ROI_LON_MAX: -118.487
-    ROI_LAT_MIN: 33.905
-    ROI_LAT_MAX: 34.21
-    START_DATE: '2021-01-01'
+    ROI_LON_MIN: -118.777313
+    ROI_LON_MAX: -118.486176
+    ROI_LAT_MIN: 34.020795
+    ROI_LAT_MAX: 34.169772
+    START_DATE: '2015-01-01'
     END_DATE: '2026-01-01'
     TANAGER_AVAILABLE: true
     TANAGER_STAC_URL: https://www.planet.com/data/stac/tanager-core-imagery/fire/collection.json
+    DRAGONETTE_AVAILABLE: false
+    DRAGONETTE_STAC_URL: https://wyvern-odp.com/industry/spatio_temporal/collection.json
 current_run:
-  location: Tait 
+  location: Malibu

@@ -23,7 +23,7 @@ DOWNLOAD_JOBS = [
     #    "output_dir": r"C:\satelliteImagery\Tanager\Palisades_SourceData",
     #    "include_bboxes": [REGIONS["Southern_California"]],
     #    "exclude_bboxes": [REGIONS["Utah"]],
-    #    "target_assets": ['ortho_sr_hdf5','ortho_visual'] 
+    #    "target_assets": ['ortho_sr_hdf5'] 
     #},
     #{
     #    "job_name": "BuenosAires_Urban",
@@ -31,15 +31,15 @@ DOWNLOAD_JOBS = [
     #    "output_dir": r"C:\satelliteImagery\Tanager\BuenosAires_SourceData",
     #    "include_bboxes": [REGIONS["Buenos_Aires"]],
     #    "exclude_bboxes": [],
-    #    "target_assets": ['ortho_sr_hdf5','ortho_visual'] 
+    #    "target_assets": ['ortho_sr_hdf5'] 
     #},
     {
         "job_name": "ROCX_Rochester",
         "collection_url": "https://www.planet.com/data/stac/tanager-core-imagery/ROCX2025/collection.json",
-        "output_dir": "C:/satelliteImagery/Tanager/ROCX_SourceData",
+        "output_dir": "C:/satelliteImagery/Tanager/Rochesterv2_SourceData",
         "include_bboxes": [REGIONS["Rochester_NY"]],
         "exclude_bboxes": [],
-        "target_assets": ['ortho_sr_hdf5','ortho_visual']
+        "target_assets": ['ortho_sr_hdf5','ortho_radiance_hdf5']
     }
 ]
 

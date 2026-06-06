@@ -45,7 +45,7 @@ COMPLEXITY_DICT = {
     'sliding_volume_map_7x7': 'Spectral Complexity 7x7 window',
 }
 LOG_SCALE = ('map' in complexity_type)
-START_YEAR = 2022
+START_YEAR = 2014
 END_YEAR = 2025
 TS_START_DATE = datetime(START_YEAR, 1, 1, tzinfo=timezone.utc)
 TS_END_DATE = datetime(END_YEAR, 12, 31, tzinfo=timezone.utc)

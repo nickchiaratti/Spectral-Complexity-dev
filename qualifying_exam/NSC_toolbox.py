@@ -794,7 +794,7 @@ def maximumDistance(data, num, mnf_data=0, gram='general'):
         # DWM: looks like there may be cases where idx2 has more than one element, i.e., there are
         # two elements of diff_new that are equal to the max.  In that case, just grab the first one
         ###
-        if np.size(idx2) > 1:
+        if np.size(idx2) >= 1:
             idx2 = idx2[0]
 
         # assign to endmember file
@@ -964,7 +964,7 @@ def maximumDistanceNormalized(data, num, mnf_data=0, gram='general'):
         # DWM: looks like there may be cases where idx2 has more than one element, i.e., there are
         # two elements of diff_new that are equal to the max.  In that case, just grab the first one
         ###
-        if np.size(idx2) > 1:
+        if np.size(idx2) >= 1:
             idx2 = idx2[0]
 
         # assign to endmember file

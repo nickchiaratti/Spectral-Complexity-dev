@@ -116,7 +116,7 @@ def compute_frame_metrics(payload):
         if flags['volume']:
             t0 = time.perf_counter()
             # Note: process_volume_sliding_tile prunes invalid pixels internally
-            slide_map = sc.process_volume_sliding_tile(frame_sr, TILE_SIZE, SLIDING_STRIDE, NUM_ENDMEMBERS, 'minEndmember', NORM_PARAM)
+            slide_map = scQR.process_volume_sliding_tile(frame_sr, TILE_SIZE, SLIDING_STRIDE, NUM_ENDMEMBERS, 'minEndmember', NORM_PARAM)
             telemetry['Sliding_Volume_Map'] = time.perf_counter() - t0
         
         # --- 5. Mean Spectral Distance ---

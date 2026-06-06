@@ -16,10 +16,8 @@ def maximumDistance(data, num_endmembers, chunk_size=50000):
     image2D = np.reshape(data, (data.shape[0] * data.shape[1], data.shape[2]), order="F")
 
     if np.min(image2D) < 0:
-        warnings.warn('Data contains negative values')
-        image2D = np.clip(image2D, 0, 2)
+        image2D = np.clip(image2D, 0, 1)
     if np.max(image2D) > 1:
-        warnings.warn('Data contains values greater than 1')
         image2D = np.clip(image2D, 0, 1)
 
     valid_mask = ~np.isnan(image2D).any(axis=1)
