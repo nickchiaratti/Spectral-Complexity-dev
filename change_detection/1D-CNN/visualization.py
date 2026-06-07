@@ -7,8 +7,12 @@ import scienceplots
 import pyproj
 plt.style.use(['science','no-latex'])
 
+LOCATION = "Malibu"
+H5_PATH = f"C:/satelliteImagery/HLST30/HLST_{LOCATION}_Harmonized_SC_EM-7_Norm-bandCount.h5"
+INFERENCE_H5 = f"C:/satelliteImagery/HLST30/1D-CNN-{LOCATION}-TrainEnd2024/inference_results.h5"
 
-def plot_pixel_sits(pixel_y, pixel_x, source_h5_path, inference_results_h5, ax=None, current_date=None, train_end_date="2024-01-01"):
+
+def plot_pixel_sits(pixel_y, pixel_x, source_h5_path, inference_results_h5, ax=None, current_date=None):
     # This visualizes the 1D time series for a pixel
     lat, lon = None, None
     with h5py.File(source_h5_path, 'r') as f:
@@ -45,6 +49,7 @@ def plot_pixel_sits(pixel_y, pixel_x, source_h5_path, inference_results_h5, ax=N
     dates = [datetime.fromtimestamp(ts, timezone.utc) for ts in acq_time]
     
     # Load inference results for this pixel
+    train_end_date = "2024-01-01"
     with h5py.File(inference_results_h5, 'r') as f:
         res = f['inference_results'][:]
         if 'train_end_date' in f['inference_results'].attrs:
@@ -136,13 +141,15 @@ def plot_pixel_sits(pixel_y, pixel_x, source_h5_path, inference_results_h5, ax=N
     else:
         ax.set_title(f"Pixel Location: ({pixel_x}, {pixel_y})")
     ax.set_xlabel('Date')
+    import matplotlib.dates as mdates
+    ax.xaxis.set_major_locator(mdates.YearLocator())
     ax.set_ylabel('Spectral Complexity (Z-Score)')
     ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left', borderaxespad=0.)
     ax.grid(True)
     if show_plot:
         plt.show()
 
-def plot_spatial_anomaly_overlay(source_h5_path, inference_results_h5, train_end_date="2024-01-01"):
+def plot_spatial_anomaly_overlay(source_h5_path, inference_results_h5):
     with h5py.File(source_h5_path, 'r') as f:
         harm_grp = f['/HDFEOS/GRIDS/HARMONIZED/Data Fields']
         acq_time = harm_grp['sliding_volume_z_score'].attrs['acquisition_time'][:]
@@ -178,9 +185,6 @@ def plot_spatial_anomaly_overlay(source_h5_path, inference_results_h5, train_end
     # Load inference results
     with h5py.File(inference_results_h5, 'r') as f:
         res = f['inference_results'][:]
-        if 'train_end_date' in f['inference_results'].attrs:
-            val = f['inference_results'].attrs['train_end_date']
-            train_end_date = val.decode('utf-8') if isinstance(val, bytes) else str(val)
         
     H, W = full_valid_mask.shape[1], full_valid_mask.shape[2]
     
@@ -268,7 +272,7 @@ def plot_spatial_anomaly_overlay(source_h5_path, inference_results_h5, train_end
         current_date = datetime.fromtimestamp(current_date_ts, timezone.utc)
         ax_img.set_title(f"{current_sg} Acquisition: {current_date.strftime('%Y-%m-%d %H:%M:%S')} UTC")
         ax_ts.clear()
-        plot_pixel_sits(y, x, source_h5_path, inference_results_h5, ax=ax_ts, current_date=current_date, train_end_date=train_end_date)
+        plot_pixel_sits(y, x, source_h5_path, inference_results_h5, ax=ax_ts, current_date=current_date)
         ax_ts.set_ylim([-4, 4])
         fig.canvas.draw()
 
@@ -276,9 +280,7 @@ def plot_spatial_anomaly_overlay(source_h5_path, inference_results_h5, train_end
     plt.show()
 
 if __name__ == "__main__":
-    h5_path = "C:/satelliteImagery/HLST30/HLST_Malibu_Harmonized_SC_EM-7_Norm-bandCount.h5"
-    inference_h5 = "c:/satelliteImagery/HLST30/1D-CNN-Malibu/inference_results.h5"
-    if h5py.is_hdf5(inference_h5):
-        plot_spatial_anomaly_overlay(h5_path, inference_h5, train_end_date="2024-01-01")
+    if os.path.exists(INFERENCE_H5):
+        plot_spatial_anomaly_overlay(H5_PATH, INFERENCE_H5)
     else:
         print("Run inference first to create inference_results.h5")
