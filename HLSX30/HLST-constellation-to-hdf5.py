@@ -562,16 +562,16 @@ with h5py.File(OUTPUT_MASTER_HDF5, 'w') as h5f:
                         out_dset.attrs['spatial_ref'] = master_crs.to_wkt()
                         out_dset.attrs['GeoTransform'] = gdal_transform
 
-                        # Extract Native Georeferencing
-                        src_crs_str = src_dset.attrs['spatial_ref']
+                        # Extract Native Georeferencing (fall back to surface_reflectance attributes if missing)
+                        src_crs_str = src_dset.attrs['spatial_ref'] if 'spatial_ref' in src_dset.attrs else src_sr_dset.attrs['spatial_ref']
                         src_crs_str = src_crs_str.decode('utf-8') if isinstance(src_crs_str, bytes) else str(src_crs_str)
                         src_crs = CRS.from_user_input(src_crs_str)
                         
-                        src_gt = src_dset.attrs['GeoTransform']
+                        src_gt = src_dset.attrs['GeoTransform'] if 'GeoTransform' in src_dset.attrs else src_sr_dset.attrs['GeoTransform']
                         src_tf = Affine.from_gdal(*src_gt)
 
                         # Strict Interpolation Rule: Nearest neighbor for masks/RGB, Cubic for continuous signals
-                        resampling_algo = Resampling.nearest if dtype.name == 'uint8' else Resampling.cubic
+                        resampling_algo = Resampling.nearest if (dtype.name == 'uint8' or dtype.kind == 'b') else Resampling.cubic
 
                         for out_idx, t in enumerate(valid_t_indices):
                             src_data = src_dset[t, ...]
@@ -581,22 +581,40 @@ with h5py.File(OUTPUT_MASTER_HDF5, 'w') as h5f:
                                 
                             incoming = np.full((bands if is_3d else 1, master_height, master_width), fill_val, dtype=dtype)
                             
-                            reproject(
-                                source=src_data, destination=incoming,
-                                src_transform=src_tf, src_crs=src_crs,
-                                dst_transform=master_transform, dst_crs=master_crs,
-                                resampling=resampling_algo, src_nodata=fill_val, dst_nodata=fill_val
-                            )
+                            if dtype.kind == 'b':
+                                # Rasterio reproject does not support boolean types directly (throws KeyError: 'b')
+                                # Temporarily cast to uint8 for reprojection
+                                reproject_src = src_data.astype(np.uint8)
+                                reproject_dst = np.full((bands if is_3d else 1, master_height, master_width), int(fill_val), dtype=np.uint8)
+                                reproject_nodata = int(fill_val)
+                                
+                                reproject(
+                                    source=reproject_src, destination=reproject_dst,
+                                    src_transform=src_tf, src_crs=src_crs,
+                                    dst_transform=master_transform, dst_crs=master_crs,
+                                    resampling=resampling_algo, src_nodata=reproject_nodata, dst_nodata=reproject_nodata
+                                )
+                                incoming[...] = reproject_dst.astype(bool)
+                            else:
+                                reproject(
+                                    source=src_data, destination=incoming,
+                                    src_transform=src_tf, src_crs=src_crs,
+                                    dst_transform=master_transform, dst_crs=master_crs,
+                                    resampling=resampling_algo, src_nodata=fill_val, dst_nodata=fill_val
+                                )
                             
                             out_dset[out_idx, ...] = incoming if is_3d else incoming[0, ...]
 
                     # Generate the final Harmonized 'common_mask' utilizing the master grid data
                     print("  Generating Common Mask for Tanager on Master Grid...")
-                    mask_ds = grp_tanager.create_dataset('common_mask', shape=(num_frames, master_height, master_width), dtype=bool, compression="gzip", compression_opts=4, chunks=(1, chunk_h, chunk_w))
+                    if 'common_mask' in grp_tanager:
+                        mask_ds = grp_tanager['common_mask']
+                    else:
+                        mask_ds = grp_tanager.create_dataset('common_mask', shape=(num_frames, master_height, master_width), dtype=bool, compression="gzip", compression_opts=4, chunks=(1, chunk_h, chunk_w))
+                        datasets_created_info.append(("common_mask", bool, 3, ["Time", "YDim", "XDim"]))
                     mask_ds.attrs['spatial_ref'] = master_crs.to_wkt()
                     mask_ds.attrs['GeoTransform'] = gdal_transform
                     mask_ds.attrs['description'] = "True = Invalid/Masked, False = Valid. Generated from SpecComplex ARD rules."
-                    datasets_created_info.append(("common_mask", bool, 3, ["Time", "YDim", "XDim"]))
 
                     # Flush the file to finalize all written compressed chunks on disk before reading them back
                     h5f.flush()

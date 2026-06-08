@@ -82,15 +82,15 @@ class SITSDataset(Dataset):
                     valid_idx = np.where(valid_mask[y, x, :])[0]
                     valid_initial_count = len(valid_idx)
                     
-                    if valid_initial_count < 23:
+                    if valid_initial_count < 38 + 3:
                         continue # Insufficient valid observations
                     
                     valid_acq_time = acq_time[valid_idx]
                     
-                    # Construct sliding window indices of 23 valid frames
-                    for i in range(valid_initial_count - 23 + 1):
-                        ts21 = valid_acq_time[i+20]
-                        ts23 = valid_acq_time[i+22]
+                    # Target indices start after MIN_SAMPLES history
+                    for t_idx in range(38, valid_initial_count - 2):
+                        ts21 = valid_acq_time[t_idx]
+                        ts23 = valid_acq_time[t_idx+2]
                         
                         if self.mode == 'calibration' and ts23 >= split_time:
                             continue
@@ -99,7 +99,7 @@ class SITSDataset(Dataset):
                             
                         samples_buf[sample_count, 0] = y
                         samples_buf[sample_count, 1] = x
-                        samples_buf[sample_count, 2] = i
+                        samples_buf[sample_count, 2] = t_idx
                         sample_count += 1
                         
             print(f"[{self.mode}] Converting {sample_count} samples to Shared Memory...")
@@ -109,37 +109,70 @@ class SITSDataset(Dataset):
         return len(self.samples)
 
     def __getitem__(self, idx):
-        y, x, start_i = self.samples[idx]
+        y, x, t_idx = self.samples[idx]
         
         valid_idx = torch.where(self.valid_mask[y, x, :])[0]
-        window_idx = valid_idx[start_i : start_i + 23]
+        valid_acq_time = self.acq_time[valid_idx]
         
-        pixel_z = self.z_score[y, x, window_idx]
-        pixel_doy_sin = self.doy_sin[window_idx]
-        pixel_doy_cos = self.doy_cos[window_idx]
-        pixel_tod_sin = self.tod_sin[window_idx]
-        pixel_tod_cos = self.tod_cos[window_idx]
-        valid_acq_time = self.acq_time[window_idx]
+        # Targets
+        target_idx = valid_idx[t_idx : t_idx + 3]
+        targets = self.z_score[y, x, target_idx]
+        ts21 = valid_acq_time[t_idx].item()
+        ts23 = valid_acq_time[t_idx+2].item()
         
-        ts21 = valid_acq_time[20].item()
-        ts23 = valid_acq_time[22].item()
+        # History (Temporal Subset + Elastic Fallback)
+        TIME_WINDOW_SEC = 3.0 * 365.25 * 86400.0
+        MIN_SAMPLES = 38
+        MAX_SEQ_LEN = 350
+        
+        past_idx = valid_idx[:t_idx]
+        past_times = valid_acq_time[:t_idx]
+        
+        window_start_time = ts21 - TIME_WINDOW_SEC
+        in_window_mask = past_times >= window_start_time
+        
+        if torch.sum(in_window_mask) < MIN_SAMPLES:
+            history_idx = past_idx[-MIN_SAMPLES:]
+            history_times = past_times[-MIN_SAMPLES:]
+        else:
+            history_idx = past_idx[in_window_mask]
+            history_times = past_times[in_window_mask]
+            
+        if len(history_idx) > MAX_SEQ_LEN:
+            history_idx = history_idx[-MAX_SEQ_LEN:]
+            history_times = history_times[-MAX_SEQ_LEN:]
+            
+        seq_len = len(history_idx)
+        
+        pixel_z = self.z_score[y, x, history_idx]
+        pixel_doy_sin = self.doy_sin[history_idx]
+        pixel_doy_cos = self.doy_cos[history_idx]
+        pixel_tod_sin = self.tod_sin[history_idx]
+        pixel_tod_cos = self.tod_cos[history_idx]
         
         # Time delta: elapsed time between current target forecast obs (ts21) 
         # and each historical frame (in days)
-        delta_t = (ts21 - valid_acq_time[:20]) / 86400.0
+        delta_t = (ts21 - history_times) / 86400.0
         dt_log = torch.log(1 + delta_t).to(torch.float32)
         
-        # Combine all 6 features: [doy_sin, doy_cos, tod_sin, tod_cos, dt_log, z_score]
+        # Combine all 6 features
         history = torch.stack([
-            pixel_doy_sin[:20], 
-            pixel_doy_cos[:20], 
-            pixel_tod_sin[:20],
-            pixel_tod_cos[:20],
+            pixel_doy_sin, 
+            pixel_doy_cos, 
+            pixel_tod_sin,
+            pixel_tod_cos,
             dt_log,
-            pixel_z[:20]
+            pixel_z
         ], dim=-1)
         
-        targets = pixel_z[20:23]
+        # Pad sequence and create mask
+        pad_len = MAX_SEQ_LEN - seq_len
+        if pad_len > 0:
+            pad_tensor = torch.zeros((pad_len, 6), dtype=torch.float32)
+            history = torch.cat([pad_tensor, history], dim=0)
+            seq_mask = torch.cat([torch.zeros(pad_len, dtype=torch.bool), torch.ones(seq_len, dtype=torch.bool)], dim=0)
+        else:
+            seq_mask = torch.ones(MAX_SEQ_LEN, dtype=torch.bool)
         
         # Spatial features
         norm_x = (x / (self.w - 1)) * 2 - 1 if self.w > 1 else 0
@@ -151,6 +184,7 @@ class SITSDataset(Dataset):
         return {
             'X_seq': history,
             'X_spatial': spatial_feats,
+            'seq_mask': seq_mask,
             'Y_target': targets,
             # metadata as tuple: (y, x, ts21, ts23, act1, act2, act3)
             'metadata': (y, x, ts21, ts23, targets[0].item(), targets[1].item(), targets[2].item())

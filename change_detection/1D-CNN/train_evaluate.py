@@ -35,10 +35,11 @@ def train_and_evaluate(h5_path, output_h5='inference_results.h5', weights_path='
             for batch in cal_loader:
                 X_seq = batch['X_seq'].to(device, non_blocking=True)
                 X_spatial = batch['X_spatial'].to(device, non_blocking=True)
+                seq_mask = batch['seq_mask'].to(device, non_blocking=True)
                 y = batch['Y_target'].to(device, non_blocking=True)
                 
                 optimizer.zero_grad()
-                preds = model(X_seq, X_spatial)
+                preds = model(X_seq, X_spatial, seq_mask)
                 loss = criterion(preds, y)
                 loss.backward()
                 optimizer.step()
@@ -58,23 +59,24 @@ def train_and_evaluate(h5_path, output_h5='inference_results.h5', weights_path='
         for batch in baseline_loader:
             X_seq = batch['X_seq'].to(device, non_blocking=True)
             X_spatial = batch['X_spatial'].to(device, non_blocking=True)
+            seq_mask = batch['seq_mask'].to(device, non_blocking=True)
             y = batch['Y_target'].to(device, non_blocking=True)
-            preds = model(X_seq, X_spatial)
+            preds = model(X_seq, X_spatial, seq_mask)
             sq_errs.append(((preds - y)**2).cpu().numpy())
     
     baseline_rmse = np.sqrt(np.mean(np.concatenate(sq_errs)))
     print(f"Baseline RMSE (Pre-2024): {baseline_rmse:.4f}")
     
-    # Phase 2: Monitoring Inference
-    print("Loading Monitoring Dataset...")
-    mon_dataset = SITSDataset(h5_path, mode='monitoring', train_end_date=train_end_date)
-    if len(mon_dataset) == 0:
-        print("No monitoring data found.")
+    # Phase 2: Full Inference
+    print("Loading Evaluation Dataset...")
+    eval_dataset = SITSDataset(h5_path, mode='all', train_end_date=train_end_date)
+    if len(eval_dataset) == 0:
+        print("No evaluation data found.")
         return
         
-    mon_loader = DataLoader(mon_dataset, batch_size=4096, shuffle=False, num_workers=16, pin_memory=True)
+    eval_loader = DataLoader(eval_dataset, batch_size=4096, shuffle=False, num_workers=16, pin_memory=True)
     
-    print(f"Evaluating {len(mon_dataset)} monitoring sequences...")
+    print(f"Evaluating {len(eval_dataset)} sequences...")
     dt = np.dtype([
         ('Pixel_X', 'int32'),
         ('Pixel_Y', 'int32'),
@@ -95,17 +97,18 @@ def train_and_evaluate(h5_path, output_h5='inference_results.h5', weights_path='
     with h5py.File(output_h5, 'w') as f:
         if 'inference_results' in f:
             del f['inference_results']
-        dset = f.create_dataset('inference_results', shape=(len(mon_dataset),), dtype=dt)
+        dset = f.create_dataset('inference_results', shape=(len(eval_dataset),), dtype=dt)
         dset.attrs['train_end_date'] = str(train_end_date)
         
         curr_idx = 0
         with torch.no_grad():
-            for batch in mon_loader:
+            for batch in eval_loader:
                 X_seq = batch['X_seq'].to(device, non_blocking=True)
                 X_spatial = batch['X_spatial'].to(device, non_blocking=True)
+                seq_mask = batch['seq_mask'].to(device, non_blocking=True)
                 y = batch['Y_target'].numpy()
                 
-                preds = model(X_seq, X_spatial).cpu().numpy()
+                preds = model(X_seq, X_spatial, seq_mask).cpu().numpy()
                 batch_size = len(preds)
                 
                 res = np.abs(preds - y)
@@ -139,10 +142,10 @@ def train_and_evaluate(h5_path, output_h5='inference_results.h5', weights_path='
                 dset[curr_idx:curr_idx + batch_size] = batch_results
                 curr_idx += batch_size
 
-    anomaly_rate = (total_anomalies / len(mon_dataset)) * 100 if len(mon_dataset) > 0 else 0
-    print("\n--- Monitoring Report ---")
+    anomaly_rate = (total_anomalies / len(eval_dataset)) * 100 if len(eval_dataset) > 0 else 0
+    print("\n--- Evaluation Report ---")
     print(f"Baseline RMSE (Pre-2024): {baseline_rmse:.4f}")
-    print(f"Total sequences evaluated in Monitoring Set: {len(mon_dataset)}")
+    print(f"Total sequences evaluated: {len(eval_dataset)}")
     print(f"Total Anomalies flagged: {total_anomalies}")
     print(f"Anomaly rate: {anomaly_rate:.2f}%")
     print("Done!")

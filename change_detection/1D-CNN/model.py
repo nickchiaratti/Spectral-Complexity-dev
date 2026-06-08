@@ -18,22 +18,24 @@ class MultiScaleSITSNet(nn.Module):
         self.conv_sec = nn.Conv1d(in_channels=48, out_channels=64, kernel_size=3, padding='same')
         self.maxpool2 = nn.MaxPool1d(kernel_size=2)
         
-        self.flatten = nn.Flatten()
-        
         # Regression Head
-        # After maxpool twice, length will be 20 -> 10 -> 5.
-        # Wait, maxpool of size 2, stride 2 (default). length 20 -> 10 -> 5.
-        # Flattened dim = 64 channels * 5 = 320
-        flattened_dim = 64 * 5
+        # Sequence length is now dynamic, so we use Global Average Pooling
+        # resulting in a fixed 64 channels.
         spatial_dim = 40
         
-        self.linear1 = nn.Linear(flattened_dim + spatial_dim, 128)
+        self.linear1 = nn.Linear(64 + spatial_dim, 128)
         self.dropout = nn.Dropout(0.2)
         self.linear2 = nn.Linear(128, 3)
 
-    def forward(self, X_seq, X_spatial):
-        # Permute X_seq from (Batch, 20, 6) to (Batch, 6, 20)
+    def forward(self, X_seq, X_spatial, seq_mask=None):
+        # Permute X_seq from (Batch, SeqLen, 6) to (Batch, 6, SeqLen)
         x = X_seq.permute(0, 2, 1)
+        
+        if seq_mask is not None:
+            # (Batch, SeqLen) -> (Batch, 1, SeqLen)
+            m = seq_mask.unsqueeze(1).float()
+        else:
+            m = torch.ones(x.size(0), 1, x.size(2), device=x.device)
         
         # Inception branches
         out1 = self.branch1(x)
@@ -41,19 +43,28 @@ class MultiScaleSITSNet(nn.Module):
         out3 = self.branch3(x)
         
         # Concatenate along channel dimension (dim=1)
-        x = torch.cat([out1, out2, out3], dim=1) # (Batch, 48, 20)
+        x = torch.cat([out1, out2, out3], dim=1) # (Batch, 48, SeqLen)
         x = self.relu(x)
-        x = self.maxpool1(x) # (Batch, 48, 10)
+        x = x * m # Apply mask before pooling
+        
+        x = self.maxpool1(x) 
+        m = self.maxpool1(m) # Shrink the mask identically
         
         # Secondary Extractor
         x = self.conv_sec(x)
         x = self.relu(x)
-        x = self.maxpool2(x) # (Batch, 64, 5)
+        x = x * m # Apply mask again
         
-        x = self.flatten(x) # (Batch, 320)
+        x = self.maxpool2(x) 
+        m = self.maxpool2(m)
+        
+        # Global Average Pooling (masked)
+        sum_x = torch.sum(x * m, dim=2)
+        count_valid = torch.sum(m, dim=2).clamp(min=1e-5)
+        x = sum_x / count_valid # (Batch, 64)
         
         # Regression Head
-        x = torch.cat([x, X_spatial], dim=1) # (Batch, 360)
+        x = torch.cat([x, X_spatial], dim=1) # (Batch, 64 + 40 = 104)
         x = self.linear1(x)
         x = self.relu(x)
         x = self.dropout(x)
