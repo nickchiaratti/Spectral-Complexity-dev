@@ -20,7 +20,7 @@ DOWNLOAD_JOBS = [
     #{
     #    "job_name": "Palisades_fire",
     #    "collection_url": "https://wyvern-odp.com/product-type/standard/collection.json",
-    #    "output_dir": "C:/satelliteImagery/Wyvern/Palisades_SourceData",
+    #    "output_dir": "C:/satelliteImagery/dragonette/Palisades_SourceData",
     #    "include_bboxes": [REGIONS["Southern_California"]],
     #    "target_assets": ['zip_file'] 
     #},
@@ -28,7 +28,7 @@ DOWNLOAD_JOBS = [
         "job_name": "ROCX",
         # Extracted the true machine-readable STAC endpoint from the item's 'parent' links
         "collection_url": "https://wyvern-odp.com/industry/spatio_temporal/collection.json",
-        "output_dir": "C:/satelliteImagery/Wyvern/ROCX_SourceData",
+        "output_dir": "C:/satelliteImagery/dragonette/ROCX_SourceData",
         "include_bboxes": [REGIONS["Rochester_NY"]],
         # Specifically targeting the zip archive as requested
         "target_assets": ['zip_file'] 

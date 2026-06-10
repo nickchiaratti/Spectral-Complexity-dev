@@ -25,7 +25,10 @@ import yaml
 try:
     from pathlib import Path
     script_dir = Path(__file__).resolve().parent
-    with open(os.path.join(script_dir, "locations_config.yaml"), "r") as f:
+    config_path = os.path.join(script_dir, "locations_config.yaml")
+    if not os.path.exists(config_path):
+        config_path = os.path.join(script_dir.parent, "locations_config.yaml")
+    with open(config_path, "r") as f:
         config_data = yaml.safe_load(f)
     Location = config_data.get("current_run", {}).get("location", "Tait")
 except Exception:
@@ -45,7 +48,7 @@ COMPLEXITY_DICT = {
     'sliding_volume_map_7x7': 'Spectral Complexity 7x7 window',
 }
 LOG_SCALE = ('map' in complexity_type)
-START_YEAR = 2014
+START_YEAR = 2025
 END_YEAR = 2025
 TS_START_DATE = datetime(START_YEAR, 1, 1, tzinfo=timezone.utc)
 TS_END_DATE = datetime(END_YEAR, 12, 31, tzinfo=timezone.utc)
@@ -69,8 +72,8 @@ SAVE_DIR = f"C:/satelliteImagery/MultiSensor_Analysis_{Location}_Harmonized" + s
 # Predefined Time Series Locations Map (Latitude, Longitude)
 TS_LOCATIONS_MAP = {
     "Tait": [
-        {'latlon': (43.13927, -77.50340), 'label': "ROCX NITE Tarp",                  'color': 'tab:purple'},
-        {'latlon': (43.142856, -77.508451), 'label': "West Tait Forest",                'color': 'tab:green'},
+        #{'latlon': (43.13927, -77.50340), 'label': "ROCX NITE Tarp",                  'color': 'tab:purple'},
+        {'latlon': (43.135289, -77.488352), 'label': "Change point",                'color': 'tab:green'},
         {'latlon': (43.144861, -77.501176), 'label': "East Tait Forest",                'color': 'tab:olive'},
         {'latlon': (43.151502, -77.485518), 'label': "Shadow Pines Grass Field",         'color': 'tab:red'},
         {'latlon': (43.151219, -77.486637), 'label': "Shadow Pines Pickleball Court",    'color': 'tab:blue'},
@@ -870,22 +873,21 @@ class HarmonizedComplexityViewer:
 
     def run(self): plt.show()
 
-if __name__ == "__main__":
-    import argparse
-    parser = argparse.ArgumentParser(description="View Spectral Complexity Metrics")
-    parser.add_argument("--file", type=str, help="Path to HARMONIZED SC HDF5 Output")
-    parser.add_argument("--start_year", type=int, help="Start Year for time series")
-    parser.add_argument("--end_year", type=int, help="End Year for time series")
-    args = parser.parse_args()
+def main(target_location=None, file_path=None, start_year=None, end_year=None):
+    global Location, default_harmonized_path, SAVE_DIR, suffix, TS_LOCATIONS, START_YEAR, TS_START_DATE, END_YEAR, TS_END_DATE
     
-    file_path = args.file
+    if target_location:
+        Location = target_location
+        default_harmonized_path = f"C:/satelliteImagery/HLST30/HLST_{Location}_Harmonized_SC_EM-7_Norm-bandCount.h5"
+        if Location in TS_LOCATIONS_MAP:
+            TS_LOCATIONS = TS_LOCATIONS_MAP[Location]
     
-    if args.start_year is not None or args.end_year is not None:
-        if args.start_year is not None:
-            START_YEAR = args.start_year
+    if start_year is not None or end_year is not None:
+        if start_year is not None:
+            START_YEAR = start_year
             TS_START_DATE = datetime(START_YEAR, 1, 1, tzinfo=timezone.utc)
-        if args.end_year is not None:
-            END_YEAR = args.end_year
+        if end_year is not None:
+            END_YEAR = end_year
             TS_END_DATE = datetime(END_YEAR, 12, 31, tzinfo=timezone.utc)
             
         suffix = ''
@@ -915,3 +917,14 @@ if __name__ == "__main__":
         viewer.run()
     else:
         print(f"File not found: {file_path}")
+
+if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser(description="View Spectral Complexity Metrics")
+    parser.add_argument("--location", type=str, help="Target location to view")
+    parser.add_argument("--file", type=str, help="Path to HARMONIZED SC HDF5 Output")
+    parser.add_argument("--start_year", type=int, help="Start Year for time series")
+    parser.add_argument("--end_year", type=int, help="End Year for time series")
+    args = parser.parse_args()
+    
+    main(target_location=args.location, file_path=args.file, start_year=args.start_year, end_year=args.end_year)

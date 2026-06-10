@@ -39,7 +39,7 @@ DOWNLOAD_JOBS = [
         "output_dir": "C:/satelliteImagery/Tanager/Rochesterv2_SourceData",
         "include_bboxes": [REGIONS["Rochester_NY"]],
         "exclude_bboxes": [],
-        "target_assets": ['ortho_sr_hdf5','ortho_radiance_hdf5']
+        "target_assets": ['ortho_sr_hdf5','ortho_radiance_hdf5','basic_sr_hdf5']
     }
 ]
 

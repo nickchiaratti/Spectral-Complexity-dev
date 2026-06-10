@@ -21,11 +21,9 @@ TARGET_RED_NM = 670.0
 TARGET_GREEN_NM = 550.0
 TARGET_BLUE_NM = 480.0
 
-SOURCE_DIR = "C:/satelliteImagery/Tanager/Rochesterv2_SourceData"
-OUTPUT_DIR = SOURCE_DIR
-if not os.path.exists(OUTPUT_DIR):
-    os.makedirs(OUTPUT_DIR)
-OUTPUT_FILE = os.path.join(OUTPUT_DIR, "Tanager_Native_Stack_Rochesterv2.h5")
+LOCATION = "Rochesterv2"
+SOURCE_DIR = f"C:/satelliteImagery/Tanager/{LOCATION}_SourceData"
+OUTPUT_FILE = os.path.join(SOURCE_DIR, f"Tanager_Native_Stack_{LOCATION}.h5")
 
 def extract_georeferencing_from_h5(h5_path):
     """
@@ -288,7 +286,7 @@ def process_native_stack():
             per_frame_good_wavelengths = []
             
             is_float = np.issubdtype(d_info['dtype'], np.floating)
-            resampling_method = Resampling.cubic_spline if is_float else Resampling.nearest
+            resampling_method = Resampling.nearest
 
             for t_idx, group in enumerate(grouped_scenes):
                 pass_canvas = np.full(out_shape[1:], d_info['fill'], dtype=d_info['dtype'])
@@ -370,7 +368,7 @@ def process_native_stack():
         
         for t_idx in range(len(grouped_scenes)):
             c_mask = get_tanager_mask(grp_tanager, t_idx, shape=(height, width), 
-                                      sun_elevation_threshold=30, cloud_dilation=2, 
+                                      sun_elevation_threshold=30, cloud_dilation=3, 
                                       apply_cloud_mask=True, uncertainty_threshold=0.1, aerosol_depth_threshold=0.35)
             common_mask_dset[t_idx, :, :] = c_mask
 

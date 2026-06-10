@@ -12,6 +12,8 @@ st.set_page_config(page_title="MGRS ROI Selector", layout="wide")
 
 script_dir = Path(__file__).resolve().parent
 CONFIG_FILE = os.path.join(script_dir, "locations_config.yaml")
+if not os.path.exists(CONFIG_FILE):
+    CONFIG_FILE = os.path.join(script_dir.parent, "locations_config.yaml")
 
 def load_config():
     if os.path.exists(CONFIG_FILE):

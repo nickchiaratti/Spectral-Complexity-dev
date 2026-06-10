@@ -11,6 +11,15 @@ import rasterio
 from rasterio.warp import transform_bounds, transform_geom, transform
 from rasterio.features import shapes
 from rasterio.transform import Affine
+import sys
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'HLSX30')))
+from SpecComplex import get_tanager_mask
+
+SUN_ELEVATION_THRESHOLD = None
+CLOUD_DILATION = 0
+APPLY_CLOUD_MASK = False
+UNCERTAINTY_THRESHOLD = None
+AEROSOL_DEPTH_THRESHOLD = None
 
 class TanagerNativeViewer:
     def __init__(self, h5_path):
@@ -44,6 +53,13 @@ class TanagerNativeViewer:
         self.times = self.sr_dset.attrs["acquisition_time"]
         self.current_frame = 0
         
+        # Mask configuration options
+        self.sun_elevation_threshold = SUN_ELEVATION_THRESHOLD
+        self.cloud_dilation = CLOUD_DILATION
+        self.apply_cloud_mask = APPLY_CLOUD_MASK
+        self.uncertainty_threshold = UNCERTAINTY_THRESHOLD
+        self.aerosol_depth_threshold = AEROSOL_DEPTH_THRESHOLD
+        
         # Decode GDAL Affine Transform into Matplotlib Extent [left, right, bottom, top]
         # Reference: GDAL Data Model (Transform[0]=UL_X, Transform[1]=W_Res, Transform[3]=UL_Y, Transform[5]=H_Res)
         gt = self.vis_dset.attrs["GeoTransform"]
@@ -58,6 +74,12 @@ class TanagerNativeViewer:
         
         print(f"Spatial Grid Confirmed: {self.width}x{self.height} pixels.")
         print(f"Extent (Meters): X[{left:.2f}, {right:.2f}], Y[{bottom:.2f}, {top:.2f}]")
+
+        self.masked_frames_cache = []
+        print("Caching all masked frames...")
+        for i in range(self.num_frames):
+            self.masked_frames_cache.append(self._compute_masked_frame(i))
+        print("Caching complete.")
 
         self.setup_ui()
 
@@ -87,8 +109,28 @@ class TanagerNativeViewer:
         
         return img
 
+    def get_masked_frame(self, idx):
+        return self.masked_frames_cache[idx]
+
+    def _compute_masked_frame(self, idx):
+        """
+        Extracts the requested frame and applies the Tanager quality mask.
+        """
+        img = self.get_frame(idx).copy()
+        
+        shape = (self.height, self.width)
+        mask = get_tanager_mask(self.grp, idx, shape,
+                                sun_elevation_threshold=self.sun_elevation_threshold,
+                                cloud_dilation=self.cloud_dilation,
+                                apply_cloud_mask=self.apply_cloud_mask,
+                                uncertainty_threshold=self.uncertainty_threshold,
+                                aerosol_depth_threshold=self.aerosol_depth_threshold)
+        
+        img[mask] = np.nan
+        return img
+
     def setup_ui(self):
-        self.fig, self.ax = plt.subplots(figsize=(12, 10))
+        self.fig, (self.ax, self.ax_mask) = plt.subplots(1, 2, figsize=(20, 10))
         self.fig.canvas.manager.set_window_title("Tanager Native Geospatial Viewer")
         plt.subplots_adjust(bottom=0.15)
         
@@ -102,6 +144,29 @@ class TanagerNativeViewer:
         self.ax.yaxis.set_major_formatter(plt.FormatStrFormatter('%1.0f'))
         self.ax.grid(True, linestyle='--', alpha=0.5, color='gray')
         
+        # ---------------- New Masked Viewer setup ---------------- #
+        
+        self.im_mask = self.ax_mask.imshow(self.get_masked_frame(self.current_frame), extent=self.extent, origin='upper')
+        self.ax_mask.set_xlabel("UTM Easting (Meters)", fontweight='bold')
+        self.ax_mask.set_ylabel("UTM Northing (Meters)", fontweight='bold')
+        self.ax_mask.xaxis.set_major_formatter(plt.FormatStrFormatter('%1.0f'))
+        self.ax_mask.yaxis.set_major_formatter(plt.FormatStrFormatter('%1.0f'))
+        self.ax_mask.grid(True, linestyle='--', alpha=0.5, color='gray')
+
+        # Overlay Mask Configuration Settings
+        config_text = (
+            f"Mask Configuration:\n"
+            f"Sun Elev Thresh: {self.sun_elevation_threshold}\n"
+            f"Cloud Dilation: {self.cloud_dilation}\n"
+            f"Cloud Mask: {self.apply_cloud_mask}\n"
+            f"Uncertainty Thresh: {self.uncertainty_threshold}\n"
+            f"Aerosol Depth Thresh: {self.aerosol_depth_threshold}"
+        )
+        props = dict(boxstyle='round', facecolor='white', alpha=0.8, edgecolor='gray')
+        self.ax_mask.text(0.02, 0.98, config_text, transform=self.ax_mask.transAxes, 
+                          fontsize=10, verticalalignment='top', bbox=props, zorder=10)
+        # --------------------------------------------------------- #
+
         self.update_title()
         
         print("Saving all frames to PNG...")
@@ -109,18 +174,20 @@ class TanagerNativeViewer:
         for i in range(self.num_frames):
             self.current_frame = i
             self.im.set_data(self.get_frame(self.current_frame))
+            self.im_mask.set_data(self.get_masked_frame(self.current_frame))
             self.update_title()
-            self.fig.savefig(os.path.join(os.path.dirname(self.h5_path), f'ortho_visual_{i:03d}.png'))
+            self.fig.savefig(os.path.join(os.path.dirname(self.h5_path), f'ortho_visual_combined_{i:03d}.png'))
         self.current_frame = original_frame
         self.im.set_data(self.get_frame(self.current_frame))
+        self.im_mask.set_data(self.get_masked_frame(self.current_frame))
         self.update_title()
         print("Finished saving frames.")
         
         self.generate_html_map()
         
         # Interaction Panel
-        ax_prev = plt.axes([0.4, 0.05, 0.08, 0.06])
-        ax_next = plt.axes([0.52, 0.05, 0.08, 0.06])
+        ax_prev = self.fig.add_axes([0.4, 0.05, 0.08, 0.06])
+        ax_next = self.fig.add_axes([0.52, 0.05, 0.08, 0.06])
         self.btn_prev = Button(ax_prev, 'Previous')
         self.btn_next = Button(ax_next, 'Next')
         
@@ -138,6 +205,10 @@ class TanagerNativeViewer:
         title_text = (f"Tanager Native Stack (Non-Interpolated)\n"
                       f"Temporal Pass {self.current_frame + 1} of {self.num_frames} | {time_str}")
         self.ax.set_title(title_text, fontsize=13, pad=15)
+        
+        mask_title_text = (f"Tanager Masked Frame\n"
+                           f"Temporal Pass {self.current_frame + 1} of {self.num_frames} | {time_str}")
+        self.ax_mask.set_title(mask_title_text, fontsize=13, pad=15)
         self.fig.canvas.draw_idle()
 
     def generate_html_map(self):
@@ -370,12 +441,14 @@ class TanagerNativeViewer:
         if self.current_frame > 0:
             self.current_frame -= 1
             self.im.set_data(self.get_frame(self.current_frame))
+            self.im_mask.set_data(self.get_masked_frame(self.current_frame))
             self.update_title()
 
     def next_frame(self, event):
         if self.current_frame < self.num_frames - 1:
             self.current_frame += 1
             self.im.set_data(self.get_frame(self.current_frame))
+            self.im_mask.set_data(self.get_masked_frame(self.current_frame))
             self.update_title()
 
 if __name__ == "__main__":

@@ -13,6 +13,8 @@ import glob
 script_dir = os.path.dirname(os.path.abspath(__file__))
 LOCATION = "Rochesterv2"
 CONFIG_FILE_PATH = os.path.join(script_dir, "locations_config.yaml")
+if not os.path.exists(CONFIG_FILE_PATH):
+    CONFIG_FILE_PATH = os.path.join(os.path.dirname(script_dir), "locations_config.yaml")
 SATELLITE_DATA_DIR = "C:/satelliteImagery/HLST30"
 
 def get_file_path(location):

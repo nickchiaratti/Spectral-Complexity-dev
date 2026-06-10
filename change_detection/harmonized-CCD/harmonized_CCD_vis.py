@@ -8,11 +8,12 @@ import matplotlib.patches as patches
 import scienceplots
 plt.style.use(['science','no-latex'])
 
-LOCATION = "Tait"
+LOCATION = "Hurlingham"
 H5_PATH = f"C:/satelliteImagery/HLST30/HLST_{LOCATION}_Harmonized_SC_EM-7_Norm-bandCount.h5"
 INFERENCE_H5 = f"C:/satelliteImagery/HLST30/CCD/{LOCATION}_CCD_Harmonized_Change_Detection.h5"
 
 def plot_pixel_sits(pixel_y, pixel_x, source_h5_path, inference_results_h5, ax=None, current_date=None):
+    lat, lon = None, None
     with h5py.File(source_h5_path, 'r') as f:
         harm_grp = f['/HDFEOS/GRIDS/HARMONIZED/Data Fields']
         acq_time = harm_grp['sliding_volume_z_score'].attrs['acquisition_time'][:]
@@ -23,6 +24,25 @@ def plot_pixel_sits(pixel_y, pixel_x, source_h5_path, inference_results_h5, ax=N
         
         spacecraft_bytes = harm_grp['sliding_volume_z_score'].attrs['source_spacecraft'][:]
         spacecrafts = [s.decode('utf-8') if isinstance(s, bytes) else str(s) for s in spacecraft_bytes]
+        
+        geo_transform = harm_grp['sliding_volume_z_score'].attrs.get('GeoTransform')
+        spatial_ref = harm_grp['sliding_volume_z_score'].attrs.get('spatial_ref')
+        if geo_transform is not None and spatial_ref is not None:
+            try:
+                gt = geo_transform
+                x_geo = gt[0] + (pixel_x + 0.5) * gt[1] + (pixel_y + 0.5) * gt[2]
+                y_geo = gt[3] + (pixel_x + 0.5) * gt[4] + (pixel_y + 0.5) * gt[5]
+                
+                if isinstance(spatial_ref, bytes):
+                    spatial_ref_str = spatial_ref.decode('utf-8')
+                else:
+                    spatial_ref_str = str(spatial_ref)
+                
+                crs = pyproj.CRS.from_wkt(spatial_ref_str)
+                transformer = pyproj.Transformer.from_crs(crs, "epsg:4326", always_xy=True)
+                lon, lat = transformer.transform(x_geo, y_geo)
+            except Exception as e:
+                print(f"Warning: Could not compute lat/lon: {e}")
         
     dates = [datetime.fromtimestamp(ts, timezone.utc) for ts in acq_time]
     
@@ -76,7 +96,10 @@ def plot_pixel_sits(pixel_y, pixel_x, source_h5_path, inference_results_h5, ax=N
     if current_date is not None:
         ax.axvline(x=current_date, color='orange', linestyle='--', label='Displayed Frame')
 
-    ax.set_title(f"Pixel Location: ({pixel_x}, {pixel_y})")
+    if lat is not None and lon is not None:
+        ax.set_title(f"Pixel Location: ({pixel_x}, {pixel_y}) | Lat: {lat:.5f}, Lon: {lon:.5f}")
+    else:
+        ax.set_title(f"Pixel Location: ({pixel_x}, {pixel_y})")
     ax.set_xlabel('Date')
     import matplotlib.dates as mdates
     ax.xaxis.set_major_locator(mdates.YearLocator())

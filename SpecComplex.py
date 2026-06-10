@@ -76,11 +76,17 @@ def get_tanager_mask(data_grp, f_idx, shape,
     
     # Sun Elevation Check (Derived from Sun Zenith)
     zenith = data_grp['sun_zenith'][f_idx, ...]
-    invalid_mask |= (zenith == -9999.0) | ((90.0 - zenith) < sun_elevation_threshold)
+    sun_invalid = (zenith == -9999.0) | np.isnan(zenith)
+    if sun_elevation_threshold is not None:
+        # Algebraically rearranged to prevent allocating an intermediate float array for (90.0 - zenith)
+        sun_invalid |= (zenith > (90.0 - sun_elevation_threshold))
+    invalid_mask |= sun_invalid
         
     # Aerosol Optical Depth Check
     aod = data_grp['aerosol_optical_depth'][f_idx, ...]
-    bad_aod_mask = (aod == -9999.0) | (aod >= aerosol_depth_threshold) | np.isnan(aod)
+    bad_aod_mask = (aod == -9999.0) | np.isnan(aod)
+    if aerosol_depth_threshold is not None:
+        bad_aod_mask |= (aod >= aerosol_depth_threshold)
     if cloud_dilation > 0:
         bad_aod_mask = ndimage.binary_dilation(bad_aod_mask, structure=kernel, iterations=cloud_dilation)
     invalid_mask |= bad_aod_mask
@@ -94,7 +100,9 @@ def get_tanager_mask(data_grp, f_idx, shape,
         warnings.simplefilter("ignore", category=RuntimeWarning)
         unc = np.nanmax(data_grp['surface_reflectance_uncertainty'][f_idx, valid_bands, ...], axis=0)
         
-    unc_mask = (unc == -9999.0) | (unc >= uncertainty_threshold) | np.isnan(unc)
+    unc_mask = (unc == -9999.0) | np.isnan(unc)
+    if uncertainty_threshold is not None:
+        unc_mask |= (unc >= uncertainty_threshold)
     if cloud_dilation > 0:
         unc_mask = ndimage.binary_dilation(unc_mask, structure=kernel, iterations=cloud_dilation)
     invalid_mask |= unc_mask

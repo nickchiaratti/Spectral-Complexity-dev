@@ -7,7 +7,7 @@ import scienceplots
 import pyproj
 plt.style.use(['science','no-latex'])
 
-LOCATION = "Malibu"
+LOCATION = "Rochesterv2"
 H5_PATH = f"C:/satelliteImagery/HLST30/HLST_{LOCATION}_Harmonized_SC_EM-7_Norm-bandCount.h5"
 INFERENCE_H5 = f"C:/satelliteImagery/HLST30/1D-CNN-{LOCATION}-TrainEnd2024/inference_results.h5"
 

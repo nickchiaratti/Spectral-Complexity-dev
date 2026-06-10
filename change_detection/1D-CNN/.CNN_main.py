@@ -8,9 +8,10 @@ os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
 # IDE CONFIGURATION
 # ==========================================
 LOCATION = "Rochesterv2"
+TRAIN_END_YEAR = "2022"
 H5_PATH = f"C:/satelliteImagery/HLST30/HLST_{LOCATION}_Harmonized_SC_EM-7_Norm-bandCount.h5"
-OUTPUT_DIR = f"C:/satelliteImagery/HLST30/1D-CNN-{LOCATION}-TrainEnd2024"
-TRAIN_END_DATE = "2024-01-01"
+OUTPUT_DIR = f"C:/satelliteImagery/HLST30/1D-CNN-{LOCATION}-TrainEnd{TRAIN_END_YEAR}"
+TRAIN_END_DATE = f"{TRAIN_END_YEAR}-01-01"
 SKIP_TRAIN = False
 
 def main():
@@ -24,7 +25,7 @@ def main():
     train_and_evaluate(H5_PATH, output_h5=inference_h5, weights_path=weights_path, train_end_date=TRAIN_END_DATE, skip_training=SKIP_TRAIN)
     if os.path.exists(inference_h5):
         print("Launching Spatial Anomaly Overlay visualization...")
-        plot_spatial_anomaly_overlay(H5_PATH, inference_h5, TRAIN_END_DATE)
+        plot_spatial_anomaly_overlay(H5_PATH, inference_h5)
     else:
         print(f"Error: Inference results not found at {inference_h5}. Please run without SKIP_TRAIN=True first.")
 

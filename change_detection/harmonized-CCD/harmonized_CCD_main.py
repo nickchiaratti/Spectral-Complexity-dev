@@ -16,6 +16,8 @@ TARGET_METRIC = 'sliding_volume_z_score'
 RMSE_MULTIPLIER = 3.0
 CONSECUTIVE_ANOMALIES = 4
 TIME_WINDOW_YEARS = 3.0
+ENABLE_ELASTIC_WINDOW = True  # Allows window to expand backwards to meet MIN_SAMPLES
+MAX_ELASTIC_WINDOW_YEARS = TIME_WINDOW_YEARS + 2.0  # Maximum span to expand backwards
 NUM_HARMONICS = 3  # Yields 8 parameters total: Intercept, Slope, Cos1, Sin1, Cos2, Sin2, Cos3, Sin3
 MIN_SAMPLES = NUM_HARMONICS * 2 + 2 # Minimum required to solve OLS without being underdetermined
 
@@ -96,11 +98,16 @@ def main():
                 continue
 
             consecutive_count = 0
+            first_valid_time = frac_years[valid_indices[0]]
             
             # Start predicting from the observation after the initial minimum samples
             for i in range(MIN_SAMPLES, len(valid_indices)):
                 target_idx = valid_indices[i]
                 target_time = frac_years[target_idx]
+                
+                # Enforce TIME_WINDOW_YEARS as the initialization requirement
+                if target_time - first_valid_time < TIME_WINDOW_YEARS:
+                    continue
                 
                 # Subset past observations within the time window
                 window_start_time = target_time - TIME_WINDOW_YEARS
@@ -110,8 +117,14 @@ def main():
                 
                 # Elastic window: enforce minimum samples for OLS rank constraint
                 if np.sum(in_window_mask) < MIN_SAMPLES:
-                    # Data is too sparse in this time window. Expand backwards to grab exactly MIN_SAMPLES
-                    train_idx = past_valid[-MIN_SAMPLES:]
+                    if ENABLE_ELASTIC_WINDOW:
+                        # Expand backwards to grab exactly MIN_SAMPLES
+                        train_idx = past_valid[-MIN_SAMPLES:]
+                        # Enforce maximum expansion duration
+                        if target_time - frac_years[train_idx[0]] > MAX_ELASTIC_WINDOW_YEARS:
+                            continue
+                    else:
+                        continue
                 else:
                     train_idx = past_valid[in_window_mask]
                 
@@ -164,6 +177,8 @@ def main():
         out_file.attrs['RMSE_MULTIPLIER'] = RMSE_MULTIPLIER
         out_file.attrs['CONSECUTIVE_ANOMALIES'] = CONSECUTIVE_ANOMALIES
         out_file.attrs['TIME_WINDOW_YEARS'] = TIME_WINDOW_YEARS
+        out_file.attrs['ENABLE_ELASTIC_WINDOW'] = ENABLE_ELASTIC_WINDOW
+        out_file.attrs['MAX_ELASTIC_WINDOW_YEARS'] = MAX_ELASTIC_WINDOW_YEARS
         out_file.attrs['MIN_SAMPLES'] = MIN_SAMPLES
         out_file.attrs['NUM_HARMONICS'] = NUM_HARMONICS
         out_file.attrs['TARGET_METRIC'] = TARGET_METRIC
