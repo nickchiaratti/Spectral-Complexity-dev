@@ -1,5 +1,15 @@
 import os
 import sys
+
+# Windows WMI Hang Bypass (MUST occur before any other imports)
+# This prevents h5py/platform from hanging when multiprocessing spawns child processes
+if 'PROCESSOR_IDENTIFIER' not in os.environ:
+    os.environ['PROCESSOR_IDENTIFIER'] = 'Bypass WMI'
+import platform
+def _dummy_wmi_query(*args, **kwargs):
+    raise OSError("WMI disabled to prevent hangs")
+platform._wmi_query = _dummy_wmi_query
+
 import yaml
 import subprocess
 from pathlib import Path
@@ -13,10 +23,7 @@ import Harmonized_SC.HLST_specComplex_viewer as HLST_specComplex_viewer
 # PIPELINE CONFIGURATION
 # ==========================================
 script_dir = Path(__file__).resolve().parent
-# If TARGET_LOCATION is None, it will fall back to 'current_run' in the YAML
-TARGET_LOCATION = 'Tait'
 CONFIG_FILE_PATH = os.path.join(script_dir, "locations_config.yaml")
-SKIP_VIEW = True  # Set to True to skip the interactive mgrs_view step
 SATELLITE_DATA_DIR = "C:/satelliteImagery/HLST30"
 
 def load_config(config_path="locations_config.yaml", location=None):
@@ -34,21 +41,22 @@ def load_config(config_path="locations_config.yaml", location=None):
     loc_config["LocationName"] = location
     return loc_config
 
+import argparse
+
 def main():
+    parser = argparse.ArgumentParser(description="Run Harmonized SC Pipeline")
+    parser.add_argument('--location', type=str, default=None,
+                        help='Target location to process (e.g., Rochesterv2, Malibu). Overrides current_run in yaml.')
+    parser.add_argument('--show-view', action='store_true',
+                        help='Do not skip the interactive mgrs_view step')
+    args = parser.parse_args()
 
     # Load configuration
-    loc_config = load_config(CONFIG_FILE_PATH, TARGET_LOCATION)
+    loc_config = load_config(CONFIG_FILE_PATH, args.location)
     location_name = loc_config["LocationName"]
+    target_location = args.location if args.location else location_name
     print(f"Starting pipeline for location: {location_name}")
     
-    # Save the current run to the yaml if it was passed explicitly
-    if TARGET_LOCATION:
-        with open(CONFIG_FILE_PATH, 'r') as f:
-            full_config = yaml.safe_load(f)
-        full_config.setdefault("current_run", {})["location"] = TARGET_LOCATION
-        with open(CONFIG_FILE_PATH, 'w') as f:
-            yaml.dump(full_config, f, sort_keys=False)
-
     # Define the execution order
     steps = [
         ("mgrs_view.py", None),
@@ -64,7 +72,7 @@ def main():
         print(f"{'='*50}")
         
         if name == "mgrs_view.py":
-            if SKIP_VIEW:
+            if not args.show_view:
                 print("Skipping mgrs_view.py as requested.")
                 continue
             else:
@@ -84,10 +92,10 @@ def main():
             start_year = int(start_date_str.split("-")[0])
             end_year = int(end_date_str.split("-")[0])
             
-            func(target_location=TARGET_LOCATION, file_path=file_path, start_year=start_year, end_year=end_year)
+            func(target_location=target_location, file_path=file_path, start_year=start_year, end_year=end_year)
             continue
             
-        func(target_location=TARGET_LOCATION)
+        func(target_location=target_location)
 
     print("\nPipeline execution completed successfully.")
 

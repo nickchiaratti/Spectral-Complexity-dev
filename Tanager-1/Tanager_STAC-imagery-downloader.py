@@ -9,7 +9,7 @@ REGIONS = {
     "Southern_California": [-121.5, 32, -113, 35.5],
     "Utah": [-114.05, 37.0, -109.0, 42.5],
     "Rochester_NY": [-77.72, 43.04, -77.44, 43.28],
-    "Buenos_Aires": [ -65.0, -70.0, -41.0, -30.0],
+    "BuenosAires": [ -65.0, -70.0, -41.0, -30.0],
     "Global": [-180.0, -90.0, 180.0, 90.0]
 }
 
@@ -18,28 +18,28 @@ REGIONS = {
 # and use the same 'include_bboxes'. The native stacker will combine them automatically.
 DOWNLOAD_JOBS = [
     #{
-    #    "job_name": "Palisades_fire",
+    #    "job_name": "Palisade",
     #    "collection_url": "https://www.planet.com/data/stac/tanager-core-imagery/fire/collection.json",
     #    "output_dir": r"C:\satelliteImagery\Tanager\Palisades_SourceData",
     #    "include_bboxes": [REGIONS["Southern_California"]],
     #    "exclude_bboxes": [REGIONS["Utah"]],
-    #    "target_assets": ['ortho_sr_hdf5'] 
+    #    "target_assets": ['ortho_sr_hdf5','basic_sr_hdf5'] 
     #},
-    #{
-    #    "job_name": "BuenosAires_Urban",
-    #    "collection_url": "https://www.planet.com/data/stac/tanager-core-imagery/urban/collection.json",
-    #    "output_dir": r"C:\satelliteImagery\Tanager\BuenosAires_SourceData",
-    #    "include_bboxes": [REGIONS["Buenos_Aires"]],
-    #    "exclude_bboxes": [],
-    #    "target_assets": ['ortho_sr_hdf5'] 
-    #},
+    {
+        "job_name": "BuenosAires",
+        "collection_url": "https://www.planet.com/data/stac/tanager-core-imagery/urban/collection.json",
+        "output_dir": r"C:\satelliteImagery\Tanager\BuenosAires_SourceData",
+        "include_bboxes": [REGIONS["BuenosAires"]],
+        "exclude_bboxes": [],
+        "target_assets": ['ortho_sr_hdf5','basic_sr_hdf5'] 
+    },
     {
         "job_name": "ROCX_Rochester",
         "collection_url": "https://www.planet.com/data/stac/tanager-core-imagery/ROCX2025/collection.json",
         "output_dir": "C:/satelliteImagery/Tanager/Rochesterv2_SourceData",
         "include_bboxes": [REGIONS["Rochester_NY"]],
         "exclude_bboxes": [],
-        "target_assets": ['ortho_sr_hdf5','ortho_radiance_hdf5','basic_sr_hdf5']
+        "target_assets": ['ortho_sr_hdf5','ortho_radiance_hdf5','basic_sr_hdf5','basic_radiance_hdf5']
     }
 ]
 

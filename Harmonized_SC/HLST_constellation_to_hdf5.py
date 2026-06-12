@@ -733,13 +733,13 @@ def main(target_location=None):
                             g_band = sr_dset_ref[out_idx, g_idx, :, :]
                             b_band = sr_dset_ref[out_idx, b_idx, :, :]
                             
-                            try: r_stretched = percentile_stretch(r_band, sr_fill, 1, 99)
+                            try: r_stretched = percentile_stretch(r_band, sr_fill, 2, 98)
                             except ValueError: r_stretched = np.zeros((master_height, master_width), dtype=np.uint8)
                             
-                            try: g_stretched = percentile_stretch(g_band, sr_fill, 1, 99)
+                            try: g_stretched = percentile_stretch(g_band, sr_fill, 2, 98)
                             except ValueError: g_stretched = np.zeros((master_height, master_width), dtype=np.uint8)
                             
-                            try: b_stretched = percentile_stretch(b_band, sr_fill, 1, 99)
+                            try: b_stretched = percentile_stretch(b_band, sr_fill, 2, 98)
                             except ValueError: b_stretched = np.zeros((master_height, master_width), dtype=np.uint8)
                             
                             ortho_vis_dset[out_idx, 0, :, :] = r_stretched
