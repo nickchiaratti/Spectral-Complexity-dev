@@ -94,6 +94,7 @@ def process_tanager_swaths_to_grid(h5f, tanager_source_dir, master_height, maste
                 pass_canvases[name] = np.full(canvas_shape, fill_val, dtype=dtype)
 
             meta_lists['space_id'].append('Tanager-1')
+            gw_found = False
             for chunk_idx, chunk_file in enumerate(chunks_files):
                 with h5py.File(chunk_file, 'r') as f_chunk:
                     df_grp = f_chunk['HDFEOS/SWATHS/HYP/Data Fields']
@@ -102,6 +103,12 @@ def process_tanager_swaths_to_grid(h5f, tanager_source_dir, master_height, maste
                     lon = geo_grp['Longitude'][:]
                     nodata_mask = df_grp['nodata_pixels'][:]
                     pass_times.extend(geo_grp['Time'][:].tolist())
+                    
+                    if chunk_idx == 0:
+                        gw = df_grp['surface_reflectance'].attrs.get('good_wavelengths')
+                        if gw is not None:
+                            meta_lists['good_wavelengths'].append(gw)
+                            gw_found = True
                 
                     gcps = []
                     step = 10
@@ -167,6 +174,9 @@ def process_tanager_swaths_to_grid(h5f, tanager_source_dir, master_height, maste
                 meta_lists['acq_time'].append(np.mean(pass_times))
             else:
                 meta_lists['acq_time'].append(0.0)
+                
+            if not gw_found:
+                meta_lists['good_wavelengths'].append(np.zeros(band_count, dtype=bool))
 
             sr_valid_pixels = 0
             sr_fill = grp_tanager['surface_reflectance'].fillvalue
@@ -192,6 +202,8 @@ def process_tanager_swaths_to_grid(h5f, tanager_source_dir, master_height, maste
         dt_str = h5py.string_dtype(encoding='ascii')
         grp_tanager['surface_reflectance'].attrs['acquisition_time'] = np.array(meta_lists['acq_time'], dtype='float64')
         grp_tanager['surface_reflectance'].attrs.create('spacecraft_id', data=np.array(meta_lists['space_id'], dtype=dt_str))
+        if len(meta_lists['good_wavelengths']) == total_num_frames:
+            grp_tanager['surface_reflectance'].attrs['all_good_wavelengths'] = np.array(meta_lists['good_wavelengths'], dtype=bool)
 
         num_frames = len(valid_t_indices)
         if num_frames > 0:

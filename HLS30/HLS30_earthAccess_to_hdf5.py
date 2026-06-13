@@ -109,37 +109,6 @@ def main(target_location=None):
     ]
     safe_bbox = [min(safe_bbox[0], safe_bbox[2]), min(safe_bbox[1], safe_bbox[3]), max(safe_bbox[0], safe_bbox[2]), max(safe_bbox[1], safe_bbox[3])]
 
-    # ==========================================
-    # 2. DYNAMIC NATIVE GRID METROLOGY
-    # ==========================================
-    def establish_native_grid():
-        """Derives a continuous localized UTM Grid bounding box to host the mosaicked passes."""
-        central_lon = (ROI_LON_MIN + ROI_LON_MAX) / 2.0
-        central_lat = (ROI_LAT_MIN + ROI_LAT_MAX) / 2.0
-        utm_zone = int((central_lon + 180) / 6) + 1
-        hemisphere_prefix = 32600 if central_lat >= 0 else 32700
-        native_epsg = f"EPSG:{hemisphere_prefix + utm_zone}"
-    
-        transformer = Transformer.from_crs("EPSG:4326", native_epsg, always_xy=True)
-        xs, ys = transformer.transform(
-            [ROI_LON_MIN, ROI_LON_MAX, ROI_LON_MAX, ROI_LON_MIN], 
-            [ROI_LAT_MAX, ROI_LAT_MAX, ROI_LAT_MIN, ROI_LAT_MIN]
-        )
-    
-        # Snap to strict 30m intervals
-        minx = np.floor(min(xs) / 30.0) * 30.0
-        maxx = np.ceil(max(xs) / 30.0) * 30.0
-        miny = np.floor(min(ys) / 30.0) * 30.0
-        maxy = np.ceil(max(ys) / 30.0) * 30.0
-    
-        width = int((maxx - minx) / 30.0)
-        height = int((maxy - miny) / 30.0)
-        transform = transform_from_bounds(minx, miny, maxx, maxy, width, height)
-    
-        return native_epsg, transform, width, height, utm_zone
-
-    master_epsg, master_transform, master_width, master_height, master_zone = establish_native_grid()
-    print(f"Unified Native Grid Established: {master_width}x{master_height} px at {master_epsg}")
 
     # ==========================================
     # 3. NASA STAC QUERY & NATIVE VIRTUAL READ (HLS)
@@ -378,7 +347,21 @@ def main(target_location=None):
             # Sort frames chronologically
             frames = sorted(tile_data['items'].items(), key=lambda x: x[1]['acquisition_time'])
             num_frames = len(frames)
-            w, h = tile_data['width'], tile_data['height']
+            
+            # Establish the exact native bounds for THIS specific location (safe_bbox)
+            first_frame_meta = frames[0][1]
+            with rasterio.open(first_frame_meta['filepath']) as src:
+                transformer = Transformer.from_crs("EPSG:4326", src.crs, always_xy=True)
+                xs, ys = transformer.transform(
+                    [safe_bbox[0], safe_bbox[2], safe_bbox[2], safe_bbox[0]], 
+                    [safe_bbox[3], safe_bbox[3], safe_bbox[1], safe_bbox[1]]
+                )
+                roi_minx, roi_maxx, roi_miny, roi_maxy = min(xs), max(xs), min(ys), max(ys)
+                master_window = from_bounds(roi_minx, roi_miny, roi_maxx, roi_maxy, transform=src.transform).round_offsets().round_lengths()
+                tile_target_transform = src.window_transform(master_window)
+                tile_crs = src.crs
+
+            w, h = master_window.width, master_window.height
             
             grid_name = f"{sensor_prefix}_{tile_name}"
             group_path = f'/HDFEOS/GRIDS/{grid_name}/Data Fields'
@@ -406,9 +389,13 @@ def main(target_location=None):
                         raise ValueError(f"CRITICAL ERROR: Metadata '{k}' for '{img_id}' is null.")
 
                 with rasterio.open(meta['filepath']) as src:
-                    t_sr = src.read(list(range(1, expected_sr+1)))
-                    t_fm = src.read(expected_fmask_idx)
-                    t_ag = src.read(list(range(expected_fmask_idx+1, expected_fmask_idx+5)))
+                    # Dynamically slice the cached TIFF so we seamlessly handle mixed caches
+                    # (e.g. reading a Tait-sized window from a Rochesterv2-sized cached TIFF)
+                    read_window = from_bounds(roi_minx, roi_miny, roi_maxx, roi_maxy, transform=src.transform).round_offsets().round_lengths()
+                    
+                    t_sr = src.read(list(range(1, expected_sr+1)), window=read_window)
+                    t_fm = src.read(expected_fmask_idx, window=read_window)
+                    t_ag = src.read(list(range(expected_fmask_idx+1, expected_fmask_idx+5)), window=read_window)
 
                     sr_ds[idx, ...] = np.where(t_sr != -9999, t_sr.astype(np.float32) * 0.0001, np.nan)
                     
@@ -436,14 +423,14 @@ def main(target_location=None):
                 meta_arrays['sel'].append(90.0 - mean_sza)
                 meta_arrays['cc'].append(meta['cloud_cover'])
 
-            tf = tile_data['transform']
+            tf = tile_target_transform
             gdal_transform = np.array([tf.c, tf.a, tf.b, tf.f, tf.d, tf.e], dtype='float64')
                                        
             sr_ds.attrs['units'] = "Reflectance"
             sr_ds.attrs['_FillValue'] = np.nan
             sr_ds.attrs['wavelengths'] = wavelengths
             
-            sr_ds.attrs['spatial_ref'] = tile_data['crs'].to_wkt()
+            sr_ds.attrs['spatial_ref'] = tile_crs.to_wkt()
             sr_ds.attrs['GeoTransform'] = gdal_transform
 
             fm_ds.attrs['_FillValue'] = 255

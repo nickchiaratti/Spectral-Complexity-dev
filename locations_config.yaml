@@ -17,7 +17,7 @@ locations:
     ROI_LON_MAX: -77.461968
     ROI_LAT_MIN: 43.127698
     ROI_LAT_MAX: 43.159168
-    START_DATE: '2014-01-01'
+    START_DATE: '2025-01-01'
     END_DATE: '2026-06-01'
     TANAGER_AVAILABLE: true
     TANAGER_STAC_URL: https://www.planet.com/data/stac/tanager-core-imagery/ROCX2025/collection.json
