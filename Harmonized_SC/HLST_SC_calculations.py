@@ -240,7 +240,7 @@ def main(target_location=None):
         if name in data_grp:
             del data_grp[name]
     
-        ds = data_grp.create_dataset(name, shape=shape, dtype=dtype, compression="gzip", compression_opts=4, chunks=chunks, **kwargs)
+        ds = data_grp.create_dataset(name, shape=shape, dtype=dtype, compression="gzip", compression_opts=5, chunks=chunks, **kwargs)
     
         if spatial_ref is not None: ds.attrs['spatial_ref'] = spatial_ref
         if geo_transform is not None: ds.attrs['GeoTransform'] = geo_transform

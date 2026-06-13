@@ -72,7 +72,7 @@ SAVE_DIR = f"C:/satelliteImagery/MultiSensor_Analysis_{Location}_Harmonized" + s
 # Predefined Time Series Locations Map (Latitude, Longitude)
 TS_LOCATIONS_MAP = {
     "Tait": [
-        #{'latlon': (43.13927, -77.50340), 'label': "ROCX NITE Tarp",                  'color': 'tab:purple'},
+        {'latlon': (43.13927, -77.50340), 'label': "ROCX NITE Tarp",                  'color': 'tab:purple'},
         {'latlon': (43.135289, -77.488352), 'label': "Change point",                'color': 'tab:green'},
         {'latlon': (43.144861, -77.501176), 'label': "East Tait Forest",                'color': 'tab:olive'},
         {'latlon': (43.151502, -77.485518), 'label': "Shadow Pines Grass Field",         'color': 'tab:red'},

@@ -76,7 +76,7 @@ def process_tanager_swaths_to_grid(h5f, tanager_source_dir, master_height, maste
                 if "_FillValue" not in src_dset.attrs:
                     raise ValueError(f"Missing _FillValue attribute in dataset {name}.")
                 fill_val = src_dset.attrs["_FillValue"]
-                out_dset = grp_tanager.create_dataset(name, shape=out_shape, dtype=dtype, compression="gzip", compression_opts=4, fillvalue=fill_val, chunks=chunks)
+                out_dset = grp_tanager.create_dataset(name, shape=out_shape, dtype=dtype, compression="gzip", compression_opts=5, fillvalue=fill_val, chunks=chunks)
                 datasets_created_info.append((name, dtype, len(out_shape), ["Time", "Band", "YDim", "XDim"] if is_3d else ["Time", "YDim", "XDim"]))
 
         for t_idx, pass_ts in enumerate(pass_keys):
@@ -208,7 +208,7 @@ def process_tanager_swaths_to_grid(h5f, tanager_source_dir, master_height, maste
         num_frames = len(valid_t_indices)
         if num_frames > 0:
             print("  Generating Common Mask for Tanager on Master Grid...")
-            mask_ds = grp_tanager.create_dataset('common_mask', shape=(total_num_frames, master_height, master_width), dtype=bool, compression="gzip", compression_opts=4, chunks=(1, chunk_h, chunk_w))
+            mask_ds = grp_tanager.create_dataset('common_mask', shape=(total_num_frames, master_height, master_width), dtype=bool, compression="gzip", compression_opts=5, chunks=(1, chunk_h, chunk_w))
             datasets_created_info.append(("common_mask", bool, 3, ["Time", "YDim", "XDim"]))
             mask_ds.attrs['spatial_ref'] = master_crs.to_wkt()
             mask_ds.attrs['GeoTransform'] = gdal_transform
@@ -231,7 +231,7 @@ def process_tanager_swaths_to_grid(h5f, tanager_source_dir, master_height, maste
             r_idx = int(np.argmin(np.abs(wavelengths - 650)))
             g_idx = int(np.argmin(np.abs(wavelengths - 550)))
             b_idx = int(np.argmin(np.abs(wavelengths - 450)))
-            ortho_vis_dset = grp_tanager.create_dataset("ortho_visual", shape=(total_num_frames, 4, master_height, master_width), dtype='uint8', compression="gzip", fillvalue=0, chunks=(1, 4, chunk_h, chunk_w))
+            ortho_vis_dset = grp_tanager.create_dataset("ortho_visual", shape=(total_num_frames, 4, master_height, master_width), dtype='uint8', compression="gzip", compression_opts=5, fillvalue=0, chunks=(1, 4, chunk_h, chunk_w))
             datasets_created_info.append(("ortho_visual", np.dtype('uint8'), 4, ["Time", "RGBABand", "YDim", "XDim"]))
             ortho_vis_dset.attrs['spatial_ref'] = master_crs.to_wkt()
             ortho_vis_dset.attrs['GeoTransform'] = gdal_transform
