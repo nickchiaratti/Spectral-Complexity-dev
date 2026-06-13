@@ -92,8 +92,8 @@ def get_tanager_mask(data_grp, f_idx, shape,
     invalid_mask |= bad_aod_mask
         
     # Surface Reflectance Uncertainty Check
-    gw_mask = data_grp['surface_reflectance'].attrs['all_good_wavelengths']
-    valid_bands = gw_mask[f_idx].astype(bool)
+    gw_mask = data_grp['surface_reflectance'].attrs['good_wavelengths']
+    valid_bands = gw_mask.astype(bool)
     
     # Suppress all-NaN slice warnings since we explicitly catch the resulting NaNs on the next line
     with warnings.catch_warnings():
@@ -271,7 +271,7 @@ def calcGramLocalVolumes(endmembers, localization_vector):
         
     return volumes
 
-def generate_rgba_image(frame_sr, red_idx=3, green_idx=2, blue_idx=1, low=2, high=98, gamma=1.2):
+def generate_rgba_image(r_band, g_band, b_band, low=2, high=98, gamma=1.2):
     """
     Extracts, stretches, and gamma-corrects the RGB bands from a surface 
     reflectance frame to create a true color image with an alpha channel.
@@ -283,25 +283,23 @@ def generate_rgba_image(frame_sr, red_idx=3, green_idx=2, blue_idx=1, low=2, hig
     Returns:
         rgba_8bit (np.ndarray): Shape (height, width, 4), dtype uint8.
     """
-    bands, height, width = frame_sr.shape
+    height, width = r_band.shape
 
     # Handle case where the entire frame is NaN
-    if np.all(np.isnan(frame_sr)): 
+    frame_rgb = np.stack([r_band, g_band, b_band], axis=0)
+    if np.all(np.isnan(frame_rgb)): 
         return np.zeros((height, width, 4), dtype=np.uint8)
 
     # 1. Determine Invalid Pixel Mask
-    all_zeros_mask = np.all(frame_sr == 0, axis=0)
-    has_nan_mask = np.any(np.isnan(frame_sr), axis=0)
+    all_zeros_mask = np.all(frame_rgb == 0, axis=0)
+    has_nan_mask = np.any(np.isnan(frame_rgb), axis=0)
     invalid_pixel_mask = all_zeros_mask | has_nan_mask
     valid_mask = ~invalid_pixel_mask
 
     # 2. Extract, Stretch, and Gamma Correct RGB bands
-    rgb_indices = [red_idx, green_idx, blue_idx]
     rgb = np.zeros((height, width, 3), dtype=np.float32)
 
-    for i, idx in enumerate(rgb_indices):
-        band_data = frame_sr[idx, :, :]
-        
+    for i, band_data in enumerate([r_band, g_band, b_band]):
         # Calculate percentiles ONLY on valid pixels to bypass slow NaN handling
         valid_pixels = band_data[valid_mask]
         

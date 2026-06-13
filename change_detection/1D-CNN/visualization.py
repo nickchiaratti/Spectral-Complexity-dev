@@ -7,9 +7,11 @@ import scienceplots
 import pyproj
 plt.style.use(['science','no-latex'])
 
-LOCATION = "Rochesterv2"
+LOCATION = "Tait"
+TRAIN_END_YEAR = "2022"
+OUTPUT_DIR = f"C:/satelliteImagery/HLST30/1D-CNN-{LOCATION}-TrainEnd{TRAIN_END_YEAR}"
 H5_PATH = f"C:/satelliteImagery/HLST30/HLST_{LOCATION}_Harmonized_SC_EM-7_Norm-bandCount.h5"
-INFERENCE_H5 = f"C:/satelliteImagery/HLST30/1D-CNN-{LOCATION}-TrainEnd2024/inference_results.h5"
+INFERENCE_H5 = os.path.join(OUTPUT_DIR, 'inference_results.h5')
 
 
 def plot_pixel_sits(pixel_y, pixel_x, source_h5_path, inference_results_h5, ax=None, current_date=None):
@@ -49,12 +51,22 @@ def plot_pixel_sits(pixel_y, pixel_x, source_h5_path, inference_results_h5, ax=N
     dates = [datetime.fromtimestamp(ts, timezone.utc) for ts in acq_time]
     
     # Load inference results for this pixel
-    train_end_date = "2024-01-01"
     with h5py.File(inference_results_h5, 'r') as f:
+        if 'inference_results' not in f:
+            raise ValueError(f"No inference_results dataset found in {inference_results_h5}")
+            
         res = f['inference_results'][:]
-        if 'train_end_date' in f['inference_results'].attrs:
-            val = f['inference_results'].attrs['train_end_date']
-            train_end_date = val.decode('utf-8') if isinstance(val, bytes) else str(val)
+        
+        aleatoric_val = 0
+        if 'baseline_aleatoric_map' in f:
+            aleatoric_val = f['baseline_aleatoric_map'][pixel_y, pixel_x]
+            
+        if 'train_end_date' not in f['inference_results'].attrs or 'confidence_multiplier' not in f['inference_results'].attrs:
+            raise ValueError("Inference results are missing required metadata (train_end_date or confidence_multiplier). Please re-run the CNN pipeline, as the results were generated with an out-of-date codebase.")
+            
+        val = f['inference_results'].attrs['train_end_date']
+        train_end_date = val.decode('utf-8') if isinstance(val, bytes) else str(val)
+        conf_mult = float(f['inference_results'].attrs['confidence_multiplier'])
         
     mask = (res['Pixel_X'] == pixel_x) & (res['Pixel_Y'] == pixel_y)
     pixel_res = res[mask]
@@ -97,40 +109,71 @@ def plot_pixel_sits(pixel_y, pixel_x, source_h5_path, inference_results_h5, ax=N
     # Predictions
     if len(pixel_res) > 0:
         pred_dates = []
-        mean_residual = []
-        preds1 = []
-        preds2 = []
-        preds3 = []
         anomaly_flags = []
-        for row in pixel_res:
-            d23 = datetime.fromtimestamp(row['Timestamp_T23'], timezone.utc)
-            pred_dates.append(d23)
-            mean_residual.append(row['Mean_Residual'])
-            preds1.append(row['Pred_1'])
-            preds2.append(row['Pred_2'])
-            preds3.append(row['Pred_3'])
-            anomaly_flags.append(row['Anomaly_Flag'])
-            
         
-
+        # Determine number of predictions
+        pred_cols = [c for c in pixel_res.dtype.names if c.startswith('Pred_')]
+        num_preds = len(pred_cols)
+        
+        preds = {k: [] for k in range(1, num_preds + 1)}
+        stds = {k: [] for k in range(1, num_preds + 1)}
+        
+        valid_idx = np.where(~is_invalid)[0]
+        valid_acq_time = acq_time[valid_idx]
+        
+        for row in pixel_res:
+            t_last = row['Timestamp_T_Last']
+            idx_arr = np.where(valid_acq_time == t_last)[0]
+            if len(idx_arr) == 0: continue
+            idx = idx_arr[0]
+            
+            # The first prediction target is the immediate next valid point
+            if idx + 1 < len(valid_acq_time):
+                target_ts = valid_acq_time[idx + 1]
+                d_target = datetime.fromtimestamp(target_ts, timezone.utc)
+                
+                pred_dates.append(d_target)
+                anomaly_flags.append(row['Anomaly_Flag'])
+                for k in range(1, num_preds + 1):
+                    preds[k].append(row[f'Pred_{k}'])
+                    stds[k].append(row[f'Std_{k}'])
+                
         srt = np.argsort(pred_dates)
         pred_dates = np.array(pred_dates)[srt]
-        preds1 = np.array(preds1)[srt]
-        preds2 = np.array(preds2)[srt]
-        preds3 = np.array(preds3)[srt]
         anomaly_flags = np.array(anomaly_flags)[srt]
-        upper_bound = preds1 + 3 * np.std(mean_residual)
-        lower_bound = preds1 - 3 * np.std(mean_residual)
         
-        ax.plot(pred_dates, preds1, 'r--', label='Prediction t+1')
-        ax.plot(pred_dates, preds2, 'g--', label='Prediction t+2')
-        ax.plot(pred_dates, preds3, 'b--', label='Prediction t+3')
-        ax.fill_between(pred_dates, lower_bound, upper_bound, alpha=0.1, label='Prediction t+1±3σ')
+        for k in range(1, num_preds + 1):
+            preds[k] = np.array(preds[k])[srt]
+            stds[k] = np.array(stds[k])[srt]
+            
+        tot_upper = preds[1] + conf_mult * stds[1]
+        tot_lower = preds[1] - conf_mult * stds[1]
+        
+        al_upper = preds[1] + conf_mult * aleatoric_val
+        al_lower = preds[1] - conf_mult * aleatoric_val
+        
+        colors = ['r--', 'g--', 'b--', 'm--', 'c--', 'y--']
+        for k in range(1, num_preds + 1):
+            color = colors[(k-1) % len(colors)]
+            ax.plot(pred_dates, preds[k], color, label=f'Prediction t+{k}')
+            
+        # Draw Aleatoric Base
+        ax.fill_between(pred_dates, al_lower, al_upper, color='gray', alpha=0.3, label=f'Aleatoric Uncertainty ±{conf_mult}σ')
+        
+        # Draw Epistemic Additive Regions
+        ax.fill_between(pred_dates, tot_upper, al_upper, color='purple', alpha=0.3, label=f'+ Epistemic Uncertainty')
+        ax.fill_between(pred_dates, al_lower, tot_lower, color='purple', alpha=0.3)
         
         # Anomalies
-        anom_dates = pred_dates[anomaly_flags > 0]
-        anom_preds = preds3[anomaly_flags > 0]
-        ax.plot(anom_dates, anom_preds, 'rx', markersize=10, mew=2, label='Anomalies')
+        anom_dates = pred_dates[anomaly_flags == 1]
+        anom_vals = preds[1][anomaly_flags == 1]
+        ax.scatter(anom_dates, anom_vals, color='red', s=50, zorder=5, label='Anomaly Flagged')
+        
+        # Missing/Insufficient Baseline
+        missing_dates = pred_dates[anomaly_flags == 255]
+        missing_vals = preds[1][anomaly_flags == 255]
+        if len(missing_dates) > 0:
+            ax.scatter(missing_dates, missing_vals, color='gray', s=30, marker='x', zorder=4, label='Missing Baseline')
         
     ax.axvline(x=split_date, color='grey', linestyle='--', label='Train-Test Split')
     if current_date is not None:
@@ -200,8 +243,8 @@ def plot_spatial_anomaly_overlay(source_h5_path, inference_results_h5):
         if row['Anomaly_Flag']:
             x, y = row['Pixel_X'], row['Pixel_Y']
             anomaly_counts[y, x] += 1
-            if np.isnan(anomaly_map[y, x]) or row['Timestamp_T23'] < anomaly_map[y, x]:
-                anomaly_map[y, x] = row['Timestamp_T23']
+            if np.isnan(anomaly_map[y, x]) or row['Timestamp_T_Last'] < anomaly_map[y, x]:
+                anomaly_map[y, x] = row['Timestamp_T_Last']
                 
     # Filter out pixels with <= 2 anomalies
     anomaly_map[anomaly_counts <= 2] = np.nan
@@ -228,6 +271,7 @@ def plot_spatial_anomaly_overlay(source_h5_path, inference_results_h5):
         cmap = viridis
         cmap.set_bad(color='white', alpha=0)
         im = ax_img.imshow(masked_anom, cmap=cmap, alpha=0.7)
+        
         cbar = plt.colorbar(im, ax=ax_img)
         # Fix colorbar ticks to dates
         ticks = cbar.get_ticks()
@@ -237,26 +281,58 @@ def plot_spatial_anomaly_overlay(source_h5_path, inference_results_h5):
             ticks = ticks[(ticks >= min_anom) & (ticks <= max_anom)]
             cbar.set_ticks(ticks)
             cbar.set_ticklabels([datetime.fromtimestamp(t, timezone.utc).strftime('%Y-%m-%d') for t in ticks])
+            
+    # Load per-pixel baselines
+    has_baselines = False
+    with h5py.File(inference_results_h5, 'r') as f:
+        if 'baseline_aleatoric_map' in f and 'baseline_epistemic_map' in f:
+            aleatoric_map = f['baseline_aleatoric_map'][:]
+            epistemic_map = f['baseline_epistemic_map'][:]
+            has_baselines = True
+            
+    # Optional Maps Window
+    ax_al = None
+    ax_ep = None
+    rect_al = None
+    rect_ep = None
+    if has_baselines:
+        fig_maps, (ax_al, ax_ep) = plt.subplots(1, 2, figsize=(14, 6))
+        fig_maps.canvas.manager.set_window_title('Uncertainty Heatmaps')
         
-    rect = patches.Rectangle((-1, -1), 1, 1, linewidth=2, edgecolor='orange', facecolor='none', visible=False)
-    ax_img.add_patch(rect)
-    
-    # Add initial placeholder text for the time series subplot
+        al_plot = np.where(insufficient_data, np.nan, aleatoric_map)
+        ep_plot = np.where(insufficient_data, np.nan, epistemic_map)
+        
+        im_al = ax_al.imshow(al_plot, cmap='magma')
+        ax_al.set_title("Aleatoric Uncertainty (Natural Noise RMSE)")
+        fig_maps.colorbar(im_al, ax=ax_al)
+        rect_al = plt.Rectangle((0,0), 1, 1, fill=False, edgecolor='cyan', linewidth=2, visible=False)
+        ax_al.add_patch(rect_al)
+        
+        im_ep = ax_ep.imshow(ep_plot, cmap='viridis')
+        ax_ep.set_title("Epistemic Uncertainty (Model Ignorance Std)")
+        fig_maps.colorbar(im_ep, ax=ax_ep)
+        rect_ep = plt.Rectangle((0,0), 1, 1, fill=False, edgecolor='cyan', linewidth=2, visible=False)
+        ax_ep.add_patch(rect_ep)
+        
     ax_ts.text(0.5, 0.5, 'Click a pixel on the map to view data', horizontalalignment='center', verticalalignment='center', transform=ax_ts.transAxes)
 
+    rect = patches.Rectangle((-1, -1), 1, 1, linewidth=2, edgecolor='orange', facecolor='none', visible=False)
+    ax_img.add_patch(rect)
+
     def onclick(event):
-        if event.inaxes != ax_img: return
+        if event.inaxes not in [ax_img, ax_al, ax_ep]: return
         x, y = int(event.xdata), int(event.ydata)
         if x < 0 or x >= W or y < 0 or y >= H: return
         print(f"Clicked on {x}, {y}")
         
         rect.set_xy((x - 0.5, y - 0.5))
         rect.set_visible(True)
+        if rect_al: rect_al.set_xy((x - 0.5, y - 0.5)); rect_al.set_visible(True)
+        if rect_ep: rect_ep.set_xy((x - 0.5, y - 0.5)); rect_ep.set_visible(True)
         
         current_date_ts = None
         current_sg = None
         if not np.isnan(anomaly_map[y, x]):
-            # Change basemap to first date of anomaly
             anom_ts = anomaly_map[y, x]
             # find closest acq_time
             idx = np.argmin(np.abs(acq_time - anom_ts))
@@ -273,10 +349,12 @@ def plot_spatial_anomaly_overlay(source_h5_path, inference_results_h5):
         ax_img.set_title(f"{current_sg} Acquisition: {current_date.strftime('%Y-%m-%d %H:%M:%S')} UTC")
         ax_ts.clear()
         plot_pixel_sits(y, x, source_h5_path, inference_results_h5, ax=ax_ts, current_date=current_date)
-        ax_ts.set_ylim([-4, 4])
+        ax_ts.set_ylim([-5, 5])
         fig.canvas.draw()
 
     fig.canvas.mpl_connect('button_press_event', onclick)
+    if has_baselines:
+        fig_maps.canvas.mpl_connect('button_press_event', onclick)
     plt.show()
 
 if __name__ == "__main__":

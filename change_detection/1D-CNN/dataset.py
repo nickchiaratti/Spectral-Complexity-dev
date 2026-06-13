@@ -6,13 +6,21 @@ from torch.utils.data import Dataset
 import math
 
 class SITSDataset(Dataset):
-    def __init__(self, h5_path, mode='calibration', train_end_date="2024-01-01"):
+    def __init__(self, h5_path, mode='calibration', train_end_date="2024-01-01", 
+                 consecutive_anomalies=3, time_window_years=3.0, 
+                 enable_elastic_window=True, max_elastic_window_years=5.0, 
+                 min_samples=38):
         """
         mode: 'calibration' (pre-train_end_date) or 'monitoring' (post-train_end_date) or 'all' (for inference context)
         """
         self.h5_path = h5_path
         self.mode = mode
         self.train_end_date = train_end_date
+        self.consecutive_anomalies = consecutive_anomalies
+        self.time_window_years = time_window_years
+        self.enable_elastic_window = enable_elastic_window
+        self.max_elastic_window_years = max_elastic_window_years
+        self.min_samples = min_samples
         
         self.L_freqs = 10 # 20 features for X (10 sin, 10 cos), 20 for Y
         
@@ -82,21 +90,35 @@ class SITSDataset(Dataset):
                     valid_idx = np.where(valid_mask[y, x, :])[0]
                     valid_initial_count = len(valid_idx)
                     
-                    if valid_initial_count < 38 + 3:
+                    if valid_initial_count < self.min_samples + self.consecutive_anomalies:
                         continue # Insufficient valid observations
                     
                     valid_acq_time = acq_time[valid_idx]
                     
                     # Target indices start after MIN_SAMPLES history
-                    for t_idx in range(38, valid_initial_count - 2):
+                    for t_idx in range(self.min_samples, valid_initial_count - self.consecutive_anomalies + 1):
                         ts21 = valid_acq_time[t_idx]
-                        ts23 = valid_acq_time[t_idx+2]
+                        ts_last = valid_acq_time[t_idx + self.consecutive_anomalies - 1]
                         
-                        if self.mode == 'calibration' and ts23 >= split_time:
+                        if self.mode == 'calibration' and ts_last >= split_time:
                             continue
-                        if self.mode == 'monitoring' and ts23 < split_time:
+                        if self.mode == 'monitoring' and ts_last < split_time:
                             continue
                             
+                        # Check window validity
+                        past_times = valid_acq_time[:t_idx]
+                        window_start = ts21 - (self.time_window_years * 365.25 * 86400.0)
+                        in_window_count = np.sum(past_times >= window_start)
+                        
+                        if in_window_count < self.min_samples:
+                            if not self.enable_elastic_window:
+                                continue
+                            
+                            elastic_start = ts21 - (self.max_elastic_window_years * 365.25 * 86400.0)
+                            in_elastic_count = np.sum(past_times >= elastic_start)
+                            if in_elastic_count < self.min_samples:
+                                continue
+                                
                         samples_buf[sample_count, 0] = y
                         samples_buf[sample_count, 1] = x
                         samples_buf[sample_count, 2] = t_idx
@@ -115,14 +137,13 @@ class SITSDataset(Dataset):
         valid_acq_time = self.acq_time[valid_idx]
         
         # Targets
-        target_idx = valid_idx[t_idx : t_idx + 3]
+        target_idx = valid_idx[t_idx : t_idx + self.consecutive_anomalies]
         targets = self.z_score[y, x, target_idx]
         ts21 = valid_acq_time[t_idx].item()
-        ts23 = valid_acq_time[t_idx+2].item()
+        ts_last = valid_acq_time[t_idx + self.consecutive_anomalies - 1].item()
         
         # History (Temporal Subset + Elastic Fallback)
-        TIME_WINDOW_SEC = 3.0 * 365.25 * 86400.0
-        MIN_SAMPLES = 38
+        TIME_WINDOW_SEC = self.time_window_years * 365.25 * 86400.0
         MAX_SEQ_LEN = 350
         
         past_idx = valid_idx[:t_idx]
@@ -131,9 +152,11 @@ class SITSDataset(Dataset):
         window_start_time = ts21 - TIME_WINDOW_SEC
         in_window_mask = past_times >= window_start_time
         
-        if torch.sum(in_window_mask) < MIN_SAMPLES:
-            history_idx = past_idx[-MIN_SAMPLES:]
-            history_times = past_times[-MIN_SAMPLES:]
+        if torch.sum(in_window_mask) < self.min_samples and self.enable_elastic_window:
+            elastic_start_time = ts21 - (self.max_elastic_window_years * 365.25 * 86400.0)
+            in_elastic_mask = past_times >= elastic_start_time
+            history_idx = past_idx[in_elastic_mask][-self.min_samples:]
+            history_times = past_times[in_elastic_mask][-self.min_samples:]
         else:
             history_idx = past_idx[in_window_mask]
             history_times = past_times[in_window_mask]
@@ -153,22 +176,35 @@ class SITSDataset(Dataset):
         # Time delta: elapsed time between current target forecast obs (ts21) 
         # and each historical frame (in days)
         delta_t = (ts21 - history_times) / 86400.0
-        dt_log = torch.log(1 + delta_t).to(torch.float32)
         
-        # Combine all 6 features
+        # Harmonic Features (1st, 2nd, 3rd)
+        dt_years = delta_t / 365.25
+        dt_sin1 = torch.sin(1 * 2 * math.pi * dt_years).to(torch.float32)
+        dt_cos1 = torch.cos(1 * 2 * math.pi * dt_years).to(torch.float32)
+        dt_sin2 = torch.sin(2 * 2 * math.pi * dt_years).to(torch.float32)
+        dt_cos2 = torch.cos(2 * 2 * math.pi * dt_years).to(torch.float32)
+        dt_sin3 = torch.sin(3 * 2 * math.pi * dt_years).to(torch.float32)
+        dt_cos3 = torch.cos(3 * 2 * math.pi * dt_years).to(torch.float32)
+        
+        # Combine all 11 features
         history = torch.stack([
             pixel_doy_sin, 
             pixel_doy_cos, 
             pixel_tod_sin,
             pixel_tod_cos,
-            dt_log,
+            dt_sin1,
+            dt_cos1,
+            dt_sin2,
+            dt_cos2,
+            dt_sin3,
+            dt_cos3,
             pixel_z
         ], dim=-1)
         
         # Pad sequence and create mask
         pad_len = MAX_SEQ_LEN - seq_len
         if pad_len > 0:
-            pad_tensor = torch.zeros((pad_len, 6), dtype=torch.float32)
+            pad_tensor = torch.zeros((pad_len, 11), dtype=torch.float32)
             history = torch.cat([pad_tensor, history], dim=0)
             seq_mask = torch.cat([torch.zeros(pad_len, dtype=torch.bool), torch.ones(seq_len, dtype=torch.bool)], dim=0)
         else:
@@ -181,11 +217,11 @@ class SITSDataset(Dataset):
         sf_y = self._fourier_features(norm_y, self.L_freqs)
         spatial_feats = torch.tensor(sf_x + sf_y, dtype=torch.float32)
         
+        metadata = [y, x, ts21, ts_last] + [t.item() for t in targets]
         return {
             'X_seq': history,
             'X_spatial': spatial_feats,
             'seq_mask': seq_mask,
             'Y_target': targets,
-            # metadata as tuple: (y, x, ts21, ts23, act1, act2, act3)
-            'metadata': (y, x, ts21, ts23, targets[0].item(), targets[1].item(), targets[2].item())
+            'metadata': metadata
         }

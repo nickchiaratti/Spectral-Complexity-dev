@@ -93,27 +93,12 @@ TS_LOCATIONS_MAP = {
         {'latlon': (34.047931, -118.572716), 'label': "Surfwood Rd",            'color': 'tab:olive'},
         {'latlon': (34.053249, -118.557091), 'label': "Paseo Miramar Viewpoint",                        'color': 'tab:cyan'},
     ],
-    "Palisades": [
-        {'latlon': (34.05, -118.53), 'label': "Pacific Palisades",                 'color': 'tab:purple'},
-        {'latlon': (34.01, -118.49), 'label': "Santa Monica Pier",                 'color': 'tab:green'},
-        {'latlon': (34.09, -118.59), 'label': "Topanga State Park",                'color': 'tab:olive'},
-    ],
-    "MtEtna": [
-        {'latlon': (37.738, 14.970), 'label': "Etna West",                         'color': 'tab:green'},
-        {'latlon': (37.710, 15.000), 'label': "Etna South",                        'color': 'tab:purple'},
-        {'latlon': (37.738, 15.040), 'label': "Etna East",                         'color': 'tab:olive'},
-        {'latlon': (37.795, 15.005), 'label': "Etna North",                        'color': 'tab:blue'},
-    ],
-    "MtEtna-Catania": [
-        {'latlon': (37.738, 14.970), 'label': "Etna West",                         'color': 'tab:green'},
-        {'latlon': (37.710, 15.000), 'label': "Etna South",                        'color': 'tab:purple'},
-        {'latlon': (37.738, 15.040), 'label': "Etna East",                         'color': 'tab:olive'},
-        {'latlon': (37.795, 15.005), 'label': "Etna North",                        'color': 'tab:blue'},
-    ],
-    "BuenosAires": [
-        {'latlon': (-34.60, -58.38), 'label': "Buenos Aires Central",              'color': 'tab:purple'},
-        {'latlon': (-34.57, -58.42), 'label': "Palermo Woods",                     'color': 'tab:green'},
-        {'latlon': (-34.81, -58.53), 'label': "Ezeiza Airport",                    'color': 'tab:olive'},
+    "Hurlingham": [
+        {'latlon': (-34.535574, -58.662558), 'label': "Puesto Cabral",              'color': 'tab:purple'},
+        {'latlon': (-34.533660, -58.616704), 'label': "CEAMSE 2.0",                     'color': 'tab:green'},
+        {'latlon': (-34.531445, -58.628554), 'label': "Landfill?",                    'color': 'tab:olive'},
+        {'latlon': (-34.584266, -58.625117), 'label': "Farm?",                    'color': 'tab:blue'},
+        {'latlon': (-34.611539, -58.603837), 'label': "El Palomar Airport",         'color': 'tab:red'},
     ]
 }
 
@@ -437,7 +422,7 @@ class HarmonizedComplexityViewer:
         if rgba.shape[-1] == 4:
             rgba[..., 3] = np.where(rgba[..., 3] > 0, 1.0, 0.0)
         rgb = np.clip(rgba, 0.0, 1.0)
-
+        
         hull_bands = HULL_BANDS_LANDSAT if 'HLS' in grid_name.upper() else HULL_BANDS_TANAGER
         h, w = self.height, self.width
 
@@ -476,7 +461,7 @@ class HarmonizedComplexityViewer:
         self.ax_spectral.set_title("Spectral Signatures")
         self.ax_spectral.set_xlabel("Wavelength (μm)") 
         self.ax_spectral.set_ylabel("Reflectance")
-        self.ax_spectral.set_ylim(0, 1)
+        self.ax_spectral.set_ylim(0, 1.05)
         
         all_wl = np.concatenate(list(self.wavelengths.values()))
         self.ax_spectral.set_xlim(np.nanmin(all_wl) - 0.05, np.nanmax(all_wl) + 0.05)

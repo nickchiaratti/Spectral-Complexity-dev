@@ -2,14 +2,14 @@ import torch
 import torch.nn as nn
 
 class MultiScaleSITSNet(nn.Module):
-    def __init__(self):
+    def __init__(self, out_features=3):
         super(MultiScaleSITSNet, self).__init__()
         
         # Inception Block (Parallel Branches) Input: (Batch, 6, 20)
         # Features: [doy_sin, doy_cos, tod_sin, tod_cos, dt_log, z_score]
-        self.branch1 = nn.Conv1d(in_channels=6, out_channels=16, kernel_size=3, padding='same')
-        self.branch2 = nn.Conv1d(in_channels=6, out_channels=16, kernel_size=5, padding='same')
-        self.branch3 = nn.Conv1d(in_channels=6, out_channels=16, kernel_size=7, padding='same')
+        self.branch1 = nn.Conv1d(in_channels=11, out_channels=16, kernel_size=3, padding='same')
+        self.branch2 = nn.Conv1d(in_channels=11, out_channels=16, kernel_size=5, padding='same')
+        self.branch3 = nn.Conv1d(in_channels=11, out_channels=16, kernel_size=7, padding='same')
         
         self.relu = nn.ReLU()
         self.maxpool1 = nn.MaxPool1d(kernel_size=2)
@@ -25,7 +25,7 @@ class MultiScaleSITSNet(nn.Module):
         
         self.linear1 = nn.Linear(64 + spatial_dim, 128)
         self.dropout = nn.Dropout(0.2)
-        self.linear2 = nn.Linear(128, 3)
+        self.linear2 = nn.Linear(128, out_features)
 
     def forward(self, X_seq, X_spatial, seq_mask=None):
         # Permute X_seq from (Batch, SeqLen, 6) to (Batch, 6, SeqLen)

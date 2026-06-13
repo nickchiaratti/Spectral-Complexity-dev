@@ -79,7 +79,7 @@ locations:
     START_DATE: '2024-01-01'
     END_DATE: '2026-01-01'
     TANAGER_AVAILABLE: true
-    TANAGER_STAC_URL: https://www.planet.com/data/stac/tanager-core-imagery/fire/collection.json
+    TANAGER_STAC_URL: https://www.planet.com/data/stac/browser/tanager-core-imagery/natural-lands/collection.json # https://www.planet.com/data/stac/tanager-core-imagery/fire/collection.json
   Malibu:
     SOURCE_CACHE: Palisades
     ROI_LON_MIN: -118.777313
@@ -89,7 +89,7 @@ locations:
     START_DATE: '2014-01-01'
     END_DATE: '2026-06-01'
     TANAGER_AVAILABLE: true
-    TANAGER_STAC_URL: https://www.planet.com/data/stac/tanager-core-imagery/fire/collection.json
+    TANAGER_STAC_URL: https://www.planet.com/data/stac/browser/tanager-core-imagery/natural-lands/collection.json # https://www.planet.com/data/stac/tanager-core-imagery/fire/collection.json
     DRAGONETTE_AVAILABLE: false
     DRAGONETTE_STAC_URL: https://wyvern-odp.com/industry/spatio_temporal/collection.json
 current_run:
