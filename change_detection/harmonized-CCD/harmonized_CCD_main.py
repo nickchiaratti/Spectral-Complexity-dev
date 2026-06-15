@@ -4,11 +4,31 @@ import numpy as np
 import datetime
 import math
 from tqdm import tqdm
+import multiprocessing
+import joblib
+import contextlib
+from joblib import Parallel, delayed
+
+@contextlib.contextmanager
+def tqdm_joblib(tqdm_object):
+    """Context manager to patch joblib to report into tqdm progress bar."""
+    class TqdmBatchCompletionCallback(joblib.parallel.BatchCompletionCallBack):
+        def __call__(self, *args, **kwargs):
+            tqdm_object.update(n=self.batch_size)
+            return super().__call__(*args, **kwargs)
+
+    old_batch_callback = joblib.parallel.BatchCompletionCallBack
+    joblib.parallel.BatchCompletionCallBack = TqdmBatchCompletionCallback
+    try:
+        yield tqdm_object
+    finally:
+        joblib.parallel.BatchCompletionCallBack = old_batch_callback
+        tqdm_object.close()
 
 # ==========================================
 # 1. CONFIGURATION
 # ==========================================
-LOCATION = "Malibu"
+LOCATION = "Rochesterv2"
 H5_PATH = f"C:/satelliteImagery/HLST30/HLST_{LOCATION}_Harmonized_SC_EM-7_Norm-bandCount.h5"
 OUTPUT_H5 = f"C:/satelliteImagery/HLST30/CCD/{LOCATION}_CCD_Harmonized_Change_Detection.h5"
 
@@ -48,6 +68,94 @@ def build_harmonic_matrix(t, num_harmonics):
         cols.append(np.cos(u * w * t))
         cols.append(np.sin(u * w * t))
     return np.column_stack(cols)
+
+def _process_row_chunk(chunk_args):
+    y_start, y_end, width, y_data, valid_mask, frac_years, X_full, acq_times, min_samples, time_window_years, enable_elastic, max_elastic_years, rmse_mult, consec_anom = chunk_args
+    
+    num_frames = y_data.shape[0]
+    chunk_height = y_end - y_start
+    
+    chunk_pred = np.full((num_frames, chunk_height, width), np.nan, dtype=np.float32)
+    chunk_rmse = np.full((num_frames, chunk_height, width), np.nan, dtype=np.float32)
+    chunk_flags = np.zeros((num_frames, chunk_height, width), dtype=np.uint8)
+    chunk_date = np.full((chunk_height, width), np.nan, dtype=np.float64)
+    chunk_count = np.zeros((chunk_height, width), dtype=np.int32)
+    
+    for y_local in range(chunk_height):
+        y_global = y_start + y_local
+        for x in range(width):
+            pixel_valid = valid_mask[:, y_global, x]
+            valid_indices = np.where(pixel_valid)[0]
+            
+            if len(valid_indices) <= min_samples:
+                continue
+
+            consecutive_count = 0
+            first_valid_time = frac_years[valid_indices[0]]
+            
+            for i in range(min_samples, len(valid_indices)):
+                target_idx = valid_indices[i]
+                target_time = frac_years[target_idx]
+                
+                if target_time - first_valid_time < time_window_years:
+                    continue
+                
+                window_start_time = target_time - time_window_years
+                past_valid = valid_indices[:i]
+                past_times = frac_years[past_valid]
+                in_window_mask = past_times >= window_start_time
+                
+                if np.sum(in_window_mask) < min_samples:
+                    if enable_elastic:
+                        train_idx = past_valid[-min_samples:]
+                        if target_time - frac_years[train_idx[0]] > max_elastic_years:
+                            continue
+                    else:
+                        continue
+                else:
+                    train_idx = past_valid[in_window_mask]
+                
+                X_train = X_full[train_idx, :]
+                Y_train = y_data[train_idx, y_global, x]
+                
+                # Fit model on window
+                coeffs, residuals, rank, s = np.linalg.lstsq(X_train, Y_train, rcond=None)
+                
+                # Compute RMSE of the training window
+                if len(residuals) > 0:
+                    rmse = np.sqrt(residuals[0] / len(Y_train))
+                else:
+                    y_train_pred = X_train @ coeffs
+                    rmse = np.sqrt(np.mean((Y_train - y_train_pred)**2))
+                
+                rmse = max(rmse, 1e-5)
+                
+                # Predict target step
+                X_target = X_full[target_idx, :]
+                y_pred = X_target @ coeffs
+                
+                chunk_pred[target_idx, y_local, x] = y_pred
+                chunk_rmse[target_idx, y_local, x] = rmse
+                
+                # Check anomaly condition
+                actual = y_data[target_idx, y_global, x]
+                error = abs(actual - y_pred)
+                
+                is_anomaly = error > (rmse_mult * rmse)
+                if is_anomaly:
+                    chunk_flags[target_idx, y_local, x] = 1
+                    consecutive_count += 1
+                    
+                    if consecutive_count >= consec_anom:
+                        chunk_count[y_local, x] += 1
+                        # If this is the first confirmed structural change, record the date
+                        if np.isnan(chunk_date[y_local, x]):
+                            first_anomaly_idx = valid_indices[i - consec_anom + 1]
+                            chunk_date[y_local, x] = acq_times[first_anomaly_idx]
+                else:
+                    consecutive_count = 0
+
+    return y_start, y_end, chunk_pred, chunk_rmse, chunk_flags, chunk_date, chunk_count
 
 def main():
     print(f"Loading data from {H5_PATH}...")
@@ -89,85 +197,38 @@ def main():
     X_full = build_harmonic_matrix(frac_years, NUM_HARMONICS)
 
     print("\nExecuting Sliding Window OLS Harmonic Regression...")
-    for y in tqdm(range(height), desc="Scanning pixels"):
-        for x in range(width):
-            pixel_valid = valid_mask[:, y, x]
-            valid_indices = np.where(pixel_valid)[0]
-            
-            if len(valid_indices) <= MIN_SAMPLES:
-                continue
-
-            consecutive_count = 0
-            first_valid_time = frac_years[valid_indices[0]]
-            
-            # Start predicting from the observation after the initial minimum samples
-            for i in range(MIN_SAMPLES, len(valid_indices)):
-                target_idx = valid_indices[i]
-                target_time = frac_years[target_idx]
-                
-                # Enforce TIME_WINDOW_YEARS as the initialization requirement
-                if target_time - first_valid_time < TIME_WINDOW_YEARS:
-                    continue
-                
-                # Subset past observations within the time window
-                window_start_time = target_time - TIME_WINDOW_YEARS
-                past_valid = valid_indices[:i]
-                past_times = frac_years[past_valid]
-                in_window_mask = past_times >= window_start_time
-                
-                # Elastic window: enforce minimum samples for OLS rank constraint
-                if np.sum(in_window_mask) < MIN_SAMPLES:
-                    if ENABLE_ELASTIC_WINDOW:
-                        # Expand backwards to grab exactly MIN_SAMPLES
-                        train_idx = past_valid[-MIN_SAMPLES:]
-                        # Enforce maximum expansion duration
-                        if target_time - frac_years[train_idx[0]] > MAX_ELASTIC_WINDOW_YEARS:
-                            continue
-                    else:
-                        continue
-                else:
-                    train_idx = past_valid[in_window_mask]
-                
-                X_train = X_full[train_idx, :]
-                Y_train = y_data[train_idx, y, x]
-                
-                # Fit model on window
-                coeffs, residuals, rank, s = np.linalg.lstsq(X_train, Y_train, rcond=None)
-                
-                # Compute RMSE of the training window
-                if len(residuals) > 0:
-                    rmse = np.sqrt(residuals[0] / len(Y_train))
-                else:
-                    y_train_pred = X_train @ coeffs
-                    rmse = np.sqrt(np.mean((Y_train - y_train_pred)**2))
-                
-                rmse = max(rmse, 1e-5)
-                
-                # Predict target step
-                X_target = X_full[target_idx, :]
-                y_pred = X_target @ coeffs
-                
-                predicted_series[target_idx, y, x] = y_pred
-                rmse_series[target_idx, y, x] = rmse
-                
-                # Check anomaly condition
-                actual = y_data[target_idx, y, x]
-                error = abs(actual - y_pred)
-                
-                is_anomaly = error > (RMSE_MULTIPLIER * rmse)
-                if is_anomaly:
-                    anomaly_flags[target_idx, y, x] = 1
-                    consecutive_count += 1
-                    
-                    if consecutive_count >= CONSECUTIVE_ANOMALIES:
-                        change_count_map[y, x] += 1
-                        # If this is the first confirmed structural change, record the date
-                        if np.isnan(change_date_map[y, x]):
-                            # We record the date of the FIRST anomaly in this 3-streak
-                            first_anomaly_idx = valid_indices[i - CONSECUTIVE_ANOMALIES + 1]
-                            change_date_map[y, x] = acq_times[first_anomaly_idx]
-                else:
-                    consecutive_count = 0
+    
+    n_jobs = multiprocessing.cpu_count()
+    print(f"Using {n_jobs} cores for parallel processing.")
+    
+    # Divide the workload into roughly n_jobs * 4 chunks for load balancing
+    num_chunks = max(1, n_jobs * 4) 
+    chunk_size = max(1, math.ceil(height / num_chunks))
+    
+    chunks = []
+    for y_start in range(0, height, chunk_size):
+        y_end = min(y_start + chunk_size, height)
+        chunk_args = (
+            y_start, y_end, width, 
+            y_data, valid_mask, 
+            frac_years, X_full, acq_times, 
+            MIN_SAMPLES, TIME_WINDOW_YEARS, 
+            ENABLE_ELASTIC_WINDOW, MAX_ELASTIC_WINDOW_YEARS, 
+            RMSE_MULTIPLIER, CONSECUTIVE_ANOMALIES
+        )
+        chunks.append(chunk_args)
+        
+    with tqdm_joblib(tqdm(desc="Processing row chunks", total=len(chunks))):
+        results = Parallel(n_jobs=n_jobs, backend='loky')(
+            delayed(_process_row_chunk)(chunk) for chunk in chunks
+        )
+    
+    for y_start, y_end, c_pred, c_rmse, c_flags, c_date, c_count in results:
+        predicted_series[:, y_start:y_end, :] = c_pred
+        rmse_series[:, y_start:y_end, :] = c_rmse
+        anomaly_flags[:, y_start:y_end, :] = c_flags
+        change_date_map[y_start:y_end, :] = c_date
+        change_count_map[y_start:y_end, :] = c_count
 
     os.makedirs(os.path.dirname(OUTPUT_H5), exist_ok=True)
     print(f"\nSaving Results to {OUTPUT_H5}...")

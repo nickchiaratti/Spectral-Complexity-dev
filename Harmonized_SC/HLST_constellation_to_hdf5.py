@@ -154,20 +154,20 @@ def main(target_location=None):
         num_frames, bands, h, w = data_dict['sr'].shape
         chunk_h, chunk_w = min(h, 256), min(w, 256)
     
-        sr_ds = grp.create_dataset('surface_reflectance', data=data_dict['sr'], compression='gzip', compression_opts=4, chunks=(1, bands, chunk_h, chunk_w))
+        sr_ds = grp.create_dataset('surface_reflectance', data=data_dict['sr'], compression='gzip', compression_opts=5, chunks=(1, bands, chunk_h, chunk_w))
         sr_ds.attrs['units'] = "Reflectance"; sr_ds.attrs['_FillValue'] = np.nan; sr_ds.attrs['wavelengths'] = wavelengths
         sr_ds.attrs['spatial_ref'] = crs.to_wkt(); sr_ds.attrs['GeoTransform'] = gdal_transform
     
-        fmask_ds = grp.create_dataset('Fmask', data=data_dict['fm'][:, 0, :, :], dtype='uint8', compression='gzip', compression_opts=4, chunks=(1, chunk_h, chunk_w))
+        fmask_ds = grp.create_dataset('Fmask', data=data_dict['fm'][:, 0, :, :], dtype='uint8', compression='gzip', compression_opts=5, chunks=(1, chunk_h, chunk_w))
         fmask_ds.attrs['_FillValue'] = 255
-        ang_ds = grp.create_dataset('solar_view_angles', data=data_dict['ag'], compression='gzip', compression_opts=4, chunks=(1, 4, chunk_h, chunk_w))
+        ang_ds = grp.create_dataset('solar_view_angles', data=data_dict['ag'], compression='gzip', compression_opts=5, chunks=(1, 4, chunk_h, chunk_w))
         ang_ds.attrs['_FillValue'] = np.nan; ang_ds.attrs['band_order'] = ["SZA", "SAA", "VZA", "VAA"]
     
-        vis_ds = grp.create_dataset('ortho_visual', data=data_dict['vis'], dtype='uint8', compression='gzip', compression_opts=4, chunks=(1, 4, chunk_h, chunk_w))
+        vis_ds = grp.create_dataset('ortho_visual', data=data_dict['vis'], dtype='uint8', compression='gzip', compression_opts=5, chunks=(1, 4, chunk_h, chunk_w))
         vis_ds.attrs['spatial_ref'] = crs.to_wkt()
         vis_ds.attrs['GeoTransform'] = gdal_transform
 
-        mask_ds = grp.create_dataset('common_mask', data=data_dict['mask'], dtype=bool, compression='gzip', compression_opts=4, chunks=(1, chunk_h, chunk_w))
+        mask_ds = grp.create_dataset('common_mask', data=data_dict['mask'], dtype=bool, compression='gzip', compression_opts=5, chunks=(1, chunk_h, chunk_w))
         mask_ds.attrs['description'] = "True = Invalid/Masked, False = Valid."
         mask_ds.attrs['spatial_ref'] = crs.to_wkt()
         mask_ds.attrs['GeoTransform'] = gdal_transform

@@ -6,6 +6,7 @@ from dataset import SITSDataset
 import numpy as np
 import h5py
 import os
+from tqdm import tqdm
 
 def enable_mc_dropout(m):
     if type(m) == nn.Dropout:
@@ -39,7 +40,7 @@ def train_and_evaluate(h5_path, output_h5='inference_results.h5', weights_path='
         epochs = 10 
         for epoch in range(epochs):
             epoch_loss = 0.0
-            for batch in cal_loader:
+            for batch in tqdm(cal_loader, desc=f"Epoch {epoch+1}/{epochs}", leave=False):
                 X_seq = batch['X_seq'].to(device, non_blocking=True)
                 X_spatial = batch['X_spatial'].to(device, non_blocking=True)
                 seq_mask = batch['seq_mask'].to(device, non_blocking=True)
@@ -70,7 +71,7 @@ def train_and_evaluate(h5_path, output_h5='inference_results.h5', weights_path='
     pixel_epistemic_count = np.zeros((H, W), dtype=np.int32)
     
     with torch.no_grad():
-        for batch in baseline_loader:
+        for batch in tqdm(baseline_loader, desc="Calculating Baseline Uncertainties"):
             X_seq = batch['X_seq'].to(device, non_blocking=True)
             X_spatial = batch['X_spatial'].to(device, non_blocking=True)
             seq_mask = batch['seq_mask'].to(device, non_blocking=True)
@@ -155,7 +156,7 @@ def train_and_evaluate(h5_path, output_h5='inference_results.h5', weights_path='
             model.eval()
             model.apply(enable_mc_dropout)
             
-            for batch in eval_loader:
+            for batch in tqdm(eval_loader, desc="Evaluating inference results"):
                 X_seq = batch['X_seq'].to(device, non_blocking=True)
                 X_spatial = batch['X_spatial'].to(device, non_blocking=True)
                 seq_mask = batch['seq_mask'].to(device, non_blocking=True)

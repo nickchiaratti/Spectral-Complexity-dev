@@ -244,25 +244,43 @@ def main(target_location=None):
                 }
             
                 if os.path.exists(out_tif) and os.path.getsize(out_tif) > 0:
-                    print(f"  [{i}/{total_filtered}] [{img_id}] Valid cache located. Skipping STAC download.")
-                    if tile_data['transform'] is None:
-                        with rasterio.open(out_tif) as cached_src:
-                            tile_data['transform'] = cached_src.transform
-                            tile_data['crs'] = cached_src.crs
-                            tile_data['width'] = cached_src.width
-                            tile_data['height'] = cached_src.height
+                    with rasterio.open(out_tif) as cached_src:
+                        transformer = Transformer.from_crs("EPSG:4326", cached_src.crs, always_xy=True)
+                        xs, ys = transformer.transform(
+                            [cache_bbox[0], cache_bbox[2], cache_bbox[2], cache_bbox[0]], 
+                            [cache_bbox[3], cache_bbox[3], cache_bbox[1], cache_bbox[1]]
+                        )
+                        c_minx, c_maxx, c_miny, c_maxy = min(xs), max(xs), min(ys), max(ys)
                         
-                            epsg_code = CRS.from_user_input(cached_src.crs).to_epsg()
-                            if epsg_code is not None:
-                                tile_data['zone'] = epsg_code % 100
-                            else:
-                                zone_match = re.search(r'T(\d+)', parsed_mgrs_tile)
-                                if zone_match:
-                                    tile_data['zone'] = int(zone_match.group(1))
+                        # Add a 10 meter tolerance to avoid float rounding false negatives
+                        cache_valid = (
+                            cached_src.bounds.left <= c_minx + 10 and 
+                            cached_src.bounds.right >= c_maxx - 10 and 
+                            cached_src.bounds.bottom <= c_miny + 10 and 
+                            cached_src.bounds.top >= c_maxy - 10
+                        )
+
+                    if cache_valid:
+                        print(f"  [{i}/{total_filtered}] [{img_id}] Valid cache located. Skipping STAC download.")
+                        if tile_data['transform'] is None:
+                            with rasterio.open(out_tif) as cached_src:
+                                tile_data['transform'] = cached_src.transform
+                                tile_data['crs'] = cached_src.crs
+                                tile_data['width'] = cached_src.width
+                                tile_data['height'] = cached_src.height
+                            
+                                epsg_code = CRS.from_user_input(cached_src.crs).to_epsg()
+                                if epsg_code is not None:
+                                    tile_data['zone'] = epsg_code % 100
                                 else:
-                                    tile_data['zone'] = cached_src.crs.to_dict().get('zone')
-                    continue
-            
+                                    zone_match = re.search(r'T(\d+)', parsed_mgrs_tile)
+                                    if zone_match:
+                                        tile_data['zone'] = int(zone_match.group(1))
+                                    else:
+                                        tile_data['zone'] = cached_src.crs.to_dict().get('zone')
+                        continue
+                    else:
+                        print(f"  [{i}/{total_filtered}] [{img_id}] Cache exists but bounds are too small for requested region. Re-downloading.")
                 print(f"  [{i}/{total_filtered}] [{img_id}] Downloading {len(assets_list)} STAC assets via Concurrent Window Read...")    
                 try:
                     asset_key_ref = assets_list[0]

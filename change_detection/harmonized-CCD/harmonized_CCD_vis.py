@@ -8,7 +8,7 @@ import matplotlib.patches as patches
 import scienceplots
 plt.style.use(['science','no-latex'])
 
-LOCATION = "Malibu"
+LOCATION = "Rochesterv2"
 H5_PATH = f"C:/satelliteImagery/HLST30/HLST_{LOCATION}_Harmonized_SC_EM-7_Norm-bandCount.h5"
 INFERENCE_H5 = f"C:/satelliteImagery/HLST30/CCD/{LOCATION}_CCD_Harmonized_Change_Detection.h5"
 

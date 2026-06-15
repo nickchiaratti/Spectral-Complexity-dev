@@ -1,6 +1,8 @@
 import numpy as np
 import warnings
 from scipy import ndimage
+from joblib import Parallel, delayed
+import multiprocessing
 
 
 def maximumDistance(data, num_endmembers, chunk_size=50000):
@@ -119,14 +121,18 @@ def _process_chunk_QR(chunk_args):
     chunk_sum_map = np.zeros((chunk_height, width), dtype=np.float32)
     chunk_count_map = np.zeros((chunk_height, width), dtype=np.int8)
 
+    # Pre-allocate buffer for F-contiguous tile to prevent reshape copying in maximumDistance
+    tile_buffer = np.empty((tile_size * tile_size, bands), dtype=np.float32, order='F')
+    tile_buffer_3d = tile_buffer.reshape((tile_size, tile_size, bands), order='F')
+
     for y_start in y_starts_global:
         y_start_local = y_start - y_start_global
         for x_start in range(0, width - tile_size + 1, stride):
             y_end_local = y_start_local + tile_size
             x_end = x_start + tile_size
             
-            tile = img_slice[y_start_local:y_end_local, x_start:x_end, :]
-            endmembers, _ = maximumDistance(tile, num_endmembers)
+            tile_buffer_3d[...] = img_slice[y_start_local:y_end_local, x_start:x_end, :]
+            endmembers, _ = maximumDistance(tile_buffer_3d, num_endmembers)
             localizationVec = endmembers[:, 1]
             
             if gram_type == 'minEndmember':
@@ -158,8 +164,7 @@ def process_volume_sliding_tile(frame_data, tile_size, stride, num_endmembers, g
     sum_map = np.zeros((height, width), dtype=np.float32)
     count_map = np.zeros((height, width), dtype=np.int8)
 
-    import multiprocessing
-    from concurrent.futures import ProcessPoolExecutor
+    
     if n_jobs is None:
         n_jobs = multiprocessing.cpu_count()
         
@@ -188,8 +193,9 @@ def process_volume_sliding_tile(frame_data, tile_size, stride, num_endmembers, g
         img_slice = img[y_start_global:y_end_global, :, :]
         chunks.append((chunk_y_starts, y_start_global, y_end_global, img_slice, tile_size, stride, num_endmembers, gram_type, norm_type))
         
-    with ProcessPoolExecutor(max_workers=n_jobs) as executor:
-        results = executor.map(_process_chunk_QR, chunks)
+    results = Parallel(n_jobs=n_jobs, backend='loky')(
+        delayed(_process_chunk_QR)(chunk) for chunk in chunks
+    )
         
     for y_start_global, y_end_global, chunk_sum_map, chunk_count_map in results:
         sum_map[y_start_global:y_end_global, :] += chunk_sum_map

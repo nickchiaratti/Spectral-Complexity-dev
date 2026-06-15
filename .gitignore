@@ -2,7 +2,9 @@
 __pycache__/
 *.py[cod]
 *$py.class
-.agents/
+*.pdf
+.data_format_docs/
+.dodsrc
 
 # C extensions
 *.so
