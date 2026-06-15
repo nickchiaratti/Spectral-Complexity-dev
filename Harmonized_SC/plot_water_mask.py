@@ -11,7 +11,7 @@ import glob
 # CONFIGURATION
 # ==========================================
 script_dir = os.path.dirname(os.path.abspath(__file__))
-LOCATION = "Rochesterv2"
+LOCATION = "Hurlingham"
 CONFIG_FILE_PATH = os.path.join(script_dir, "locations_config.yaml")
 if not os.path.exists(CONFIG_FILE_PATH):
     CONFIG_FILE_PATH = os.path.join(os.path.dirname(script_dir), "locations_config.yaml")
@@ -34,14 +34,13 @@ def get_file_path(location):
     base_name = f"HLST_{location}_Harmonized.h5"
     return os.path.join(SATELLITE_DATA_DIR, base_name)
 
-def main():
-    location = LOCATION
-    print(f"Using location: {location}")
+def main(target_location=LOCATION):
+    print(f"Using location: {target_location}")
 
-    file_path = get_file_path(location)
+    file_path = get_file_path(target_location)
     print(f"Opening data cube: {file_path}")
     
-    base_file_path = os.path.join(SATELLITE_DATA_DIR, f"HLST_{location}_Harmonized.h5")
+    base_file_path = os.path.join(SATELLITE_DATA_DIR, f"HLST_{target_location}_Harmonized.h5")
     
     if not os.path.exists(file_path) or not os.path.exists(base_file_path):
         print("ERROR: Required HDF5 files not found! Ensure the pipeline has run and base cubes exist.")
@@ -124,10 +123,19 @@ def main():
         axes[2].axis('off')
         
         plt.tight_layout()
-        plt.show()
+        output_dir = os.path.dirname(file_path)
+        base_name = os.path.splitext(os.path.basename(file_path))[0]
+        output_plot = os.path.join(output_dir, f"{base_name}_water_mask.png")
+        plt.savefig(output_plot, dpi=300)
+        print(f"\nPlot saved to: {output_plot}")
+        plt.close()
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Plot water mask")
+    parser.add_argument('--location', type=str, default=LOCATION, help="Target location")
+    args = parser.parse_args()
+    
     try:
-        main()
+        main(target_location=args.location)
     except Exception as e:
         print(f"\nERROR: {e}")

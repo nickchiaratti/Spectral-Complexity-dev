@@ -19,6 +19,7 @@ import Harmonized_SC.HLST_constellation_to_hdf5 as HLST_constellation_to_hdf5
 import Harmonized_SC.HLST_SC_calculations as HLST_SC_calculations
 import Harmonized_SC.HLST_specComplex_viewer as HLST_specComplex_viewer
 import Harmonized_SC.plot_sampling_rate as plot_sampling_rate
+import Harmonized_SC.plot_water_mask as plot_water_mask
 
 # ==========================================
 # PIPELINE CONFIGURATION
@@ -73,6 +74,7 @@ def main():
         ("HLST_constellation_to_hdf5", HLST_constellation_to_hdf5.main),
         ("HLST_SC_calculations", HLST_SC_calculations.main),
         ("plot_sampling_rate", plot_sampling_rate.analyze_sampling_rate),
+        ("plot_water_mask", plot_water_mask.main),
         ("HLST_specComplex_viewer", HLST_specComplex_viewer.main)
     ]
 
