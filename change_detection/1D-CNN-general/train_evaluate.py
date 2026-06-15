@@ -27,7 +27,7 @@ def train_and_evaluate(h5_path, output_h5='inference_results.h5', weights_path='
         
     cal_loader = DataLoader(cal_dataset, batch_size=4096, shuffle=True, num_workers=16, pin_memory=True)
     
-    in_channels = cal_dataset[0]['X_seq'].shape[-1]
+    in_channels = len(cal_dataset.temporal_periods) * 2 + 5
     model = MultiScaleSITSNet(in_channels=in_channels, out_features=consecutive_anomalies).to(device)
     
     if skip_training and os.path.exists(weights_path):
@@ -44,12 +44,11 @@ def train_and_evaluate(h5_path, output_h5='inference_results.h5', weights_path='
             epoch_loss = 0.0
             for batch in tqdm(cal_loader, desc=f"Epoch {epoch+1}/{epochs}", leave=False):
                 X_seq = batch['X_seq'].to(device, non_blocking=True)
-                X_spatial = batch['X_spatial'].to(device, non_blocking=True)
                 seq_mask = batch['seq_mask'].to(device, non_blocking=True)
                 y = batch['Y_target'].to(device, non_blocking=True)
                 
                 optimizer.zero_grad()
-                preds = model(X_seq, X_spatial, seq_mask)
+                preds = model(X_seq, seq_mask)
                 loss = criterion(preds, y)
                 loss.backward()
                 optimizer.step()
@@ -75,14 +74,13 @@ def train_and_evaluate(h5_path, output_h5='inference_results.h5', weights_path='
     with torch.no_grad():
         for batch in tqdm(baseline_loader, desc="Calculating Baseline Uncertainties"):
             X_seq = batch['X_seq'].to(device, non_blocking=True)
-            X_spatial = batch['X_spatial'].to(device, non_blocking=True)
             seq_mask = batch['seq_mask'].to(device, non_blocking=True)
             y = batch['Y_target'].to(device, non_blocking=True)
             batch_sz = X_seq.size(0)
             
             stoc_preds = torch.zeros((mc_samples, batch_sz, consecutive_anomalies), device=device)
             for i in range(mc_samples):
-                stoc_preds[i] = model(X_seq, X_spatial, seq_mask)
+                stoc_preds[i] = model(X_seq, seq_mask)
             
             stds = stoc_preds.std(dim=0).cpu().numpy()
             mean_preds = stoc_preds.mean(dim=0)
@@ -138,7 +136,6 @@ def train_and_evaluate(h5_path, output_h5='inference_results.h5', weights_path='
     dt_fields.append(('Attr_ToD', 'float32'))
     dt_fields.append(('Attr_dt', 'float32'))
     dt_fields.append(('Attr_ZScore', 'float32'))
-    dt_fields.append(('Attr_Spatial', 'float32'))
     dt = np.dtype(dt_fields)
 
     total_anomalies = 0
@@ -165,7 +162,6 @@ def train_and_evaluate(h5_path, output_h5='inference_results.h5', weights_path='
             
             for batch in tqdm(eval_loader, desc="Evaluating inference results"):
                 X_seq = batch['X_seq'].to(device, non_blocking=True)
-                X_spatial = batch['X_spatial'].to(device, non_blocking=True)
                 seq_mask = batch['seq_mask'].to(device, non_blocking=True)
                 y_tensor = batch['Y_target'].to(device, non_blocking=True)
                 
@@ -173,7 +169,7 @@ def train_and_evaluate(h5_path, output_h5='inference_results.h5', weights_path='
                 stochastic_preds = torch.zeros((mc_samples, batch_size, consecutive_anomalies), device=device)
                 
                 for i in range(mc_samples):
-                    stochastic_preds[i] = model(X_seq, X_spatial, seq_mask)
+                    stochastic_preds[i] = model(X_seq, seq_mask)
                     
                 mean_preds = stochastic_preds.mean(dim=0)
                 std_preds = stochastic_preds.std(dim=0)
@@ -214,7 +210,6 @@ def train_and_evaluate(h5_path, output_h5='inference_results.h5', weights_path='
                 attr_tod = np.full(batch_size, np.nan, dtype=np.float32)
                 attr_dt = np.full(batch_size, np.nan, dtype=np.float32)
                 attr_zscore = np.full(batch_size, np.nan, dtype=np.float32)
-                attr_spatial = np.full(batch_size, np.nan, dtype=np.float32)
                 
                 anom_idx = np.where(anomaly_flags == 1)[0]
                 if len(anom_idx) > 0:
@@ -223,19 +218,17 @@ def train_and_evaluate(h5_path, output_h5='inference_results.h5', weights_path='
                         gradient_shap = GradientShap(model)
                         
                     X_seq_anom = X_seq[anom_idx]
-                    X_spat_anom = X_spatial[anom_idx]
                     seq_mask_anom = seq_mask[anom_idx]
                     
                     base_seq = torch.zeros_like(X_seq_anom)
-                    base_spat = torch.zeros_like(X_spat_anom)
                     
-                    attrs = gradient_shap.attribute(inputs=(X_seq_anom, X_spat_anom),
-                                                    baselines=(base_seq, base_spat),
+                    # GradientShap returns a single tensor if the input is a single tensor
+                    attrs = gradient_shap.attribute(inputs=X_seq_anom,
+                                                    baselines=base_seq,
                                                     additional_forward_args=(seq_mask_anom,),
                                                     target=0)
                     
-                    attr_X_seq = attrs[0].cpu().numpy()
-                    attr_X_spatial = attrs[1].cpu().numpy()
+                    attr_X_seq = attrs.cpu().numpy()
                     
                     abs_seq = np.sum(np.abs(attr_X_seq), axis=1) # Sum over SeqLen
                     
@@ -243,7 +236,6 @@ def train_and_evaluate(h5_path, output_h5='inference_results.h5', weights_path='
                     attr_tod[anom_idx] = np.sum(abs_seq[:, 2:4], axis=1)
                     attr_dt[anom_idx] = np.sum(abs_seq[:, 4:-1], axis=1)
                     attr_zscore[anom_idx] = abs_seq[:, -1]
-                    attr_spatial[anom_idx] = np.sum(np.abs(attr_X_spatial), axis=1)
                 
                 # Extracted metadata above
                 
@@ -263,7 +255,6 @@ def train_and_evaluate(h5_path, output_h5='inference_results.h5', weights_path='
                 batch_results['Attr_ToD'] = attr_tod
                 batch_results['Attr_dt'] = attr_dt
                 batch_results['Attr_ZScore'] = attr_zscore
-                batch_results['Attr_Spatial'] = attr_spatial
                 
                 dset[curr_idx:curr_idx + batch_size] = batch_results
                 curr_idx += batch_size

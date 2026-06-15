@@ -3,13 +3,13 @@ import torch
 import torch.nn as nn
 
 class MultiScaleSITSNet(nn.Module):
-    def __init__(self, out_features=3):
+    def __init__(self, in_channels=13, out_features=3):
         super(MultiScaleSITSNet, self).__init__()
         
         # Inception Block
-        self.branch1 = nn.Conv1d(in_channels=11, out_channels=16, kernel_size=3, padding='same')
-        self.branch2 = nn.Conv1d(in_channels=11, out_channels=16, kernel_size=5, padding='same')
-        self.branch3 = nn.Conv1d(in_channels=11, out_channels=16, kernel_size=7, padding='same')
+        self.branch1 = nn.Conv1d(in_channels=in_channels, out_channels=16, kernel_size=3, padding='same')
+        self.branch2 = nn.Conv1d(in_channels=in_channels, out_channels=16, kernel_size=5, padding='same')
+        self.branch3 = nn.Conv1d(in_channels=in_channels, out_channels=16, kernel_size=7, padding='same')
         
         self.relu = nn.ReLU()
         self.maxpool1 = nn.MaxPool1d(kernel_size=2)
@@ -25,7 +25,7 @@ class MultiScaleSITSNet(nn.Module):
         self.linear2 = nn.Linear(128, out_features)
 
     def forward(self, X_seq, seq_mask=None): # X_spatial parameter removed
-        # Permute X_seq from (Batch, SeqLen, 11) to (Batch, 11, SeqLen)
+        # Permute X_seq from (Batch, SeqLen, in_channels) to (Batch, in_channels, SeqLen)
         x = X_seq.permute(0, 2, 1)
         
         if seq_mask is not None:

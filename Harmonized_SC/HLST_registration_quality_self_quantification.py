@@ -30,7 +30,7 @@ Location = "Rochesterv2"
 # Target search window size (100x100 pixels)
 SPAN = 50 
 
-ARD_CUBE_PATH = f"C:/satelliteImagery/HLST30/HLST_{Location}_Harmonized.h5"
+ARD_CUBE_PATH = f"C:/satelliteImagery/HLST30/HLST_{Location}_Harmonized_SC_EM-7_Norm-bandCount.h5"
 
 # ==========================================
 # 2. UTILITY FUNCTIONS
@@ -55,8 +55,8 @@ def get_luminance_and_mask(grp, f_idx):
     # Standard relative luminance calculation
     luminance = np.dot(rgb, [0.299, 0.587, 0.114])
     
-    # 1 = Valid, 0 = Invalid/Masked
-    valid_mask = grp['common_mask'][f_idx, ...] == 1
+    # Ensure correct validity check matching previous ARD processing updates
+    valid_mask = grp['common_mask'][f_idx, ...] != 1
     
     # Enforce alpha channel transparency if present
     if bip_vis.shape[-1] == 4:
@@ -102,20 +102,23 @@ def find_optimal_window(mask_ref, mask_mov, lum_ref, span=100):
 
 def plot_sensor_metrics(grid_name, plot_dates, magnitudes, rotations, correlations):
     """Generates the 3-panel registration metrics plot for a specific sensor."""
+    valid_pairs_count = np.sum(~np.isnan(magnitudes))
+    
+    if valid_pairs_count == 0:
+        print(f"\n--- {grid_name} Sequential Baseline Averages ---")
+        print(f"Total Valid Pairs Evaluated: 0")
+        print(f"No valid pairs for {grid_name} to plot.\n")
+        return
+
     avg_mag = np.nanmean(magnitudes)
     avg_rot = np.nanmean(np.abs(rotations))
     avg_corr = np.nanmean(correlations)
-    valid_pairs_count = np.sum(~np.isnan(magnitudes))
     
     print(f"\n--- {grid_name} Sequential Baseline Averages ---")
     print(f"Total Valid Pairs Evaluated: {valid_pairs_count}")
     print(f"Average Sequential Translation: {avg_mag:.2f} meters")
     print(f"Average Absolute Rotation:      {avg_rot:.3f} degrees")
     print(f"Average Structural Correlation: {avg_corr:.3f}\n")
-
-    if valid_pairs_count == 0:
-        print(f"No valid pairs for {grid_name} to plot.")
-        return
 
     fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(14, 12), sharex=True)
     fig.canvas.manager.set_window_title(f"{grid_name} Sequential Registration Analysis")
@@ -161,7 +164,6 @@ def plot_sensor_metrics(grid_name, plot_dates, magnitudes, rotations, correlatio
 
     fig.suptitle(f"{grid_name} Registration Stability Analysis | Window: {SPAN}x{SPAN}px", fontsize=10)
     plt.tight_layout(rect=[0, 0, 1, 0.95])
-    plt.show()
 
 # ==========================================
 # 3. MAIN EXECUTION
@@ -175,37 +177,39 @@ def main():
         print(f"Error opening ARD Cube: {e}")
         return
         
-    if '/HDFEOS/GRIDS' not in h5_ard:
-        raise ValueError("CRITICAL ERROR: Missing /HDFEOS/GRIDS group in ARD Cube.")
+    if '/HDFEOS/GRIDS/HARMONIZED' not in h5_ard:
+        raise ValueError("CRITICAL ERROR: Missing /HDFEOS/GRIDS/HARMONIZED group in ARD Cube.")
         
-    # Strictly target un-harmonized, native sensor grids
-    available_grids = [g for g in h5_ard['/HDFEOS/GRIDS'].keys() if g != 'HARMONIZED']
-    print(f"Detected Sensor Grids for Analysis: {available_grids}")
+    grp = h5_ard['/HDFEOS/GRIDS/HARMONIZED/Data Fields']
+    
+    # Validation checks
+    l_times = grp['ortho_visual'].attrs['acquisition_time']
+    spacecrafts_raw = grp['ortho_visual'].attrs['source_spacecraft']
+    spacecrafts = [sc.decode('utf-8') if isinstance(sc, bytes) else sc for sc in spacecrafts_raw]
+    
+    unique_spacecrafts = sorted(list(set(spacecrafts)))
+    print(f"Detected Source Spacecrafts in HARMONIZED for Analysis: {unique_spacecrafts}")
 
-    for grid_name in available_grids:
-        print(f"\n{'='*50}\nEvaluating Sensor Grid: {grid_name}\n{'='*50}")
+    # Geographic Metrology
+    if 'GeoTransform' not in grp['ortho_visual'].attrs:
+        raise ValueError("CRITICAL ERROR: GeoTransform missing on 'ortho_visual' for HARMONIZED")
         
-        grp = h5_ard[f'/HDFEOS/GRIDS/{grid_name}/Data Fields']
+    geo_tf = grp['ortho_visual'].attrs['GeoTransform']
+    affine = rasterio.transform.Affine.from_gdal(*geo_tf)
+    pixel_width = abs(affine.a)
+    pixel_height = abs(affine.e)
+
+    for grid_name in unique_spacecrafts:
+        print(f"\n{'='*50}\nEvaluating Spacecraft: {grid_name}\n{'='*50}")
         
-        # Validation checks
-        if 'surface_reflectance' not in grp:
-            raise ValueError(f"CRITICAL ERROR: 'surface_reflectance' missing in {grid_name}")
-            
-        l_times = grp['surface_reflectance'].attrs['acquisition_time']
-        num_frames = grp['surface_reflectance'].shape[0]
+        frame_indices = [i for i, sc in enumerate(spacecrafts) if sc == grid_name]
+        frame_indices = sorted(frame_indices, key=lambda i: l_times[i])
+        
+        num_frames = len(frame_indices)
         
         if num_frames < 2:
             print(f"Skipping {grid_name}: Insufficient frames ({num_frames}) for sequential analysis.")
             continue
-
-        # Geographic Metrology
-        if 'GeoTransform' not in grp['ortho_visual'].attrs:
-            raise ValueError(f"CRITICAL ERROR: GeoTransform missing on 'ortho_visual' for {grid_name}")
-            
-        geo_tf = grp['ortho_visual'].attrs['GeoTransform']
-        affine = rasterio.transform.Affine.from_gdal(*geo_tf)
-        pixel_width = abs(affine.a)
-        pixel_height = abs(affine.e)
 
         # Tracking Arrays
         plot_dates = []
@@ -213,11 +217,11 @@ def main():
         rotations = []
         correlations = []
         
-        print(f"Processing {num_frames - 1} sequential pairs...")
+        print(f"Processing {num_frames - 1} sequential pairs for {grid_name}...")
 
         for idx in range(num_frames - 1):
-            ref_idx = idx
-            mov_idx = idx + 1
+            ref_idx = frame_indices[idx]
+            mov_idx = frame_indices[idx + 1]
             
             ref_dt = datetime.fromtimestamp(l_times[ref_idx], tz=timezone.utc)
             mov_dt = datetime.fromtimestamp(l_times[mov_idx], tz=timezone.utc)
@@ -307,6 +311,9 @@ def main():
         plot_sensor_metrics(grid_name, plot_dates, magnitudes, rotations, correlations)
 
     h5_ard.close()
+    
+    # Display all sensor plots simultaneously at the end
+    plt.show()
 
 if __name__ == "__main__":
     main()

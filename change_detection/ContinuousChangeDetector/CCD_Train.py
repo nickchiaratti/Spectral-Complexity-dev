@@ -38,7 +38,7 @@ RMSE_MULTIPLIER = 3.5    # Deviation must exceed 3 * RMSE
 CONSECUTIVE_ANOMALIES = 3 # Must stay anomalous for 3 consecutive clear observations
 
 # Harmonic Configuration
-NUM_HARMONICS = 3 # Zhu used 2, Geerken recommends 3-5 based on observation frequency (3 is 8 parameters)
+TEMPORAL_PERIODS = [1/3, 1/2, 1.0, 2.0, 3.0, 4.0]
 MIN_TRAINING_OBSERVATIONS = 15 # Minimum cloud-free days required for least squares fit (Zhu recommends 15 for 6 parameter model)
 
 SUN_ELEVATION_THRESHOLD = 30
@@ -61,20 +61,18 @@ def extract_fractional_years(acq_times):
         frac_years.append(year + (elapsed / year_duration))
     return np.array(frac_years)
 
-def build_harmonic_matrix(t, num_harmonics=NUM_HARMONICS):
+def build_harmonic_matrix(t, temporal_periods=TEMPORAL_PERIODS):
     """
-    Constructs a Fourier basis matrix incorporating a linear trend (Zhu's CCDC method).
-    Columns: [Intercept, Slope, Cos(1x), Sin(1x), Cos(2x), Sin(2x), ..., Cos(ux), Sin(ux)]
+    Constructs a Fourier basis matrix using specific temporal periods (no linear trend).
     """
     w = 2.0 * math.pi
     cols = [
         np.ones_like(t),  # a0 (Intercept / DC Component)
-        t                 # c1 (Linear Trend)
     ]
     
-    for u in range(1, num_harmonics + 1):
-        cols.append(np.cos(u * w * t))  # Real part
-        cols.append(np.sin(u * w * t))  # Imaginary part
+    for p in temporal_periods:
+        cols.append(np.cos((w / p) * t))  # Real part
+        cols.append(np.sin((w / p) * t))  # Imaginary part
         
     return np.column_stack(cols)
 
@@ -174,7 +172,7 @@ def main(TRAIN_END_YEAR):
     
 
     # 3. Prepare Coefficient Output Arrays
-    num_coeffs = 2 + (2 * NUM_HARMONICS) # Intercept + Slope + 2 for each harmonic
+    num_coeffs = 1 + (2 * len(TEMPORAL_PERIODS)) # Intercept + 2 for each period
     baseline_coefficients = np.full((num_coeffs, height, width), np.nan, dtype=np.float32)
     baseline_rmse = np.full((height, width), np.nan, dtype=np.float32)
 
@@ -283,14 +281,14 @@ def main(TRAIN_END_YEAR):
         out_file.attrs['spatial_ref'] = spatial_ref
         out_file.attrs['GeoTransform'] = geo_transform
         
-        # Dynamically build the order string for HDF5 metadata depending on NUM_HARMONICS
-        coeff_names = ["Intercept", "Slope"] + [f"{func}({u}x)" for u in range(1, NUM_HARMONICS + 1) for func in ["Cos", "Sin"]]
+        # Dynamically build the order string for HDF5 metadata depending on TEMPORAL_PERIODS
+        coeff_names = ["Intercept"] + [f"{func}({p:.2f}y)" for p in TEMPORAL_PERIODS for func in ["Cos", "Sin"]]
         out_file.attrs['coefficient_order'] = ", ".join(coeff_names)
         
         out_file.attrs['train_end_year'] = TRAIN_END_YEAR
         out_file.attrs['rmse_multiplier'] = RMSE_MULTIPLIER
         out_file.attrs['consecutive_anomalies'] = CONSECUTIVE_ANOMALIES
-        out_file.attrs['num_harmonics'] = NUM_HARMONICS
+        out_file.attrs['temporal_periods'] = TEMPORAL_PERIODS
         out_file.attrs['min_training_observations'] = MIN_TRAINING_OBSERVATIONS
         out_file.attrs['sun_elevation_threshold'] = SUN_ELEVATION_THRESHOLD
         out_file.attrs['cloud_dilation'] = CLOUD_DILATION

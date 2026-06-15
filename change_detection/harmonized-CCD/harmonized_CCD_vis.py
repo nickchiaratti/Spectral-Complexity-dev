@@ -8,7 +8,7 @@ import matplotlib.patches as patches
 import scienceplots
 plt.style.use(['science','no-latex'])
 
-LOCATION = "Rochesterv2"
+LOCATION = "Tait"
 H5_PATH = f"C:/satelliteImagery/HLST30/HLST_{LOCATION}_Harmonized_SC_EM-7_Norm-bandCount.h5"
 INFERENCE_H5 = f"C:/satelliteImagery/HLST30/CCD/{LOCATION}_CCD_Harmonized_Change_Detection.h5"
 
@@ -138,6 +138,7 @@ def plot_spatial_anomaly_overlay(source_h5_path, inference_results_h5):
     with h5py.File(inference_results_h5, 'r') as f:
         anomaly_map = f['change_date_timestamp'][:]
         change_count_map = f['change_count'][:]
+        min_samples = f.attrs.get('MIN_SAMPLES', 20)
         
     H, W = full_valid_mask.shape[1], full_valid_mask.shape[2]
     
@@ -148,7 +149,7 @@ def plot_spatial_anomaly_overlay(source_h5_path, inference_results_h5):
     ax_img.set_title(f"{base_sg} Acquisition: {base_date.strftime('%Y-%m-%d %H:%M:%S')} UTC")
     
     valid_initial_counts = np.sum(full_valid_mask, axis=0)
-    insufficient_data = valid_initial_counts < 20
+    insufficient_data = valid_initial_counts < min_samples
     
     gray = np.zeros((H, W, 4))
     gray[insufficient_data, 0] = 0.5

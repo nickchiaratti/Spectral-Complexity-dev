@@ -11,7 +11,7 @@ import glob
 # CONFIGURATION
 # ==========================================
 script_dir = os.path.dirname(os.path.abspath(__file__))
-LOCATION = "Hurlingham"
+LOCATION = "Rochesterv2"
 CONFIG_FILE_PATH = os.path.join(script_dir, "locations_config.yaml")
 if not os.path.exists(CONFIG_FILE_PATH):
     CONFIG_FILE_PATH = os.path.join(os.path.dirname(script_dir), "locations_config.yaml")
@@ -22,21 +22,17 @@ def get_file_path(location):
     Attempt to find the correct base HDF5 file path for the location.
     The exact filename can vary (some include year, some don't).
     """
-    base_name = f"HLST_{location}_Harmonized.h5"
-    file_path = os.path.join(SATELLITE_DATA_DIR, base_name)
+    # Search for any Harmonized files for this location
+    matches = glob.glob(os.path.join(SATELLITE_DATA_DIR, f"HLST_{location}_Harmonized*.h5"))
     
-    if os.path.exists(file_path):
-        return file_path
-        
-    # Search for files with year component
-    matches = glob.glob(os.path.join(SATELLITE_DATA_DIR, f"HLST_{location}_Harmonized_*.h5"))
-    # Filter out SC files
-    matches = [m for m in matches if "SC_EM" not in m]
     if matches:
+        # Sort so that SC_EM files are preferred and selected first
+        matches.sort(key=lambda x: "SC_EM" in os.path.basename(x), reverse=True)
         return matches[0]
         
-    # Return the expected base path anyway to trigger normal error handling
-    return file_path
+    # Default fallback
+    base_name = f"HLST_{location}_Harmonized.h5"
+    return os.path.join(SATELLITE_DATA_DIR, base_name)
 
 def main():
     location = LOCATION
@@ -45,11 +41,13 @@ def main():
     file_path = get_file_path(location)
     print(f"Opening data cube: {file_path}")
     
-    if not os.path.exists(file_path):
-        print("ERROR: File not found! Ensure the pipeline has run for this location and the data directory is correct.")
+    base_file_path = os.path.join(SATELLITE_DATA_DIR, f"HLST_{location}_Harmonized.h5")
+    
+    if not os.path.exists(file_path) or not os.path.exists(base_file_path):
+        print("ERROR: Required HDF5 files not found! Ensure the pipeline has run and base cubes exist.")
         return
 
-    with h5py.File(file_path, 'r') as h5:
+    with h5py.File(file_path, 'r') as h5, h5py.File(base_file_path, 'r') as h5_base:
         harm_grp = h5['/HDFEOS/GRIDS/HARMONIZED/Data Fields']
         ortho_visual_ds = harm_grp['ortho_visual'] 
         
@@ -88,8 +86,8 @@ def main():
             # Pivot to native grid to access FMASK
             # Tanager datasets won't have FMASK, so we safely check if it exists
             fmask_path = f"/HDFEOS/GRIDS/{grid_name}/Data Fields/Fmask"
-            if fmask_path in h5:
-                fmask_frame = h5[fmask_path][local_idx, :, :]
+            if fmask_path in h5_base:
+                fmask_frame = h5_base[fmask_path][local_idx, :, :]
                 
                 # Identify valid pixels (FillValue is 255)
                 valid_pixels = (fmask_frame != 255)

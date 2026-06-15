@@ -38,8 +38,8 @@ CONSECUTIVE_ANOMALIES = 4
 TIME_WINDOW_YEARS = 3.0
 ENABLE_ELASTIC_WINDOW = True  # Allows window to expand backwards to meet MIN_SAMPLES
 MAX_ELASTIC_WINDOW_YEARS = TIME_WINDOW_YEARS + 2.0  # Maximum span to expand backwards
-NUM_HARMONICS = 3  # Yields 8 parameters total: Intercept, Slope, Cos1, Sin1, Cos2, Sin2, Cos3, Sin3
-MIN_SAMPLES = NUM_HARMONICS * 2 + 2 # Minimum required to solve OLS without being underdetermined
+TEMPORAL_PERIODS = [2/3, 1/2, 1.0, 3.0]
+MIN_SAMPLES = len(TEMPORAL_PERIODS) * 2 + 1 # Minimum required to solve OLS without being underdetermined
 
 def extract_fractional_years(acq_times):
     """Converts UNIX timestamps into continuous fractional years (t)."""
@@ -54,19 +54,17 @@ def extract_fractional_years(acq_times):
         frac_years.append(year + (elapsed / year_duration))
     return np.array(frac_years)
 
-def build_harmonic_matrix(t, num_harmonics):
+def build_harmonic_matrix(t, temporal_periods=TEMPORAL_PERIODS):
     """
-    Constructs a Fourier basis matrix incorporating a linear trend.
-    Columns: [Intercept, Slope, Cos(1x), Sin(1x), Cos(2x), Sin(2x), ...]
+    Constructs a Fourier basis matrix using specific temporal periods (no linear trend).
     """
     w = 2.0 * math.pi
     cols = [
         np.ones_like(t),  # Intercept
-        t                 # Linear Trend
     ]
-    for u in range(1, num_harmonics + 1):
-        cols.append(np.cos(u * w * t))
-        cols.append(np.sin(u * w * t))
+    for p in temporal_periods:
+        cols.append(np.cos((w / p) * t))
+        cols.append(np.sin((w / p) * t))
     return np.column_stack(cols)
 
 def _process_row_chunk(chunk_args):
@@ -194,7 +192,7 @@ def main():
     rmse_series = np.full((num_frames, height, width), np.nan, dtype=np.float32)
     anomaly_flags = np.zeros((num_frames, height, width), dtype=np.uint8)
 
-    X_full = build_harmonic_matrix(frac_years, NUM_HARMONICS)
+    X_full = build_harmonic_matrix(frac_years)
 
     print("\nExecuting Sliding Window OLS Harmonic Regression...")
     
@@ -241,7 +239,7 @@ def main():
         out_file.attrs['ENABLE_ELASTIC_WINDOW'] = ENABLE_ELASTIC_WINDOW
         out_file.attrs['MAX_ELASTIC_WINDOW_YEARS'] = MAX_ELASTIC_WINDOW_YEARS
         out_file.attrs['MIN_SAMPLES'] = MIN_SAMPLES
-        out_file.attrs['NUM_HARMONICS'] = NUM_HARMONICS
+        out_file.attrs['TEMPORAL_PERIODS'] = TEMPORAL_PERIODS
         out_file.attrs['TARGET_METRIC'] = TARGET_METRIC
         out_file.attrs['SOURCE_DATA'] = H5_PATH
         
