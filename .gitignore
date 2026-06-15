@@ -4,7 +4,6 @@ __pycache__/
 *$py.class
 *.pdf
 .data_format_docs/
-.dodsrc
 
 # C extensions
 *.so
