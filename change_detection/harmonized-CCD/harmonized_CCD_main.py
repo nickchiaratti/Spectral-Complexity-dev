@@ -28,7 +28,7 @@ def tqdm_joblib(tqdm_object):
 # ==========================================
 # 1. CONFIGURATION
 # ==========================================
-LOCATION = "Rochesterv2"
+LOCATION = "Tait"
 H5_PATH = f"C:/satelliteImagery/HLST30/HLST_{LOCATION}_Harmonized_SC_EM-7_Norm-bandCount.h5"
 OUTPUT_H5 = f"C:/satelliteImagery/HLST30/CCD/{LOCATION}_CCD_Harmonized_Change_Detection.h5"
 

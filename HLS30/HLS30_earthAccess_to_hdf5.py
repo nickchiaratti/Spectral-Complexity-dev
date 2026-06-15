@@ -252,12 +252,12 @@ def main(target_location=None):
                         )
                         c_minx, c_maxx, c_miny, c_maxy = min(xs), max(xs), min(ys), max(ys)
                         
-                        # Add a 10 meter tolerance to avoid float rounding false negatives
+                        # Add a 40 meter tolerance to avoid float rounding false negatives
                         cache_valid = (
-                            cached_src.bounds.left <= c_minx + 10 and 
-                            cached_src.bounds.right >= c_maxx - 10 and 
-                            cached_src.bounds.bottom <= c_miny + 10 and 
-                            cached_src.bounds.top >= c_maxy - 10
+                            cached_src.bounds.left <= c_minx + 40 and 
+                            cached_src.bounds.right >= c_maxx - 40 and 
+                            cached_src.bounds.bottom <= c_miny + 40 and 
+                            cached_src.bounds.top >= c_maxy - 40
                         )
 
                     if cache_valid:

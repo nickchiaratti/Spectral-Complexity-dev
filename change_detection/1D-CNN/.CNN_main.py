@@ -7,13 +7,13 @@ os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
 # ==========================================
 # IDE CONFIGURATION
 # ==========================================
-LOCATION = "Malibu"
-TRAIN_END_YEAR = "2024"
+LOCATION = "Tait"
+TRAIN_END_YEAR = "2025"
 H5_PATH = f"C:/satelliteImagery/HLST30/HLST_{LOCATION}_Harmonized_SC_EM-7_Norm-bandCount.h5"
 OUTPUT_DIR = f"C:/satelliteImagery/HLST30/1D-CNN-{LOCATION}-TrainEnd{TRAIN_END_YEAR}"
 TRAIN_END_DATE = f"{TRAIN_END_YEAR}-01-01"
 SKIP_TRAIN = False
-MC_SAMPLES = 50
+MC_SAMPLES = 4
 CONFIDENCE_MULTIPLIER = 3.0
 
 CONSECUTIVE_ANOMALIES = 4
@@ -26,8 +26,8 @@ def main():
     if not os.path.exists(OUTPUT_DIR):
         os.makedirs(OUTPUT_DIR)
         
-    weights_path = os.path.join(OUTPUT_DIR, 'sits_baseline_weights_pre2024.pth')
-    inference_h5 = os.path.join(OUTPUT_DIR, 'inference_results.h5')
+    weights_path = os.path.join(OUTPUT_DIR, f'CNN_{LOCATION}_baseline_weights_pre{TRAIN_END_YEAR}.pth')
+    inference_h5 = os.path.join(OUTPUT_DIR, f'CNN_{LOCATION}_baseline_weights_pre{TRAIN_END_YEAR}.h5')
     
     print(f"Starting pipeline: skip_training={SKIP_TRAIN}...")
     train_and_evaluate(

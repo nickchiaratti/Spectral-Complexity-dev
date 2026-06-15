@@ -110,6 +110,11 @@ def plot_pixel_sits(pixel_y, pixel_x, source_h5_path, inference_results_h5, ax=N
     if len(pixel_res) > 0:
         pred_dates = []
         anomaly_flags = []
+        attr_doy = []
+        attr_tod = []
+        attr_dt = []
+        attr_zscore = []
+        attr_spatial = []
         
         # Determine number of predictions
         pred_cols = [c for c in pixel_res.dtype.names if c.startswith('Pred_')]
@@ -134,6 +139,14 @@ def plot_pixel_sits(pixel_y, pixel_x, source_h5_path, inference_results_h5, ax=N
                 
                 pred_dates.append(d_target)
                 anomaly_flags.append(row['Anomaly_Flag'])
+                
+                if 'Attr_DoY' in pixel_res.dtype.names:
+                    attr_doy.append(row['Attr_DoY'])
+                    attr_tod.append(row['Attr_ToD'])
+                    attr_dt.append(row['Attr_dt'])
+                    attr_zscore.append(row['Attr_ZScore'])
+                    attr_spatial.append(row['Attr_Spatial'])
+                    
                 for k in range(1, num_preds + 1):
                     preds[k].append(row[f'Pred_{k}'])
                     stds[k].append(row[f'Std_{k}'])
@@ -168,6 +181,40 @@ def plot_pixel_sits(pixel_y, pixel_x, source_h5_path, inference_results_h5, ax=N
         anom_dates = pred_dates[anomaly_flags == 1]
         anom_vals = preds[1][anomaly_flags == 1]
         ax.scatter(anom_dates, anom_vals, color='red', s=50, zorder=5, label='Anomaly Flagged')
+        
+        # Attribution Bars
+        if 'Attr_DoY' in pixel_res.dtype.names:
+            anom_mask = (anomaly_flags == 1)
+            a_doy = np.array(attr_doy)[srt][anom_mask]
+            
+            if len(anom_dates) > 0 and not np.isnan(a_doy[0]):
+                a_tod = np.array(attr_tod)[srt][anom_mask]
+                a_dt = np.array(attr_dt)[srt][anom_mask]
+                a_zscore = np.array(attr_zscore)[srt][anom_mask]
+                a_spat = np.array(attr_spatial)[srt][anom_mask]
+                
+                tot = a_doy + a_tod + a_dt + a_zscore + a_spat
+                tot[tot == 0] = 1 # prevent zero division
+                
+                p_doy = a_doy / tot * 100
+                p_tod = a_tod / tot * 100
+                p_dt = a_dt / tot * 100
+                p_z = a_zscore / tot * 100
+                p_s = a_spat / tot * 100
+                
+                ax2 = ax.twinx()
+                ax2.set_ylim(0, 400) # Max 100%, squishes bars to bottom 25% of chart
+                ax2.set_ylabel('Attribution %', color='purple')
+                ax2.tick_params(axis='y', labelcolor='purple')
+                ax2.set_yticks([0, 25, 50, 75, 100])
+                
+                w = 15 # bar width in days
+                ax2.bar(anom_dates, p_doy, w, label='DoY', color='tab:blue', alpha=0.6)
+                ax2.bar(anom_dates, p_tod, w, bottom=p_doy, label='ToD', color='tab:orange', alpha=0.6)
+                ax2.bar(anom_dates, p_dt, w, bottom=p_doy+p_tod, label='dt (Multi-year)', color='tab:green', alpha=0.6)
+                ax2.bar(anom_dates, p_z, w, bottom=p_doy+p_tod+p_dt, label='Z-Score', color='tab:red', alpha=0.6)
+                ax2.bar(anom_dates, p_s, w, bottom=p_doy+p_tod+p_dt+p_z, label='Spatial', color='tab:purple', alpha=0.6)
+                ax2.legend(loc='lower left', fontsize='small')
         
         # Missing/Insufficient Baseline
         missing_dates = pred_dates[anomaly_flags == 255]

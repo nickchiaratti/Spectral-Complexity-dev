@@ -22,6 +22,9 @@ class SITSDataset(Dataset):
         self.max_elastic_window_years = max_elastic_window_years
         self.min_samples = min_samples
         
+        # Explicit temporal periods (in years) to capture sub-harmonics and multi-year patterns
+        self.temporal_periods = [1/3, 1/2, 1.0, 2.0, 3.0, 4.0]
+        
         self.L_freqs = 10 # 20 features for X (10 sin, 10 cos), 20 for Y
         
         self.samples = None # Will be a PyTorch Shared Memory Tensor
@@ -176,35 +179,29 @@ class SITSDataset(Dataset):
         # Time delta: elapsed time between current target forecast obs (ts21) 
         # and each historical frame (in days)
         delta_t = (ts21 - history_times) / 86400.0
-        
-        # Harmonic Features (1st, 2nd, 3rd)
         dt_years = delta_t / 365.25
-        dt_sin1 = torch.sin(1 * 2 * math.pi * dt_years).to(torch.float32)
-        dt_cos1 = torch.cos(1 * 2 * math.pi * dt_years).to(torch.float32)
-        dt_sin2 = torch.sin(2 * 2 * math.pi * dt_years).to(torch.float32)
-        dt_cos2 = torch.cos(2 * 2 * math.pi * dt_years).to(torch.float32)
-        dt_sin3 = torch.sin(3 * 2 * math.pi * dt_years).to(torch.float32)
-        dt_cos3 = torch.cos(3 * 2 * math.pi * dt_years).to(torch.float32)
         
-        # Combine all 11 features
-        history = torch.stack([
+        # Harmonic Features (Dynamic Multi-Year Periods)
+        dt_features = []
+        for period in self.temporal_periods:
+            dt_features.append(torch.sin(2 * math.pi * dt_years / period).to(torch.float32))
+            dt_features.append(torch.cos(2 * math.pi * dt_years / period).to(torch.float32))
+        
+        # Combine all features
+        feature_list = [
             pixel_doy_sin, 
             pixel_doy_cos, 
             pixel_tod_sin,
-            pixel_tod_cos,
-            dt_sin1,
-            dt_cos1,
-            dt_sin2,
-            dt_cos2,
-            dt_sin3,
-            dt_cos3,
-            pixel_z
-        ], dim=-1)
+            pixel_tod_cos
+        ] + dt_features + [pixel_z]
+        
+        history = torch.stack(feature_list, dim=-1)
         
         # Pad sequence and create mask
         pad_len = MAX_SEQ_LEN - seq_len
+        num_channels = history.shape[-1]
         if pad_len > 0:
-            pad_tensor = torch.zeros((pad_len, 11), dtype=torch.float32)
+            pad_tensor = torch.zeros((pad_len, num_channels), dtype=torch.float32)
             history = torch.cat([pad_tensor, history], dim=0)
             seq_mask = torch.cat([torch.zeros(pad_len, dtype=torch.bool), torch.ones(seq_len, dtype=torch.bool)], dim=0)
         else:

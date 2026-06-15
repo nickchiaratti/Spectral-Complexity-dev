@@ -25,12 +25,12 @@ import warnings
 # ==========================================
 # 1. CONFIGURATION
 # ==========================================
-Location = "Tait"
+Location = "Rochesterv2"
 
 # Target search window size (100x100 pixels)
-SPAN = 100 
+SPAN = 50 
 
-ARD_CUBE_PATH = f"C:/satelliteImagery/HLSX30/HLS-Tanager_{Location}_Harmonized_2025_SC_EM-7_Norm-bandCount.h5"
+ARD_CUBE_PATH = f"C:/satelliteImagery/HLST30/HLST_{Location}_Harmonized.h5"
 
 # ==========================================
 # 2. UTILITY FUNCTIONS

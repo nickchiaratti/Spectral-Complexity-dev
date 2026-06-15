@@ -20,7 +20,7 @@ script_dir = Path(__file__).resolve().parent
 if str(script_dir.parent) not in sys.path:
     sys.path.insert(0, str(script_dir.parent))
 import SpecComplex as sc
-import SpecComplexQR as scQR
+import SpecComplexEfficient as scQR
 import warnings
 import time
 from datetime import datetime, timezone

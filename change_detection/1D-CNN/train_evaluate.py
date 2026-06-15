@@ -26,7 +26,8 @@ def train_and_evaluate(h5_path, output_h5='inference_results.h5', weights_path='
         
     cal_loader = DataLoader(cal_dataset, batch_size=4096, shuffle=True, num_workers=16, pin_memory=True)
     
-    model = MultiScaleSITSNet(out_features=consecutive_anomalies).to(device)
+    in_channels = cal_dataset[0]['X_seq'].shape[-1]
+    model = MultiScaleSITSNet(in_channels=in_channels, out_features=consecutive_anomalies).to(device)
     
     if skip_training and os.path.exists(weights_path):
         print(f"Skipping training. Loading existing weights from {weights_path}...")
@@ -132,6 +133,11 @@ def train_and_evaluate(h5_path, output_h5='inference_results.h5', weights_path='
     for i in range(1, consecutive_anomalies + 1):
         dt_fields.append((f'Actual_{i}', 'float32'))
     dt_fields.append(('Anomaly_Flag', 'uint8'))
+    dt_fields.append(('Attr_DoY', 'float32'))
+    dt_fields.append(('Attr_ToD', 'float32'))
+    dt_fields.append(('Attr_dt', 'float32'))
+    dt_fields.append(('Attr_ZScore', 'float32'))
+    dt_fields.append(('Attr_Spatial', 'float32'))
     dt = np.dtype(dt_fields)
 
     total_anomalies = 0
@@ -202,6 +208,42 @@ def train_and_evaluate(h5_path, output_h5='inference_results.h5', weights_path='
                 # Only count true anomalies
                 total_anomalies += np.sum(anomaly_flags == 1)
                 
+                # --- Captum GradientShap Attribution ---
+                attr_doy = np.full(batch_size, np.nan, dtype=np.float32)
+                attr_tod = np.full(batch_size, np.nan, dtype=np.float32)
+                attr_dt = np.full(batch_size, np.nan, dtype=np.float32)
+                attr_zscore = np.full(batch_size, np.nan, dtype=np.float32)
+                attr_spatial = np.full(batch_size, np.nan, dtype=np.float32)
+                
+                anom_idx = np.where(anomaly_flags == 1)[0]
+                if len(anom_idx) > 0:
+                    if 'gradient_shap' not in locals():
+                        from captum.attr import GradientShap
+                        gradient_shap = GradientShap(model)
+                        
+                    X_seq_anom = X_seq[anom_idx]
+                    X_spat_anom = X_spatial[anom_idx]
+                    seq_mask_anom = seq_mask[anom_idx]
+                    
+                    base_seq = torch.zeros_like(X_seq_anom)
+                    base_spat = torch.zeros_like(X_spat_anom)
+                    
+                    attrs = gradient_shap.attribute(inputs=(X_seq_anom, X_spat_anom),
+                                                    baselines=(base_seq, base_spat),
+                                                    additional_forward_args=(seq_mask_anom,),
+                                                    target=0)
+                    
+                    attr_X_seq = attrs[0].cpu().numpy()
+                    attr_X_spatial = attrs[1].cpu().numpy()
+                    
+                    abs_seq = np.sum(np.abs(attr_X_seq), axis=1) # Sum over SeqLen
+                    
+                    attr_doy[anom_idx] = np.sum(abs_seq[:, 0:2], axis=1)
+                    attr_tod[anom_idx] = np.sum(abs_seq[:, 2:4], axis=1)
+                    attr_dt[anom_idx] = np.sum(abs_seq[:, 4:-1], axis=1)
+                    attr_zscore[anom_idx] = abs_seq[:, -1]
+                    attr_spatial[anom_idx] = np.sum(np.abs(attr_X_spatial), axis=1)
+                
                 # Extracted metadata above
                 
                 batch_results = np.empty(batch_size, dtype=dt)
@@ -216,6 +258,11 @@ def train_and_evaluate(h5_path, output_h5='inference_results.h5', weights_path='
                     batch_results[f'Actual_{k+1}'] = meta[4 + k].numpy()
                     
                 batch_results['Anomaly_Flag'] = anomaly_flags
+                batch_results['Attr_DoY'] = attr_doy
+                batch_results['Attr_ToD'] = attr_tod
+                batch_results['Attr_dt'] = attr_dt
+                batch_results['Attr_ZScore'] = attr_zscore
+                batch_results['Attr_Spatial'] = attr_spatial
                 
                 dset[curr_idx:curr_idx + batch_size] = batch_results
                 curr_idx += batch_size

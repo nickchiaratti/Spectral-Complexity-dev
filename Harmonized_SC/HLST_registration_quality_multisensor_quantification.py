@@ -17,7 +17,7 @@ import os
 import h5py
 import numpy as np
 import matplotlib.pyplot as plt
-from matplotlib.widgets import Button
+from matplotlib.widgets import Button, TextBox
 import matplotlib.dates as mdates
 from datetime import datetime, timezone, timedelta
 import rasterio.transform
@@ -31,16 +31,16 @@ import warnings
 # ==========================================
 # 1. CONFIGURATION
 # ==========================================
-Location = "Tait"
+Location = "Rochesterv2"
 
 # Point directly to the finalized ARD Master Cube
-ARD_CUBE_PATH = f"C:/satelliteImagery/HLST30/HLST_{Location}_Harmonized_2025_SC_EM-7_Norm-bandCount.h5"
+ARD_CUBE_PATH = f"C:/satelliteImagery/HLST30/HLST_{Location}_Harmonized_SC_EM-7_Norm-bandCount.h5"
 
 # The Absolute Geometric Anchor (Reference Sensor)
-BASELINE_GRID = "TANAGER"
+BASELINE_GRID = "HARMONIZED"
 
 # Target search window size (100x100 pixels)
-SPAN = 100 
+SPAN = 150 
 
 # ==========================================
 # 2. UTILITY FUNCTIONS
@@ -64,7 +64,7 @@ def get_luminance_and_mask(grp, f_idx):
     luminance = np.dot(rgb, [0.299, 0.587, 0.114])
     
     # 1 = Valid, 0 = Invalid/Masked
-    valid_mask = grp['common_mask'][f_idx, ...] == 1
+    valid_mask = grp['common_mask'][f_idx, ...] != 1
     
     if bip_vis.shape[-1] == 4:
         valid_mask &= (bip_vis[..., 3] > 0)
@@ -147,31 +147,24 @@ class MultiSensorCoRegistrationViewer:
         self.transformer_to_ll = Transformer.from_crs(crs, "EPSG:4326", always_xy=True)
 
     def _precalculate_all_transformations(self):
-        """Iterates all target grids, bracketing them against the Baseline grid."""
-        b_times = self.b_grp['surface_reflectance'].attrs['acquisition_time']
+        """Iterates sequentially frame-to-frame through the HARMONIZED grid."""
+        times = self.b_grp['ortho_visual'].attrs['acquisition_time']
+        num_frames = len(times)
         
-        target_grids = [g for g in self.h5_ard['/HDFEOS/GRIDS'].keys() if g not in [self.baseline_name, 'HARMONIZED']]
-        print(f"Anchoring analysis to {self.baseline_name}. Evaluating Target Grids: {target_grids}")
+        print(f"Anchoring analysis sequentially (Frame to Frame) within {self.baseline_name}.")
 
-        for t_grid in target_grids:
-            print(f"\n{'='*40}\nProcessing Base: {self.baseline_name} <-> Target: {t_grid}\n{'='*40}")
-            t_grp = self.h5_ard[f'/HDFEOS/GRIDS/{t_grid}/Data Fields']
-            t_times = t_grp['surface_reflectance'].attrs['acquisition_time']
+        print(f"\n{'='*40}\nProcessing Frame-to-Frame: {self.baseline_name}\n{'='*40}")
+        
+        for i in range(num_frames - 1):
+            b_idx = i
+            t_idx = i + 1
             
-            for t_idx, t_time in enumerate(t_times):
-                t_dt = datetime.fromtimestamp(t_time, tz=timezone.utc)
-                
-                b_before_indices = np.where(b_times < t_time)[0]
-                b_after_indices = np.where(b_times > t_time)[0]
-                
-                b_prev_idx = b_before_indices[-1] if len(b_before_indices) > 0 else None
-                b_next_idx = b_after_indices[0] if len(b_after_indices) > 0 else None
-                
-                if b_prev_idx is not None:
-                    self._compute_and_store(t_grp, t_grid, b_prev_idx, t_idx, b_times[b_prev_idx], t_dt, f"{self.baseline_name}_prev (Before)")
-                
-                if b_next_idx is not None:
-                    self._compute_and_store(t_grp, t_grid, b_next_idx, t_idx, b_times[b_next_idx], t_dt, f"{self.baseline_name}_next (After)")
+            b_time = times[b_idx]
+            t_time = times[t_idx]
+            
+            t_dt = datetime.fromtimestamp(t_time, tz=timezone.utc)
+            
+            self._compute_and_store(self.b_grp, self.baseline_name, b_idx, t_idx, b_time, t_dt, f"Frame {b_idx} -> {t_idx}")
 
     def _compute_and_store(self, t_grp, t_grid, b_idx, t_idx, b_time, t_dt, bracket_label):
         b_dt = datetime.fromtimestamp(b_time, tz=timezone.utc)
@@ -267,100 +260,111 @@ class MultiSensorCoRegistrationViewer:
         })
 
     def _plot_longitudinal_summary(self):
-        """Builds a unified 3-panel statistical overview of temporal registration drift across all target sensors."""
+        """Builds a unified 3-panel statistical overview of frame-to-frame registration drift."""
         valid_comps = [c for c in self.comparisons if c['valid']]
         if not valid_comps: return
         
-        target_grids = list(set([c['t_grid'] for c in valid_comps]))
-        
         self.fig_sum, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(14, 12), sharex=True)
-        self.fig_sum.canvas.manager.set_window_title("Multi-Sensor Baseline Stability")
+        self.fig_sum.canvas.manager.set_window_title("Sequential Frame-to-Frame Stability")
         
-        # 1. Establish Vertical Epoch Bands aligned to the Anchor Grid
-        unique_b_dates = sorted(list(set(c['b_dt'] for c in valid_comps)))
-        for ax in [ax1, ax2, ax3]:
-            for b_date in unique_b_dates:
-                # Draws a 4-day wide visual band centered on the Anchor acquisition
-                ax.axvspan(b_date - timedelta(days=2), b_date + timedelta(days=2), 
-                           color='purple', alpha=0.2, zorder=0, lw=0)
+        frame_indices = [c['t_idx'] for c in valid_comps]
         
-        colors = plt.cm.tab10(np.linspace(0, 1, len(target_grids)))
+        mags = [c['mag'] for c in valid_comps]
+        rots = [abs(c['opt_theta']) for c in valid_comps]
+        corrs = [c['corr'] for c in valid_comps]
         
-        for i, t_grid in enumerate(target_grids):
-            grid_comps = [c for c in valid_comps if c['t_grid'] == t_grid]
-            
-            # 2. Separate into "Before" and "After" temporal brackets
-            prev_comps = sorted([c for c in grid_comps if 'prev' in c['label']], key=lambda x: x['b_dt'])
-            next_comps = sorted([c for c in grid_comps if 'next' in c['label']], key=lambda x: x['b_dt'])
-            
-            # 3. Plot Connected Bracketing Vectors vs the Anchor X-Axis
-            if prev_comps:
-                dates = [c['b_dt'] for c in prev_comps]
-                mags = [c['mag'] for c in prev_comps]
-                rots = [abs(c['opt_theta']) for c in prev_comps]
-                corrs = [c['corr'] for c in prev_comps]
-                
-                ax1.plot(dates, mags, color=colors[i], marker='^', markersize=10, linestyle='--', label=f'{t_grid} Frame Before ($L_{{-1}}$)', zorder=3)
-                ax2.plot(dates, rots, color=colors[i], marker='^', markersize=10, linestyle='--', zorder=3)
-                ax3.plot(dates, corrs, color=colors[i], marker='^', markersize=10, linestyle='--', zorder=3)
-                
-            if next_comps:
-                dates = [c['b_dt'] for c in next_comps]
-                mags = [c['mag'] for c in next_comps]
-                rots = [abs(c['opt_theta']) for c in next_comps]
-                corrs = [c['corr'] for c in next_comps]
-                
-                # Use a dotted line and downward triangle for the trailing bracket
-                ax1.plot(dates, mags, color=colors[i], marker='v', markersize=10, linestyle=':', label=f'{t_grid} Frame After ($L_{{+1}}$)', zorder=3)
-                ax2.plot(dates, rots, color=colors[i], marker='v', markersize=10, linestyle=':', zorder=3)
-                ax3.plot(dates, corrs, color=colors[i], marker='v', markersize=10, linestyle=':', zorder=3)
-            
-            print(f"\n--- {t_grid} vs {self.baseline_name} Baseline Averages ---")
-            mags_all = [c['mag'] for c in grid_comps]
-            rots_all = [abs(c['opt_theta']) for c in grid_comps]
-            corrs_all = [c['corr'] for c in grid_comps]
-            print(f"Valid Evaluations: {len(mags_all)}")
-            print(f"Mean Translation:  {np.mean(mags_all):.2f}m")
-            print(f"Mean Abs Rotation: {np.mean(rots_all):.3f}°")
-            print(f"Mean Correlation:  {np.mean(corrs_all):.3f}")
+        ax1.plot(frame_indices, mags, color='blue', marker='o', linestyle='-', zorder=3)
+        ax2.plot(frame_indices, rots, color='red', marker='o', linestyle='-', zorder=3)
+        ax3.plot(frame_indices, corrs, color='green', marker='o', linestyle='-', zorder=3)
+        
+        print(f"\n--- {self.baseline_name} Frame-to-Frame Averages ---")
+        print(f"Valid Evaluations: {len(mags)}")
+        print(f"Mean Translation:  {np.mean(mags):.2f}m")
+        print(f"Mean Abs Rotation: {np.mean(rots):.3f}°")
+        print(f"Mean Correlation:  {np.mean(corrs):.3f}")
 
         # Labeling and Formatting
         ax1.set_ylabel("Offset Magnitude (Meters)", fontsize=10)
-        ax1.set_title("Geometric Translation Drift over Time", fontsize=10)
+        ax1.set_title("Frame-to-Frame Geometric Translation Drift", fontsize=10)
         ax1.grid(True, alpha=0.3, linestyle='--')
-        ax1.legend(loc='upper left', fontsize=10)
         
         ax2.axhline(0, color='black', linewidth=1, alpha=0.5) 
         ax2.set_ylabel("Rotation (Degrees)", fontsize=10)
-        ax2.set_title("Rotational Misalignment over Time", fontsize=10)
+        ax2.set_title("Frame-to-Frame Rotational Misalignment", fontsize=10)
         ax2.grid(True, alpha=0.3, linestyle='--')
 
         ax3.set_ylabel("Pearson Correlation (r)", fontsize=10)
-        ax3.set_title("Correlation Coefficient over Time", fontsize=10)
-        ax3.set_xlabel(f"{self.baseline_name} Acquisition Date", fontsize=10)
+        ax3.set_title("Frame-to-Frame Correlation Coefficient", fontsize=10)
+        ax3.set_xlabel("Frame Index (Target Frame)", fontsize=10)
         ax3.grid(True, alpha=0.3, linestyle='--')
         
-        ax3.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
-        ax3.tick_params(axis='x', rotation=45)
-        
-        self.fig_sum.suptitle(f"Temporal Bracketing Registration Analysis | Window: {SPAN}x{SPAN}px")
+        self.fig_sum.suptitle(f"Sequential Frame-to-Frame Registration Analysis | Window: {SPAN}x{SPAN}px")
         self.fig_sum.tight_layout()
+        
+        # --- Option B: 2D Scatter/Density Heatmap of Global Shifts ---
+        shift_x = [c['shift_m_x'] for c in valid_comps]
+        shift_y = [c['shift_m_y'] for c in valid_comps]
+        
+        self.fig_heat, self.ax_heat = plt.subplots(figsize=(10, 8))
+        self.fig_heat.canvas.manager.set_window_title("2D Registration Error Heatmap")
+        
+        h = self.ax_heat.hist2d(shift_x, shift_y, bins=30, cmap='inferno')
+        self.fig_heat.colorbar(h[3], ax=self.ax_heat, label='Frequency')
+        
+        self.ax_heat.set_xlabel("Shift X (Meters)")
+        self.ax_heat.set_ylabel("Shift Y (Meters)")
+        self.ax_heat.set_title(f"2D Scatter/Density Heatmap of Global Shifts: {self.baseline_name}")
+        self.ax_heat.grid(True, alpha=0.3, linestyle='--')
+        
+        stats_str = (f"Summary Statistics:\n"
+                     f"Valid Evaluations: {len(mags)}\n"
+                     f"Mean Translation: {np.mean(mags):.2f}m\n"
+                     f"Mean Abs Rotation: {np.mean(rots):.3f}°\n"
+                     f"Mean Correlation: {np.mean(corrs):.3f}")
+        
+        props = dict(boxstyle='round', facecolor='wheat', alpha=0.9)
+        self.ax_heat.text(0.05, 0.95, stats_str, transform=self.ax_heat.transAxes, fontsize=11,
+                          verticalalignment='top', bbox=props)
+                     
+        self.fig_heat.tight_layout()
+        self.fig_heat.savefig(f"registration_error_heatmap_{Location}.png", dpi=300)
 
     def _init_ui(self):
         self.fig, (self.ax1, self.ax2) = plt.subplots(1, 2, figsize=(15, 7))
         self.fig.canvas.manager.set_window_title("Interactive Multi-Sensor Analytics")
         self.fig.subplots_adjust(bottom=0.22, top=0.85, wspace=0.4)
         
-        ax_prev = self.fig.add_axes([0.41, 0.05, 0.08, 0.05])
-        ax_next = self.fig.add_axes([0.51, 0.05, 0.08, 0.05])
+        ax_prev = self.fig.add_axes([0.35, 0.05, 0.08, 0.05])
+        ax_next = self.fig.add_axes([0.45, 0.05, 0.08, 0.05])
+        ax_jump = self.fig.add_axes([0.65, 0.05, 0.06, 0.05])
+        
         self.btn_prev = Button(ax_prev, '<< Prev')
         self.btn_next = Button(ax_next, 'Next >>')
+        self.text_box = TextBox(ax_jump, 'Jump to Frame: ', initial='')
+        
         self.btn_prev.on_clicked(self._on_prev)
         self.btn_next.on_clicked(self._on_next)
+        self.text_box.on_submit(self._on_jump)
         
         self.status_text = self.fig.text(0.5, 0.15, "", ha='center', va='center', fontsize=10)
         self.stats_annotation = self.fig.text(0.5, 0.5, "", ha='center', va='center', 
                                               fontsize=10, bbox=dict(boxstyle='round', facecolor='white', alpha=0.9))
+
+    def _on_jump(self, text):
+        try:
+            target_frame = int(text)
+            best_idx = 0
+            min_diff = float('inf')
+            for i, comp in enumerate(self.comparisons):
+                diff = min(abs(comp['b_idx'] - target_frame), abs(comp['t_idx'] - target_frame))
+                if diff < min_diff:
+                    min_diff = diff
+                    best_idx = i
+            
+            self.current_idx = best_idx
+            self.update_display()
+        except ValueError:
+            print(f"Invalid frame number: {text}")
 
     def _on_prev(self, event):
         if self.current_idx > 0:
@@ -384,8 +388,20 @@ class MultiSensorCoRegistrationViewer:
         t_date_str = comp['t_dt'].strftime('%Y-%m-%d')
         b_date_str = comp['b_dt'].strftime('%Y-%m-%d')
         
+        b_idx = comp['b_idx']
+        t_idx = comp['t_idx']
+        
+        if 'source_spacecraft' in self.b_grp['ortho_visual'].attrs:
+            b_sc_raw = self.b_grp['ortho_visual'].attrs['source_spacecraft'][b_idx]
+            t_sc_raw = self.b_grp['ortho_visual'].attrs['source_spacecraft'][t_idx]
+            b_sc = b_sc_raw.decode('utf-8') if isinstance(b_sc_raw, bytes) else b_sc_raw
+            t_sc = t_sc_raw.decode('utf-8') if isinstance(t_sc_raw, bytes) else t_sc_raw
+        else:
+            b_sc = self.baseline_name
+            t_sc = comp['t_grid']
+        
         status = f"Pair {self.current_idx + 1} of {len(self.comparisons)} | Target: Lat {comp.get('lat', 0):.5f}, Lon {comp.get('lon', 0):.5f}\n"
-        status += f"{comp['t_grid']} {t_date_str} | Anchor: {self.baseline_name} {b_date_str} [{comp['label']}: {comp['delta_days']:+.1f} days]"
+        status += f"Target Frame: {t_idx} [{t_sc}] ({t_date_str}) | Anchor Frame: {b_idx} [{b_sc}] ({b_date_str}) [{comp['label']}]"
         self.status_text.set_text(status)
 
         if comp['valid']:
@@ -401,7 +417,7 @@ class MultiSensorCoRegistrationViewer:
             self.ax1.axhline(comp['rel_center_y'], color='red', linestyle='--', lw=1, alpha=0.8)
             self.ax1.axvline(comp['rel_center_x'], color='red', linestyle='--', lw=1, alpha=0.8)
             self.ax1.plot(comp['rel_center_x'], comp['rel_center_y'], 'r+', markersize=15, mew=2, label='Target Focus')
-            self.ax1.set_title(f"Anchor: {self.baseline_name} ({b_date_str})")
+            self.ax1.set_title(f"Anchor: {b_sc} ({b_date_str})")
             self.ax1.legend(loc='lower right')
 
             self.stats_annotation.set_color('black')
@@ -419,7 +435,7 @@ class MultiSensorCoRegistrationViewer:
             self.ax2.annotate('', xy=(true_x, true_y), xytext=(comp['rel_center_x'], comp['rel_center_y']),
                               arrowprops=dict(arrowstyle='->', color='blue', lw=2))
                          
-            self.ax2.set_title(f"Evaluated: {comp['t_grid']} ({t_date_str})")
+            self.ax2.set_title(f"Evaluated: {t_sc} ({t_date_str})")
             self.ax2.legend(loc='lower right')
 
             stats_text = (f"Calculated Misregistration:\n\n"
@@ -433,8 +449,8 @@ class MultiSensorCoRegistrationViewer:
             self.stats_annotation.set_text(stats_text)
             
         else:
-            self.ax1.set_title(f"Anchor: {self.baseline_name} ({b_date_str})\n[CALCULATION ABORTED]")
-            self.ax2.set_title(f"Evaluated: {comp['t_grid']} ({t_date_str})\n[CALCULATION ABORTED]")
+            self.ax1.set_title(f"Anchor: {b_sc} ({b_date_str})\n[CALCULATION ABORTED]")
+            self.ax2.set_title(f"Evaluated: {t_sc} ({t_date_str})\n[CALCULATION ABORTED]")
             self.stats_annotation.set_text(f"DATA INTEGRITY FAILURE\n\n{comp['error_msg']}")
             self.stats_annotation.set_color('red')
 
