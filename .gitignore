@@ -190,3 +190,8 @@ cython_debug/
 *.woff
 *.docx
 *.html
+data_format_docs/1D-CNN Architecture V2.md
+data_format_docs/Agent Implementation Instructions.md
+data_format_docs/Architectural Specification.md
+data_format_docs/implementation_plan.md
+data_format_docs/README.md
