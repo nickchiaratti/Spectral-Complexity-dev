@@ -18,6 +18,7 @@ import HLS30.HLS30_earthAccess_to_hdf5 as HLS30_earthAccess_to_hdf5
 import Harmonized_SC.HLST_constellation_to_hdf5 as HLST_constellation_to_hdf5
 import Harmonized_SC.HLST_SC_calculations as HLST_SC_calculations
 import Harmonized_SC.HLST_specComplex_viewer as HLST_specComplex_viewer
+import Harmonized_SC.plot_sampling_rate as plot_sampling_rate
 
 # ==========================================
 # PIPELINE CONFIGURATION
@@ -49,6 +50,14 @@ def main():
                         help='Target location to process (e.g., Rochesterv2, Malibu). Overrides current_run in yaml.')
     parser.add_argument('--show-view', action='store_true',
                         help='Do not skip the interactive mgrs_view step')
+    parser.add_argument('--show-spec-viewer', action='store_true',
+                        help='Do not skip the interactive SpecComplex viewer step')
+    parser.add_argument('--tile-size', type=int, default=3,
+                        help='Tile size for spatial sliding window calculation')
+    parser.add_argument('--num-endmembers', type=int, default=7,
+                        help='Number of endmembers to extract')
+    parser.add_argument('--norm-param', type=str, default='bandCount',
+                        help='Normalization parameter (e.g. bandCount)')
     args = parser.parse_args()
 
     # Load configuration
@@ -63,6 +72,7 @@ def main():
         ("HLS30_earthAccess_to_hdf5", HLS30_earthAccess_to_hdf5.main),
         ("HLST_constellation_to_hdf5", HLST_constellation_to_hdf5.main),
         ("HLST_SC_calculations", HLST_SC_calculations.main),
+        ("plot_sampling_rate", plot_sampling_rate.analyze_sampling_rate),
         ("HLST_specComplex_viewer", HLST_specComplex_viewer.main)
     ]
 
@@ -81,10 +91,22 @@ def main():
                 print("Please interact with the browser window, then click 'Close App & Continue Pipeline' to proceed.")
                 subprocess.run([sys.executable, "-m", "streamlit", "run", script_path], check=True)
                 continue
+        elif name == "HLST_SC_calculations":
+            func(target_location=target_location, tile_size=args.tile_size, num_endmembers=args.num_endmembers, norm_param=args.norm_param)
+            continue
+        elif name == "plot_sampling_rate":
+            print(f"Plotting sampling rate for {location_name}...")
+            file_path = f"{SATELLITE_DATA_DIR}/HLST_{location_name}_Harmonized_SC_EM-{args.num_endmembers}_Norm-{args.norm_param}.h5"
+            func(h5_path=file_path)
+            continue
         elif name == "HLST_specComplex_viewer":
+            if not args.show_spec_viewer:
+                print("Skipping HLST_specComplex_viewer as requested.")
+                continue
+                
             print(f"Launching SpecComplex Viewer for {location_name}...")
             # Compute file path based on default naming convention in calculation script
-            file_path = f"{SATELLITE_DATA_DIR}/HLST_{location_name}_Harmonized_SC_EM-7_Norm-bandCount.h5"
+            file_path = f"{SATELLITE_DATA_DIR}/HLST_{location_name}_Harmonized_SC_EM-{args.num_endmembers}_Norm-{args.norm_param}.h5"
             
             # Extract start and end year from config
             start_date_str = loc_config.get("START_DATE", "2024-01-01")

@@ -165,18 +165,18 @@ def compute_frame_metrics(payload):
             'telemetry': telemetry
         }
 
-def main(target_location=None):
+def main(target_location=None, tile_size=3, num_endmembers=7, norm_param='bandCount'):
 
     # ==========================================
     # 1. CONFIGURATION & FEATURE TOGGLES
     # ==========================================
-    TILE_SIZE = 3        
+    TILE_SIZE = tile_size        
     SLIDING_STRIDE = 1      
     #Z_SCORE_WINDOW_SIZE = 11
 
-    NUM_ENDMEMBERS = 7
+    NUM_ENDMEMBERS = num_endmembers
     CUSTOM_SUFFIX = ''
-    NORM_PARAM = 'bandCount'
+    NORM_PARAM = norm_param
     MASKING = True 
 
     # --- ANALYTICAL FEATURE TOGGLES ---
