@@ -101,7 +101,7 @@ def main():
             continue
         elif name == "HLST_specComplex_viewer":
             if not args.show_spec_viewer:
-                print("Skipping HLST_specComplex_viewer as requested.")
+                print("Skipping HLST_specComplex_viewer.")
                 continue
                 
             print(f"Launching SpecComplex Viewer for {location_name}...")
@@ -110,7 +110,7 @@ def main():
             
             # Extract start and end year from config
             start_date_str = loc_config.get("START_DATE", "2024-01-01")
-            end_date_str = loc_config.get("END_DATE", "2025-01-01")
+            end_date_str = loc_config.get("END_DATE", "2026-01-01")
             start_year = int(start_date_str.split("-")[0])
             end_year = int(end_date_str.split("-")[0])
             

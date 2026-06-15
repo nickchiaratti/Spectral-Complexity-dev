@@ -1,26 +1,20 @@
 import os
+import sys
 import json
 import h5py
 import numpy as np
 import pandas as pd
 from datetime import datetime
 from pathlib import Path
-
-# Add Anaconda directories to PATH so Py6S can locate the sixs.exe binary and its DLLs
-conda_base = r"C:\Users\katie\anaconda3"
-for p in [os.path.join(conda_base, "Library", "bin"), 
-          os.path.join(conda_base, "Scripts"), 
-          os.path.join(conda_base, "Library", "mingw-w64", "bin")]:
-    os.environ["PATH"] = p + os.pathsep + os.environ.get("PATH", "")
-
 from Py6S import SixS, AtmosProfile, AeroProfile, Geometry, Wavelength
 from pyproj import Transformer
 from tqdm import tqdm
 from joblib import Parallel, delayed
+from Py6S import AtmosCorr
 
 # --- Configuration ---
 SOURCE_DIR = "C:/satelliteImagery/Tanager/Rochesterv2_SourceData"
-AERONET_FILE = r"C:\satelliteImagery\ground_truth\AERONET_20250101_20251231_ROCX2025\20250101_20251231_ROCX2025.tot_lev20"
+AERONET_FILE = "C:/satelliteImagery/ground_truth/AERONET_20250101_20251231_ROCX2025/20250101_20251231_ROCX2025.tot_lev20"
 
 def get_aeronet_aod(aeronet_path):
     """Parses AERONET Level 2.0, calculates daily means, interpolates gaps, and derives AOD at 550nm."""
@@ -98,12 +92,15 @@ def run_6s_band(wavelength_um, fwhm_um, sza, saa, vza, vaa, aod, lat, acq_date):
     
     return s.outputs.coef_xa, s.outputs.coef_xb, s.outputs.coef_xc
 
-def process_py6s():
+def process_py6s(target_file=None):
     aod_series = get_aeronet_aod(AERONET_FILE)
     
     source_dir = Path(SOURCE_DIR)
     # Search for un-stacked basic_radiance scenes
-    h5_files = list(source_dir.rglob("*basic_radiance*.h5"))
+    if target_file:
+        h5_files = list(source_dir.rglob(f"*{target_file}*basic_radiance*.h5"))
+    else:
+        h5_files = list(source_dir.rglob("*basic_radiance*.h5"))
     
     if not h5_files:
         print(f"No basic_radiance HDF5 files found in {SOURCE_DIR}")
@@ -292,4 +289,5 @@ def process_py6s():
     print("Py6S processing complete.")
 
 if __name__ == "__main__":
-    process_py6s()
+    target = sys.argv[1] if len(sys.argv) > 1 else None
+    process_py6s(target)
