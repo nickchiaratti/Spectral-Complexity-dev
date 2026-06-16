@@ -8,8 +8,8 @@ import math
 class SITSDataset(Dataset):
     def __init__(self, h5_path, mode='calibration', train_end_date="2024-01-01", 
                  consecutive_anomalies=3, time_window_years=3.0, 
-                 enable_elastic_window=True, max_elastic_window_years=5.0, 
-                 min_samples=38):
+                 enable_elastic_window=False, max_elastic_window_years=5.0, 
+                 min_samples=38, temporal_decay_rate=0.05):
         """
         mode: 'calibration' (pre-train_end_date) or 'monitoring' (post-train_end_date) or 'all' (for inference context)
         """
@@ -21,6 +21,7 @@ class SITSDataset(Dataset):
         self.enable_elastic_window = enable_elastic_window
         self.max_elastic_window_years = max_elastic_window_years
         self.min_samples = min_samples
+        self.temporal_decay_rate = temporal_decay_rate
         
         # Explicit temporal periods (in years) to capture sub-harmonics and multi-year patterns
         self.temporal_periods = [1.0, 0.5, 0.33, 0.25]
@@ -188,17 +189,21 @@ class SITSDataset(Dataset):
             dt_years_norm.to(torch.float32)
         ] + dt_features + [pixel_z]
         
-        history = torch.stack(feature_list, dim=-1)
+        combined_features = torch.stack(feature_list, dim=-1)
+        in_channels = combined_features.shape[-1]
         
         # Pad sequence and create mask
-        pad_len = MAX_SEQ_LEN - seq_len
-        num_channels = history.shape[-1]
-        if pad_len > 0:
-            pad_tensor = torch.zeros((pad_len, num_channels), dtype=torch.float32)
-            history = torch.cat([pad_tensor, history], dim=0)
-            seq_mask = torch.cat([torch.zeros(pad_len, dtype=torch.bool), torch.ones(seq_len, dtype=torch.bool)], dim=0)
-        else:
-            seq_mask = torch.ones(MAX_SEQ_LEN, dtype=torch.bool)
+        X_seq = torch.zeros(MAX_SEQ_LEN, in_channels, dtype=torch.float32)
+        if seq_len > 0:
+            X_seq[-seq_len:] = combined_features
+            
+        # Create temporal decay weights for the sequence mask
+        temporal_weights = 1.0 - torch.exp(-self.temporal_decay_rate * delta_t.float())
+        
+        # Sequence mask (padding mask, now carrying temporal decay weights)
+        seq_mask = torch.zeros(MAX_SEQ_LEN, dtype=torch.float32)
+        if seq_len > 0:
+            seq_mask[-seq_len:] = temporal_weights
         
         # Targets Temporal Features
         target_acq_times = self.acq_time[target_idx]
@@ -228,7 +233,7 @@ class SITSDataset(Dataset):
         
         metadata = [y, x, ts21, ts_last] + [t.item() for t in targets]
         return {
-            'X_seq': history,
+            'X_seq': X_seq,
             'X_targets': X_targets,
             'seq_mask': seq_mask,
             'Y_target': targets,

@@ -7,20 +7,20 @@ import numpy as np
 import h5py
 import os
 from tqdm import tqdm
-from pnpxai.explainers import IntegratedGradients
+from pnpxai.explainers import IntegratedGradients, LRPEpsilonPlus, DeepLiftShap
 from pnpxai.evaluator.metrics import Sensitivity, Complexity
 
 def enable_mc_dropout(m):
     if type(m) == nn.Dropout:
         m.train()
 
-def train_and_evaluate(h5_path, output_h5='inference_results.h5', weights_path='sits_baseline_weights_pre2024.pth', train_end_date="2024-01-01", skip_training=False, mc_samples=50, confidence_multiplier=3.0, consecutive_anomalies=3, time_window_years=3.0, enable_elastic_window=True, max_elastic_window_years=5.0, min_samples=38):
+def train_and_evaluate(h5_path, output_h5='inference_results.h5', weights_path='sits_baseline_weights_pre2024.pth', train_end_date="2024-01-01", skip_training=False, mc_samples=50, confidence_multiplier=3.0, consecutive_anomalies=3, time_window_years=3.0, enable_elastic_window=True, max_elastic_window_years=5.0, min_samples=25, temporal_decay_rate=0.05):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print("Loading Calibration Dataset...")
     cal_dataset = SITSDataset(h5_path, mode='calibration', train_end_date=train_end_date,
                               consecutive_anomalies=consecutive_anomalies, time_window_years=time_window_years,
                               enable_elastic_window=enable_elastic_window, max_elastic_window_years=max_elastic_window_years,
-                              min_samples=min_samples)
+                              min_samples=min_samples, temporal_decay_rate=temporal_decay_rate)
     
     if len(cal_dataset) == 0:
         print("No valid calibration data found.")
@@ -41,7 +41,7 @@ def train_and_evaluate(h5_path, output_h5='inference_results.h5', weights_path='
         
         print(f"Training on {len(cal_dataset)} sequences...")
         model.train()
-        epochs = 30 
+        epochs = 10 
         for epoch in range(epochs):
             epoch_loss = 0.0
             for batch in tqdm(cal_loader, desc=f"Epoch {epoch+1}/{epochs}", leave=False):
@@ -138,6 +138,8 @@ def train_and_evaluate(h5_path, output_h5='inference_results.h5', weights_path='
         ('Attr_ToD', 'float32'),
         ('Attr_dt', 'float32'),
         ('Attr_ZScore', 'float32'),
+        ('Attr_LRP_ZScore', 'float32'),
+        ('Attr_SHAP_ZScore', 'float32'),
         ('Explainer_Fidelity', 'float32'),
         ('Explainer_Sensitivity', 'float32'),
         ('Explainer_Complexity', 'float32')
@@ -228,6 +230,8 @@ def train_and_evaluate(h5_path, output_h5='inference_results.h5', weights_path='
                 attr_tod = np.full(batch_size, np.nan, dtype=np.float32)
                 attr_dt = np.full(batch_size, np.nan, dtype=np.float32)
                 attr_zscore = np.full(batch_size, np.nan, dtype=np.float32)
+                attr_lrp_zscore = np.full(batch_size, np.nan, dtype=np.float32)
+                attr_shap_zscore = np.full(batch_size, np.nan, dtype=np.float32)
                 
                 explainer_fidelity = np.full(batch_size, np.nan, dtype=np.float32)
                 explainer_sensitivity = np.full(batch_size, np.nan, dtype=np.float32)
@@ -249,45 +253,75 @@ def train_and_evaluate(h5_path, output_h5='inference_results.h5', weights_path='
                             self.mask = mask
                             
                         def forward(self, x):
-                            return self.base_model(x, self.targets, self.mask)
+                            batch_ratio = x.size(0) // self.targets.size(0)
+                            if batch_ratio > 1:
+                                t = self.targets.repeat(batch_ratio, *([1] * (self.targets.dim() - 1)))
+                                m = self.mask.repeat(batch_ratio, *([1] * (self.mask.dim() - 1)))
+                            else:
+                                t = self.targets
+                                m = self.mask
+                            return self.base_model(x, t, m)
                             
                     wrapped_model = PnPXAIWrapper(model, X_targets_anom, seq_mask_anom)
                     
-                    explainer = IntegratedGradients(wrapped_model)
-                    metric_sens = Sensitivity(model=wrapped_model, explainer=explainer)
-                    metric_comp = Complexity(model=wrapped_model, explainer=explainer)
+                    # Initialize Explainers
+                    explainer_ig = IntegratedGradients(wrapped_model)
+                    explainer_lrp = LRPEpsilonPlus(wrapped_model)
+                    explainer_shap = DeepLiftShap(wrapped_model)
                     
-                    # Compute Attributions using Integrated Gradients
-                    attr_X_seq = explainer.attribute(
-                        inputs=X_seq_anom,
-                        targets=0
-                    )
+                    # Compute Attributions (Full Batch)
+                    eval_targets = torch.zeros(X_seq_anom.size(0), dtype=torch.long, device=device)
                     
-                    # Compute Evaluations
-                    # Fidelity requires perturbing the model and is extremely slow for some models, so we'll evaluate Sensitivity and Complexity
-                    sens_scores = metric_sens.evaluate(
-                        inputs=X_seq_anom,
-                        targets=0,
-                        attributions=attr_X_seq
-                    )
+                    attr_ig = explainer_ig.attribute(inputs=X_seq_anom, targets=eval_targets)
+                    attr_lrp = explainer_lrp.attribute(inputs=X_seq_anom, targets=eval_targets)
                     
-                    comp_scores = metric_comp.evaluate(
-                        inputs=X_seq_anom,
-                        targets=0,
-                        attributions=attr_X_seq
-                    )
+                    # DeepLiftShap requires a baseline distribution. We use zero tensors for simplicity.
+                    baselines = torch.zeros_like(X_seq_anom)
+                    attr_shap = explainer_shap.attribute(inputs=X_seq_anom, targets=eval_targets, baselines=baselines)
                     
-                    if isinstance(attr_X_seq, torch.Tensor):
-                        attr_X_seq_np = attr_X_seq.cpu().numpy()
+                    # Compute Evaluations (Element-by-Element due to Sensitivity's internal batching)
+                    sens_scores_list = []
+                    comp_scores_list = []
+                    
+                    for i in range(len(X_seq_anom)):
+                        x_i = X_seq_anom[i:i+1]
+                        t_i = X_targets_anom[i:i+1]
+                        m_i = seq_mask_anom[i:i+1]
+                        a_i = attr_ig[i:i+1]
+                        tgt_i = eval_targets[i:i+1]
+                        
+                        w_single = PnPXAIWrapper(model, t_i, m_i)
+                        expl_single = IntegratedGradients(w_single)
+                        
+                        metric_sens = Sensitivity(model=w_single, explainer=expl_single)
+                        metric_comp = Complexity(model=w_single, explainer=expl_single)
+                        
+                        sens_scores_list.append(metric_sens.evaluate(x_i, targets=tgt_i, attributions=a_i))
+                        comp_scores_list.append(metric_comp.evaluate(x_i, targets=tgt_i, attributions=a_i))
+                        
+                    sens_scores = torch.cat(sens_scores_list)
+                    comp_scores = torch.cat(comp_scores_list)
+                    
+                    if isinstance(attr_ig, torch.Tensor):
+                        attr_ig_np = attr_ig.cpu().numpy()
+                        attr_lrp_np = attr_lrp.cpu().numpy() if isinstance(attr_lrp, torch.Tensor) else attr_lrp[0].cpu().numpy()
+                        attr_shap_np = attr_shap.cpu().numpy() if isinstance(attr_shap, torch.Tensor) else attr_shap[0].cpu().numpy()
                     else:
-                        attr_X_seq_np = attr_X_seq[0].cpu().numpy()
+                        attr_ig_np = attr_ig[0].cpu().numpy()
+                        attr_lrp_np = attr_lrp[0].cpu().numpy()
+                        attr_shap_np = attr_shap[0].cpu().numpy()
                     
-                    abs_seq = np.sum(np.abs(attr_X_seq_np), axis=1) # Sum over SeqLen
+                    abs_seq_ig = np.sum(np.abs(attr_ig_np), axis=1) # Sum over SeqLen
+                    abs_seq_lrp = np.sum(np.abs(attr_lrp_np), axis=1)
+                    abs_seq_shap = np.sum(np.abs(attr_shap_np), axis=1)
                     
-                    attr_doy[anom_idx] = np.sum(abs_seq[:, 0:2], axis=1)
-                    attr_tod[anom_idx] = np.sum(abs_seq[:, 2:4], axis=1)
-                    attr_dt[anom_idx] = np.sum(abs_seq[:, 4:-1], axis=1)
-                    attr_zscore[anom_idx] = abs_seq[:, -1]
+                    attr_doy[anom_idx] = np.sum(abs_seq_ig[:, 0:2], axis=1)
+                    attr_tod[anom_idx] = np.sum(abs_seq_ig[:, 2:4], axis=1)
+                    attr_dt[anom_idx] = np.sum(abs_seq_ig[:, 4:-1], axis=1)
+                    attr_zscore[anom_idx] = abs_seq_ig[:, -1]
+                    
+                    attr_lrp_zscore[anom_idx] = abs_seq_lrp[:, -1]
+                    attr_shap_zscore[anom_idx] = abs_seq_shap[:, -1]
                     
                     # Extract Metrics
                     explainer_sensitivity[anom_idx] = sens_scores.cpu().numpy()
@@ -311,6 +345,8 @@ def train_and_evaluate(h5_path, output_h5='inference_results.h5', weights_path='
                 batch_results['Attr_ToD'] = attr_tod
                 batch_results['Attr_dt'] = attr_dt
                 batch_results['Attr_ZScore'] = attr_zscore
+                batch_results['Attr_LRP_ZScore'] = attr_lrp_zscore
+                batch_results['Attr_SHAP_ZScore'] = attr_shap_zscore
                 batch_results['Explainer_Fidelity'] = explainer_fidelity
                 batch_results['Explainer_Sensitivity'] = explainer_sensitivity
                 batch_results['Explainer_Complexity'] = explainer_complexity

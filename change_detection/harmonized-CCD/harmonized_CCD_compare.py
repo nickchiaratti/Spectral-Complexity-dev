@@ -5,6 +5,8 @@ import itertools
 import csv
 from harmonized_CCD_main import main as run_pipeline
 
+LOCATION = "Hurlingham"
+
 def main():
     base_periods = [1.0, 0.5, 0.33, 0.25, 0.1]#0.75, 0.66, 0.1]
     
@@ -33,7 +35,6 @@ def main():
                             configs.append((c, l, q, e, periods, total_terms, config_name))
                             
     print(f"Total configurations to evaluate: {len(configs)}")
-    from harmonized_CCD_main import LOCATION
     
     # Phase 1: Execution
     print("\n--- Phase 1: Pipeline Execution ---")
@@ -65,7 +66,18 @@ def main():
                     mean_bound = np.nanmean(bounds_series)
                     max_bound = np.nanmax(bounds_series)
                     
-                    print(f"  Extracted metrics -> Global Median: {median_bound:.5f}")
+                    anomaly_flags = f['anomaly_flags'][:]
+                    change_count = f['change_count'][:]
+                    
+                    valid_st_mask = ~np.isnan(rmse_series)
+                    num_valid_st = np.sum(valid_st_mask)
+                    st_anomaly_pct = (np.sum(anomaly_flags[valid_st_mask]) / num_valid_st * 100.0) if num_valid_st > 0 else np.nan
+                    
+                    valid_spatial_mask = ~np.all(np.isnan(rmse_series), axis=0)
+                    num_valid_spatial = np.sum(valid_spatial_mask)
+                    spatial_anomaly_pct = (np.sum((change_count > 0) & valid_spatial_mask) / num_valid_spatial * 100.0) if num_valid_spatial > 0 else np.nan
+
+                    print(f"  Extracted metrics -> Global Median: {median_bound:.5f} | Spatial Anomaly: {spatial_anomaly_pct:.2f}%")
                     
                     row_data = {
                         'Config': config_name,
@@ -77,7 +89,9 @@ def main():
                         'Total_Terms': total_terms,
                         'Global_Median_Bound': median_bound,
                         'Global_Mean_Bound': mean_bound,
-                        'Global_Max_Bound': max_bound
+                        'Global_Max_Bound': max_bound,
+                        'ST_Anomaly_Pct': st_anomaly_pct,
+                        'Spatial_Anomaly_Pct': spatial_anomaly_pct
                     }
                     
                     pixels_of_interest = [(78, 28), (131, 69), (33, 73), (29, 65)]
@@ -104,7 +118,7 @@ def main():
 
     # Save results to CSV
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    csv_path = os.path.join(script_dir, "comparative_analysis_results.csv")
+    csv_path = os.path.join(script_dir, f"{LOCATION}_comparative_analysis_results.csv")
     if results:
         keys = results[0].keys()
         with open(csv_path, 'w', newline='') as output_file:
@@ -115,15 +129,16 @@ def main():
         
         # Print summary table
         print(f"\n=== Top 15 Configurations by Lowest Global Median Bound ===")
-        print(f"{'Config':<20} | {'Terms':<6} | {'Glob Med':<10} | {'Glob Mean':<10} | {'P(78,28) Med':<12}")
-        print("-" * 68)
+        print(f"{'Config':<20} | {'Terms':<6} | {'Glob Med':<10} | {'Glob Mean':<10} | {'Anom Pct':<10} | {'P(78,28) Med':<12}")
+        print("-" * 81)
         # Sort by global median bound ascending
         results.sort(key=lambda x: x['Global_Median_Bound'] if not np.isnan(x['Global_Median_Bound']) else float('inf'))
         for r in results[:15]:
             gm = r.get('Global_Median_Bound', np.nan)
             gmean = r.get('Global_Mean_Bound', np.nan)
+            apct = r.get('Spatial_Anomaly_Pct', np.nan)
             p78 = r.get('Px_78_28_Median', np.nan)
-            print(f"{r['Config']:<20} | {r['Total_Terms']:<6} | {gm:<10.5f} | {gmean:<10.5f} | {p78:<12.5f}")
+            print(f"{r['Config']:<20} | {r['Total_Terms']:<6} | {gm:<10.5f} | {gmean:<10.5f} | {apct:<10.2f} | {p78:<12.5f}")
             
         if len(results) > 15:
             print(f"... and {len(results) - 15} more.")

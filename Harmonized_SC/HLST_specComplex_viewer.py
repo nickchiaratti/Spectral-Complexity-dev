@@ -398,8 +398,10 @@ class HarmonizedComplexityViewer:
         # Harmonized mapped variables
         comp_data = self.base_dset[idx, ...].copy()
         mask_data = self.common_mask_dset[idx, ...]
+        
+        comp_data_for_stats = comp_data.copy()
         if MASKING:
-            comp_data[mask_data == 1] = np.nan
+            comp_data_for_stats[mask_data == 1] = np.nan
 
         # RGB handling
         if raw_vis.shape[0] in [3, 4]:
@@ -476,24 +478,32 @@ class HarmonizedComplexityViewer:
         self.ax_vol_curve.set_ylabel("Spectral Complexity")
         self.ax_vol_curve.grid(True, alpha=0.2)
 
-        def update_map(ax, data, im_attr, cbar_attr, title, draw_crosshair=False):
+        def update_map(ax, data, data_for_stats, mask_arr, im_attr, overlay_attr, cbar_attr, title, draw_crosshair=False):
             mh, mw = data.shape
             with np.errstate(all='ignore'):
-                if DISPLAY_NORMALIZATION and not np.all(np.isnan(data)):
-                    v_min, v_max = np.nanpercentile(data, (2, 98))
+                if DISPLAY_NORMALIZATION and not np.all(np.isnan(data_for_stats)):
+                    v_min, v_max = np.nanpercentile(data_for_stats, (2, 98))
                 else:
-                    v_min, v_max = np.nanmin(data), np.nanmax(data)
+                    v_min, v_max = np.nanmin(data_for_stats), np.nanmax(data_for_stats)
             if np.isnan(v_min) or np.isnan(v_max):
                 v_min, v_max = 0, 1
             elif v_min == v_max:
                 v_max = v_min + 1e-6
             
-            curr_im = getattr(self, im_attr)
-            curr_cbar = getattr(self, cbar_attr)
+            curr_im = getattr(self, im_attr, None)
+            curr_overlay = getattr(self, overlay_attr, None)
+            curr_cbar = getattr(self, cbar_attr, None)
+
+            overlay_rgba = np.zeros((mh, mw, 4), dtype=np.float32)
+            if MASKING and mask_arr is not None:
+                overlay_rgba[mask_arr == 1] = [1.0, 0.65, 0.0, 0.5]
 
             if curr_im is None:
                 new_im = ax.imshow(data, cmap='viridis', extent=[0, mw, mh, 0], vmin=v_min, vmax=v_max)
                 setattr(self, im_attr, new_im)
+                
+                new_overlay = ax.imshow(overlay_rgba, extent=[0, mw, mh, 0])
+                setattr(self, overlay_attr, new_overlay)
                 
                 if LOG_SCALE:
                     new_cbar = ax.figure.colorbar(new_im, format='%.1e', ax=ax, fraction=0.046, pad=0.04)
@@ -512,15 +522,21 @@ class HarmonizedComplexityViewer:
                     ax.axvline(t_x + 0.5, color=c_color, linestyle=':', linewidth=1.5, alpha=0.7)
                 ax.set_title(title)
                 ax.axis('off')
+                
+                if MASKING and mask_arr is not None:
+                    import matplotlib.patches as mpatches
+                    mask_patch = mpatches.Patch(color=(1.0, 0.65, 0.0, 0.5), label='Masked (Invalid)')
+                    ax.legend(handles=[mask_patch], loc='center left', bbox_to_anchor=(1.25, 0.5), fontsize=9, framealpha=0.8)
             else:
                 curr_im.set_data(data)
                 curr_im.set_clim(vmin=v_min, vmax=v_max)
+                curr_overlay.set_data(overlay_rgba)
                 curr_cbar.update_normal(curr_im)
 
-        update_map(self.ax_slide_map, comp_data, 'im_slide', 'cbar_slide', COMPLEXITY_DICT.get(complexity_type, complexity_type))
+        update_map(self.ax_slide_map, comp_data, comp_data_for_stats, mask_data, 'im_slide', 'overlay_slide', 'cbar_slide', COMPLEXITY_DICT.get(complexity_type, complexity_type))
         
         if DISPLAY_REDUNDANT_FIGURE:
-            update_map(self.ax_slide_map_redundant, comp_data, 'im_slide_redundant', 'cbar_slide_redundant', COMPLEXITY_DICT.get(complexity_type, complexity_type), draw_crosshair=True)
+            update_map(self.ax_slide_map_redundant, comp_data, comp_data_for_stats, mask_data, 'im_slide_redundant', 'overlay_slide_redundant', 'cbar_slide_redundant', COMPLEXITY_DICT.get(complexity_type, complexity_type), draw_crosshair=True)
             
             # Transects
             transect_data = comp_data.copy()
@@ -566,15 +582,26 @@ class HarmonizedComplexityViewer:
             self.ax_chip_rgb.axis('off')
             
             with np.errstate(all='ignore'):
-                valid_chip = comp_chip[~np.isnan(comp_chip)]
+                valid_chip = comp_data_for_stats[y_start:y_end, x_start:x_end]
+                valid_chip = valid_chip[~np.isnan(valid_chip)]
                 if len(valid_chip) > 0:
                     c_min, c_max = np.nanmin(valid_chip), np.nanmax(valid_chip)
                 else:
                     c_min, c_max = 0, 1
             self.ax_chip_comp.imshow(comp_chip, cmap='viridis', vmin=c_min, vmax=c_max)
+            if MASKING:
+                mask_chip = mask_data[y_start:y_end, x_start:x_end]
+                overlay_chip = np.zeros((*mask_chip.shape, 4), dtype=np.float32)
+                overlay_chip[mask_chip == 1] = [1.0, 0.65, 0.0, 0.5]
+                self.ax_chip_comp.imshow(overlay_chip)
             self.ax_chip_comp.axhline(rel_y, color='red', linestyle='--', linewidth=1.5, alpha=0.8)
             self.ax_chip_comp.axvline(rel_x, color='red', linestyle='--', linewidth=1.5, alpha=0.8)
             self.ax_chip_comp.axis('off')
+            
+            if MASKING:
+                import matplotlib.patches as mpatches
+                mask_patch = mpatches.Patch(color=(1.0, 0.65, 0.0, 0.5), label='Masked (Invalid)')
+                self.ax_chip_comp.legend(handles=[mask_patch], loc='lower right', fontsize=7, framealpha=0.8)
             
             self.ax_transect_t.clear()
             if getattr(self, 'ax_transect_t_twin', None) is not None:

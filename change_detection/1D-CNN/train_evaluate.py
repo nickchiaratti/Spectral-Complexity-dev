@@ -250,32 +250,50 @@ def train_and_evaluate(h5_path, output_h5='inference_results.h5', weights_path='
                             self.mask = mask
                             
                         def forward(self, x_seq, x_spatial):
-                            return self.base_model(x_seq, x_spatial, self.targets, self.mask)
+                            batch_ratio = x_seq.size(0) // self.targets.size(0)
+                            if batch_ratio > 1:
+                                t = self.targets.repeat(batch_ratio, *([1] * (self.targets.dim() - 1)))
+                                m = self.mask.repeat(batch_ratio, *([1] * (self.mask.dim() - 1)))
+                            else:
+                                t = self.targets
+                                m = self.mask
+                            return self.base_model(x_seq, x_spatial, t, m)
                             
                     wrapped_model = PnPXAIWrapperSpatial(model, X_targets_anom, seq_mask_anom)
-                    
                     explainer = IntegratedGradients(wrapped_model)
-                    metric_sens = Sensitivity(model=wrapped_model, explainer=explainer)
-                    metric_comp = Complexity(model=wrapped_model, explainer=explainer)
                     
-                    # Compute Attributions using Integrated Gradients
+                    # Compute Attributions using Integrated Gradients (Full Batch)
+                    eval_targets = torch.zeros(X_seq_anom.size(0), dtype=torch.long, device=device)
                     attr_X = explainer.attribute(
                         inputs=(X_seq_anom, X_spatial_anom),
-                        targets=0
+                        targets=eval_targets
                     )
                     
-                    # Compute Evaluations
-                    sens_scores = metric_sens.evaluate(
-                        inputs=(X_seq_anom, X_spatial_anom),
-                        targets=0,
-                        attributions=attr_X
-                    )
+                    # Compute Evaluations (Element-by-Element due to Sensitivity's internal batching)
+                    sens_scores_list = []
+                    comp_scores_list = []
                     
-                    comp_scores = metric_comp.evaluate(
-                        inputs=(X_seq_anom, X_spatial_anom),
-                        targets=0,
-                        attributions=attr_X
-                    )
+                    for i in range(len(X_seq_anom)):
+                        x_seq_i = X_seq_anom[i:i+1]
+                        x_spat_i = X_spatial_anom[i:i+1]
+                        t_i = X_targets_anom[i:i+1]
+                        m_i = seq_mask_anom[i:i+1]
+                        
+                        # Attr is a tuple of (seq, spat)
+                        a_i = (attr_X[0][i:i+1], attr_X[1][i:i+1])
+                        tgt_i = eval_targets[i:i+1]
+                        
+                        w_single = PnPXAIWrapperSpatial(model, t_i, m_i)
+                        expl_single = IntegratedGradients(w_single)
+                        
+                        metric_sens = Sensitivity(model=w_single, explainer=expl_single)
+                        metric_comp = Complexity(model=w_single, explainer=expl_single)
+                        
+                        sens_scores_list.append(metric_sens.evaluate((x_seq_i, x_spat_i), targets=tgt_i, attributions=a_i))
+                        comp_scores_list.append(metric_comp.evaluate((x_seq_i, x_spat_i), targets=tgt_i, attributions=a_i))
+                        
+                    sens_scores = torch.cat(sens_scores_list)
+                    comp_scores = torch.cat(comp_scores_list)
                     
                     # Integrated Gradients returns a tuple of tensors if the input is a tuple
                     attr_X_seq = attr_X[0].cpu().numpy()
