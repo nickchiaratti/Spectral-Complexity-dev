@@ -28,7 +28,7 @@ def tqdm_joblib(tqdm_object):
 # ==========================================
 # 1. CONFIGURATION
 # ==========================================
-LOCATION = "Malibu"
+LOCATION = "Hurlingham"
 H5_PATH = f"C:/satelliteImagery/HLST30/HLST_{LOCATION}_Harmonized_SC_EM-7_Norm-bandCount.h5"
 
 TARGET_METRIC = 'sliding_volume_z_score'

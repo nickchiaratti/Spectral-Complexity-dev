@@ -10,12 +10,12 @@ plt.style.use(['science','no-latex'])
 
 LOCATION = "Malibu"
 H5_PATH = f"C:/satelliteImagery/HLST30/HLST_{LOCATION}_Harmonized_SC_EM-7_Norm-bandCount.h5"
-# "C:\satelliteImagery\HLST30\CCD\Malibu_CCD_Harmonized_Change_Detection_C1L1Q1_P3_E1.h5"
+CONFIG = 'C0L1Q1_P4_E1'
 
 import glob
 
-def get_latest_inference_h5(location):
-    search_pattern = f"C:/satelliteImagery/HLST30/CCD/{location}_CCD_Harmonized_Change_Detection*.h5"
+def get_inference_h5(location, config):
+    search_pattern = f"C:/satelliteImagery/HLST30/CCD/{location}_CCD_Harmonized_Change_Detection_{config}.h5"
     files = glob.glob(search_pattern)
     if not files:
         return None
@@ -221,9 +221,9 @@ def plot_spatial_anomaly_overlay(source_h5_path, inference_results_h5):
     plt.show()
 
 if __name__ == "__main__":
-    latest_inference = get_latest_inference_h5(LOCATION)
-    if latest_inference and os.path.exists(latest_inference):
-        print(f"Loading latest inference results: {latest_inference}")
-        plot_spatial_anomaly_overlay(H5_PATH, latest_inference)
+    inference_h5 = get_inference_h5(LOCATION, CONFIG)
+    if inference_h5 and os.path.exists(inference_h5):
+        print(f"Loading latest inference results: {inference_h5}")
+        plot_spatial_anomaly_overlay(H5_PATH, inference_h5)
     else:
         print("Run harmonized_CCD_main.py first to create output h5")

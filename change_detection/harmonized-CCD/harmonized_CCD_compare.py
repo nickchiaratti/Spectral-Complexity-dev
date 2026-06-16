@@ -25,7 +25,7 @@ def main():
     for c in booleans:
         for l in booleans:
             for q in booleans:
-                for e in booleans:
+                for e in [True]:
                     for periods in period_subsets:
                         periods = list(periods)
                         num_trend_terms = int(c) + int(l) + int(q)

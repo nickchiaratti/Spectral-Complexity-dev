@@ -7,20 +7,20 @@ import numpy as np
 import h5py
 import os
 from tqdm import tqdm
-from pnpxai.explainers import IntegratedGradients, LRPEpsilonPlus, DeepLiftShap
+from pnpxai.explainers import IntegratedGradients, LRPEpsilonPlus, DeepLiftShap, AttentionRollout
 from pnpxai.evaluator.metrics import Sensitivity, Complexity
 
 def enable_mc_dropout(m):
     if type(m) == nn.Dropout:
         m.train()
 
-def train_and_evaluate(h5_path, output_h5='inference_results.h5', weights_path='sits_baseline_weights_pre2024.pth', train_end_date="2024-01-01", skip_training=False, mc_samples=50, confidence_multiplier=3.0, consecutive_anomalies=3, time_window_years=3.0, enable_elastic_window=True, max_elastic_window_years=5.0, min_samples=25, temporal_decay_rate=0.05):
+def train_and_evaluate(h5_path, output_h5='inference_results.h5', weights_path='sits_baseline_weights_pre2024.pth', train_end_date="2024-01-01", skip_training=False, mc_samples=50, confidence_multiplier=3.0, consecutive_anomalies=3, time_window_years=3.0, enable_elastic_window=True, max_elastic_window_years=5.0, min_samples=25):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print("Loading Calibration Dataset...")
     cal_dataset = SITSDataset(h5_path, mode='calibration', train_end_date=train_end_date,
                               consecutive_anomalies=consecutive_anomalies, time_window_years=time_window_years,
                               enable_elastic_window=enable_elastic_window, max_elastic_window_years=max_elastic_window_years,
-                              min_samples=min_samples, temporal_decay_rate=temporal_decay_rate)
+                              min_samples=min_samples)
     
     if len(cal_dataset) == 0:
         print("No valid calibration data found.")
@@ -28,7 +28,7 @@ def train_and_evaluate(h5_path, output_h5='inference_results.h5', weights_path='
         
     cal_loader = DataLoader(cal_dataset, batch_size=4096, shuffle=True, num_workers=16, pin_memory=True)
     
-    in_channels = len(cal_dataset.temporal_periods) * 2 + 6
+    in_channels = len(cal_dataset.temporal_periods) * 2 + 8
     target_features_dim = cal_dataset[0]['X_targets'].shape[-1]
     model = MultiScaleSITSNet(in_channels=in_channels, out_features=1, target_features_dim=target_features_dim).to(device)
     
@@ -140,6 +140,7 @@ def train_and_evaluate(h5_path, output_h5='inference_results.h5', weights_path='
         ('Attr_ZScore', 'float32'),
         ('Attr_LRP_ZScore', 'float32'),
         ('Attr_SHAP_ZScore', 'float32'),
+        ('Attr_Attention', 'float32'),
         ('Explainer_Fidelity', 'float32'),
         ('Explainer_Sensitivity', 'float32'),
         ('Explainer_Complexity', 'float32')
@@ -232,6 +233,7 @@ def train_and_evaluate(h5_path, output_h5='inference_results.h5', weights_path='
                 attr_zscore = np.full(batch_size, np.nan, dtype=np.float32)
                 attr_lrp_zscore = np.full(batch_size, np.nan, dtype=np.float32)
                 attr_shap_zscore = np.full(batch_size, np.nan, dtype=np.float32)
+                attr_attention = np.full(batch_size, np.nan, dtype=np.float32)
                 
                 explainer_fidelity = np.full(batch_size, np.nan, dtype=np.float32)
                 explainer_sensitivity = np.full(batch_size, np.nan, dtype=np.float32)
@@ -271,12 +273,14 @@ def train_and_evaluate(h5_path, output_h5='inference_results.h5', weights_path='
                     explainer_ig = IntegratedGradients(wrapped_model)
                     explainer_lrp = LRPEpsilonPlus(wrapped_model)
                     explainer_shap = DeepLiftShap(wrapped_model, baselines)
+                    explainer_attn = AttentionRollout(wrapped_model)
                     
                     # Compute Attributions (Full Batch)
                     eval_targets = torch.zeros(X_seq_anom.size(0), dtype=torch.long, device=device)
                     
                     attr_ig = explainer_ig.attribute(inputs=X_seq_anom, targets=eval_targets)
                     attr_lrp = explainer_lrp.attribute(inputs=X_seq_anom, targets=eval_targets)
+                    attr_attn = explainer_attn.attribute(inputs=X_seq_anom, targets=eval_targets)
                     
                     attr_shap = explainer_shap.attribute(inputs=X_seq_anom, targets=eval_targets)
                     
@@ -307,14 +311,18 @@ def train_and_evaluate(h5_path, output_h5='inference_results.h5', weights_path='
                         attr_ig_np = attr_ig.cpu().numpy()
                         attr_lrp_np = attr_lrp.cpu().numpy() if isinstance(attr_lrp, torch.Tensor) else attr_lrp[0].cpu().numpy()
                         attr_shap_np = attr_shap.cpu().numpy() if isinstance(attr_shap, torch.Tensor) else attr_shap[0].cpu().numpy()
+                        attr_attn_np = attr_attn.cpu().numpy() if isinstance(attr_attn, torch.Tensor) else attr_attn[0].cpu().numpy()
                     else:
                         attr_ig_np = attr_ig[0].cpu().numpy()
                         attr_lrp_np = attr_lrp[0].cpu().numpy()
                         attr_shap_np = attr_shap[0].cpu().numpy()
+                        attr_attn_np = attr_attn[0].cpu().numpy()
                     
                     abs_seq_ig = np.sum(np.abs(attr_ig_np), axis=1) # Sum over SeqLen
                     abs_seq_lrp = np.sum(np.abs(attr_lrp_np), axis=1)
                     abs_seq_shap = np.sum(np.abs(attr_shap_np), axis=1)
+                    # AttentionRollout outputs sequence-level attention weights directly, no channels to sum.
+                    abs_seq_attn = np.sum(np.abs(attr_attn_np), axis=1) if attr_attn_np.ndim > 2 else attr_attn_np
                     
                     attr_doy[anom_idx] = np.sum(abs_seq_ig[:, 0:2], axis=1)
                     attr_tod[anom_idx] = np.sum(abs_seq_ig[:, 2:4], axis=1)
@@ -323,6 +331,10 @@ def train_and_evaluate(h5_path, output_h5='inference_results.h5', weights_path='
                     
                     attr_lrp_zscore[anom_idx] = abs_seq_lrp[:, -1]
                     attr_shap_zscore[anom_idx] = abs_seq_shap[:, -1]
+                    
+                    # Store attention directly (we store the max or mean attention weight across the sequence if needed)
+                    # For visualization, we just want to know if there's high attention *somewhere*.
+                    attr_attention[anom_idx] = np.max(abs_seq_attn, axis=1) if abs_seq_attn.ndim > 1 else abs_seq_attn
                     
                     # Extract Metrics
                     explainer_sensitivity[anom_idx] = sens_scores.cpu().numpy()
@@ -348,6 +360,7 @@ def train_and_evaluate(h5_path, output_h5='inference_results.h5', weights_path='
                 batch_results['Attr_ZScore'] = attr_zscore
                 batch_results['Attr_LRP_ZScore'] = attr_lrp_zscore
                 batch_results['Attr_SHAP_ZScore'] = attr_shap_zscore
+                batch_results['Attr_Attention'] = attr_attention
                 batch_results['Explainer_Fidelity'] = explainer_fidelity
                 batch_results['Explainer_Sensitivity'] = explainer_sensitivity
                 batch_results['Explainer_Complexity'] = explainer_complexity
