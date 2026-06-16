@@ -8,10 +8,10 @@ import pyproj
 plt.style.use(['science','no-latex'])
 
 LOCATION = "Tait"
-TRAIN_END_YEAR = "2022"
+TRAIN_END_YEAR = "2025"
 OUTPUT_DIR = f"C:/satelliteImagery/HLST30/1D-CNN-{LOCATION}-TrainEnd{TRAIN_END_YEAR}"
 H5_PATH = f"C:/satelliteImagery/HLST30/HLST_{LOCATION}_Harmonized_SC_EM-7_Norm-bandCount.h5"
-INFERENCE_H5 = os.path.join(OUTPUT_DIR, 'inference_results.h5')
+INFERENCE_H5 = os.path.join(OUTPUT_DIR, f'CNN_{LOCATION}_baseline_weights_pre{TRAIN_END_YEAR}.h5')
 
 
 def plot_pixel_sits(pixel_y, pixel_x, source_h5_path, inference_results_h5, ax=None, current_date=None):
@@ -110,6 +110,7 @@ def plot_pixel_sits(pixel_y, pixel_x, source_h5_path, inference_results_h5, ax=N
     if len(pixel_res) > 0:
         pred_dates = []
         anomaly_flags = []
+        confirmed_flags = []
         attr_doy = []
         attr_tod = []
         attr_dt = []
@@ -126,32 +127,28 @@ def plot_pixel_sits(pixel_y, pixel_x, source_h5_path, inference_results_h5, ax=N
         valid_acq_time = acq_time[valid_idx]
         
         for row in pixel_res:
-            t_last = row['Timestamp_T_Last']
-            idx_arr = np.where(valid_acq_time == t_last)[0]
-            if len(idx_arr) == 0: continue
-            idx = idx_arr[0]
+            # The first prediction target is Timestamp_T21
+            target_ts = row['Timestamp_T21']
+            d_target = datetime.fromtimestamp(target_ts, timezone.utc)
             
-            # The first prediction target is the immediate next valid point
-            if idx + 1 < len(valid_acq_time):
-                target_ts = valid_acq_time[idx + 1]
-                d_target = datetime.fromtimestamp(target_ts, timezone.utc)
+            pred_dates.append(d_target)
+            anomaly_flags.append(row['Anomaly_Flag'])
+            confirmed_flags.append(row['Confirmed_Change'])
                 
-                pred_dates.append(d_target)
-                anomaly_flags.append(row['Anomaly_Flag'])
+            if 'Attr_DoY' in pixel_res.dtype.names:
+                attr_doy.append(row['Attr_DoY'])
+                attr_tod.append(row['Attr_ToD'])
+                attr_dt.append(row['Attr_dt'])
+                attr_zscore.append(row['Attr_ZScore'])
                 
-                if 'Attr_DoY' in pixel_res.dtype.names:
-                    attr_doy.append(row['Attr_DoY'])
-                    attr_tod.append(row['Attr_ToD'])
-                    attr_dt.append(row['Attr_dt'])
-                    attr_zscore.append(row['Attr_ZScore'])
-                    
-                for k in range(1, num_preds + 1):
-                    preds[k].append(row[f'Pred_{k}'])
-                    stds[k].append(row[f'Std_{k}'])
+            for k in range(1, num_preds + 1):
+                preds[k].append(row[f'Pred_{k}'])
+                stds[k].append(row[f'Std_{k}'])
                 
         srt = np.argsort(pred_dates)
         pred_dates = np.array(pred_dates)[srt]
         anomaly_flags = np.array(anomaly_flags)[srt]
+        confirmed_flags = np.array(confirmed_flags)[srt]
         
         for k in range(1, num_preds + 1):
             preds[k] = np.array(preds[k])[srt]
@@ -178,7 +175,13 @@ def plot_pixel_sits(pixel_y, pixel_x, source_h5_path, inference_results_h5, ax=N
         # Anomalies
         anom_dates = pred_dates[anomaly_flags == 1]
         anom_vals = preds[1][anomaly_flags == 1]
-        ax.scatter(anom_dates, anom_vals, color='red', s=50, zorder=5, label='Anomaly Flagged')
+        ax.scatter(anom_dates, anom_vals, color='red', s=30, zorder=4, label='Anomaly (Unconfirmed)')
+        
+        # Confirmed Anomalies
+        conf_dates = pred_dates[confirmed_flags == 1]
+        conf_vals = preds[1][confirmed_flags == 1]
+        if len(conf_dates) > 0:
+            ax.scatter(conf_dates, conf_vals, color='darkred', marker='*', s=150, zorder=6, label='Confirmed Structural Change')
         
         # Attribution Bars
         if 'Attr_DoY' in pixel_res.dtype.names:
@@ -282,14 +285,11 @@ def plot_spatial_anomaly_overlay(source_h5_path, inference_results_h5):
     insufficient_data = valid_initial_counts < 23
                 
     for row in res:
-        if row['Anomaly_Flag']:
+        if row['Confirmed_Change'] == 1:
             x, y = row['Pixel_X'], row['Pixel_Y']
             anomaly_counts[y, x] += 1
             if np.isnan(anomaly_map[y, x]) or row['Timestamp_T_Last'] < anomaly_map[y, x]:
                 anomaly_map[y, x] = row['Timestamp_T_Last']
-                
-    # Filter out pixels with <= 2 anomalies
-    anomaly_map[anomaly_counts <= 2] = np.nan
                 
     import matplotlib.patches as patches
     fig, (ax_img, ax_ts) = plt.subplots(1, 2, figsize=(18, 8))

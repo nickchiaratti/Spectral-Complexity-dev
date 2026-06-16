@@ -16,14 +16,14 @@ class SITSDataset(Dataset):
         self.h5_path = h5_path
         self.mode = mode
         self.train_end_date = train_end_date
-        self.consecutive_anomalies = consecutive_anomalies
+        self.consecutive_predictions = 1
         self.time_window_years = time_window_years
         self.enable_elastic_window = enable_elastic_window
         self.max_elastic_window_years = max_elastic_window_years
         self.min_samples = min_samples
         
         # Explicit temporal periods (in years) to capture sub-harmonics and multi-year patterns
-        self.temporal_periods = [1/2, 2/3, 1.0, 3.0]
+        self.temporal_periods = [1.0, 0.5, 0.33, 0.25]
         
         self.samples = None # Will be a PyTorch Shared Memory Tensor
         
@@ -83,15 +83,15 @@ class SITSDataset(Dataset):
                     valid_idx = np.where(valid_mask[y, x, :])[0]
                     valid_initial_count = len(valid_idx)
                     
-                    if valid_initial_count < self.min_samples + self.consecutive_anomalies:
+                    if valid_initial_count < self.min_samples + self.consecutive_predictions:
                         continue # Insufficient valid observations
                     
                     valid_acq_time = acq_time[valid_idx]
                     
                     # Target indices start after MIN_SAMPLES history
-                    for t_idx in range(self.min_samples, valid_initial_count - self.consecutive_anomalies + 1):
+                    for t_idx in range(self.min_samples, valid_initial_count - self.consecutive_predictions + 1):
                         ts21 = valid_acq_time[t_idx]
-                        ts_last = valid_acq_time[t_idx + self.consecutive_anomalies - 1]
+                        ts_last = valid_acq_time[t_idx + self.consecutive_predictions - 1]
                         
                         if self.mode == 'calibration' and ts_last >= split_time:
                             continue
@@ -130,10 +130,10 @@ class SITSDataset(Dataset):
         valid_acq_time = self.acq_time[valid_idx]
         
         # Targets
-        target_idx = valid_idx[t_idx : t_idx + self.consecutive_anomalies]
+        target_idx = valid_idx[t_idx : t_idx + self.consecutive_predictions]
         targets = self.z_score[y, x, target_idx]
         ts21 = valid_acq_time[t_idx].item()
-        ts_last = valid_acq_time[t_idx + self.consecutive_anomalies - 1].item()
+        ts_last = valid_acq_time[t_idx + self.consecutive_predictions - 1].item()
         
         # History (Temporal Subset + Elastic Fallback)
         TIME_WINDOW_SEC = self.time_window_years * 365.25 * 86400.0
@@ -176,13 +176,16 @@ class SITSDataset(Dataset):
         for period in self.temporal_periods:
             dt_features.append(torch.sin(2 * math.pi * dt_years / period).to(torch.float32))
             dt_features.append(torch.cos(2 * math.pi * dt_years / period).to(torch.float32))
+            
+        dt_years_max = self.max_elastic_window_years if self.enable_elastic_window else self.time_window_years
+        dt_years_norm = dt_years / dt_years_max
         
-        # Combine all features
         feature_list = [
             pixel_doy_sin, 
             pixel_doy_cos, 
             pixel_tod_sin,
-            pixel_tod_cos
+            pixel_tod_cos,
+            dt_years_norm.to(torch.float32)
         ] + dt_features + [pixel_z]
         
         history = torch.stack(feature_list, dim=-1)
@@ -197,9 +200,36 @@ class SITSDataset(Dataset):
         else:
             seq_mask = torch.ones(MAX_SEQ_LEN, dtype=torch.bool)
         
+        # Targets Temporal Features
+        target_acq_times = self.acq_time[target_idx]
+        delta_t_targets = (target_acq_times - ts21) / 86400.0
+        dt_target_years = delta_t_targets / 365.25
+        dt_target_norm = dt_target_years / dt_years_max
+        
+        target_doy_sin = self.doy_sin[target_idx]
+        target_doy_cos = self.doy_cos[target_idx]
+        target_tod_sin = self.tod_sin[target_idx]
+        target_tod_cos = self.tod_cos[target_idx]
+        
+        target_dt_features = []
+        for period in self.temporal_periods:
+            target_dt_features.append(torch.sin(2 * math.pi * dt_target_years / period).to(torch.float32))
+            target_dt_features.append(torch.cos(2 * math.pi * dt_target_years / period).to(torch.float32))
+            
+        target_feature_list = [
+            target_doy_sin,
+            target_doy_cos,
+            target_tod_sin,
+            target_tod_cos,
+            dt_target_norm.to(torch.float32)
+        ] + target_dt_features
+        
+        X_targets = torch.stack(target_feature_list, dim=-1).flatten()
+        
         metadata = [y, x, ts21, ts_last] + [t.item() for t in targets]
         return {
             'X_seq': history,
+            'X_targets': X_targets,
             'seq_mask': seq_mask,
             'Y_target': targets,
             'metadata': metadata

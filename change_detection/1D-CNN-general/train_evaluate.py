@@ -7,7 +7,8 @@ import numpy as np
 import h5py
 import os
 from tqdm import tqdm
-from captum.attr import GradientShap
+from pnpxai.explainers import IntegratedGradients
+from pnpxai.evaluator.metrics import Sensitivity, Complexity
 
 def enable_mc_dropout(m):
     if type(m) == nn.Dropout:
@@ -27,8 +28,9 @@ def train_and_evaluate(h5_path, output_h5='inference_results.h5', weights_path='
         
     cal_loader = DataLoader(cal_dataset, batch_size=4096, shuffle=True, num_workers=16, pin_memory=True)
     
-    in_channels = len(cal_dataset.temporal_periods) * 2 + 5
-    model = MultiScaleSITSNet(in_channels=in_channels, out_features=consecutive_anomalies).to(device)
+    in_channels = len(cal_dataset.temporal_periods) * 2 + 6
+    target_features_dim = cal_dataset[0]['X_targets'].shape[-1]
+    model = MultiScaleSITSNet(in_channels=in_channels, out_features=1, target_features_dim=target_features_dim).to(device)
     
     if skip_training and os.path.exists(weights_path):
         print(f"Skipping training. Loading existing weights from {weights_path}...")
@@ -39,16 +41,17 @@ def train_and_evaluate(h5_path, output_h5='inference_results.h5', weights_path='
         
         print(f"Training on {len(cal_dataset)} sequences...")
         model.train()
-        epochs = 10 
+        epochs = 30 
         for epoch in range(epochs):
             epoch_loss = 0.0
             for batch in tqdm(cal_loader, desc=f"Epoch {epoch+1}/{epochs}", leave=False):
                 X_seq = batch['X_seq'].to(device, non_blocking=True)
+                X_targets = batch['X_targets'].to(device, non_blocking=True)
                 seq_mask = batch['seq_mask'].to(device, non_blocking=True)
                 y = batch['Y_target'].to(device, non_blocking=True)
                 
                 optimizer.zero_grad()
-                preds = model(X_seq, seq_mask)
+                preds = model(X_seq, X_targets, seq_mask)
                 loss = criterion(preds, y)
                 loss.backward()
                 optimizer.step()
@@ -66,21 +69,23 @@ def train_and_evaluate(h5_path, output_h5='inference_results.h5', weights_path='
     baseline_loader = DataLoader(cal_dataset, batch_size=4096, shuffle=False, num_workers=16, pin_memory=True)
     
     H, W = cal_dataset.h, cal_dataset.w
-    pixel_residual_sq_sum = np.zeros((H, W), dtype=np.float64)
+    pixel_residual_sum = np.zeros((H, W), dtype=np.float64)
     pixel_residual_count = np.zeros((H, W), dtype=np.int32)
     pixel_epistemic_sum = np.zeros((H, W), dtype=np.float64)
     pixel_epistemic_count = np.zeros((H, W), dtype=np.int32)
+    consecutive_count_map = np.zeros((H, W), dtype=np.int32)
     
     with torch.no_grad():
         for batch in tqdm(baseline_loader, desc="Calculating Baseline Uncertainties"):
             X_seq = batch['X_seq'].to(device, non_blocking=True)
+            X_targets = batch['X_targets'].to(device, non_blocking=True)
             seq_mask = batch['seq_mask'].to(device, non_blocking=True)
             y = batch['Y_target'].to(device, non_blocking=True)
             batch_sz = X_seq.size(0)
             
-            stoc_preds = torch.zeros((mc_samples, batch_sz, consecutive_anomalies), device=device)
+            stoc_preds = torch.zeros((mc_samples, batch_sz, 1), device=device)
             for i in range(mc_samples):
-                stoc_preds[i] = model(X_seq, seq_mask)
+                stoc_preds[i] = model(X_seq, X_targets, seq_mask)
             
             stds = stoc_preds.std(dim=0).cpu().numpy()
             mean_preds = stoc_preds.mean(dim=0)
@@ -91,15 +96,15 @@ def train_and_evaluate(h5_path, output_h5='inference_results.h5', weights_path='
             px = meta[1].numpy()
             
             stds_mean = stds.mean(axis=1)
-            res_sq_mean = (residuals**2).mean(axis=1)
+            res_abs_mean = residuals.mean(axis=1)
             
-            np.add.at(pixel_residual_sq_sum, (py, px), res_sq_mean)
+            np.add.at(pixel_residual_sum, (py, px), res_abs_mean)
             np.add.at(pixel_residual_count, (py, px), 1)
             np.add.at(pixel_epistemic_sum, (py, px), stds_mean)
             np.add.at(pixel_epistemic_count, (py, px), 1)
             
     with np.errstate(divide='ignore', invalid='ignore'):
-        pixel_aleatoric_rmse = np.sqrt(pixel_residual_sq_sum / pixel_residual_count)
+        pixel_aleatoric_mae = pixel_residual_sum / pixel_residual_count
         pixel_epistemic_std = pixel_epistemic_sum / pixel_epistemic_count
         
     # Per your user rule, we will NOT apply a global smoothing fill value.
@@ -123,19 +128,20 @@ def train_and_evaluate(h5_path, output_h5='inference_results.h5', weights_path='
         ('Pixel_X', 'int32'),
         ('Pixel_Y', 'int32'),
         ('Timestamp_T21', 'float64'),
-        ('Timestamp_T_Last', 'float64')
+        ('Timestamp_T_Last', 'float64'),
+        ('Pred_1', 'float32'),
+        ('Std_1', 'float32'),
+        ('Actual_1', 'float32'),
+        ('Anomaly_Flag', 'uint8'),
+        ('Confirmed_Change', 'uint8'),
+        ('Attr_DoY', 'float32'),
+        ('Attr_ToD', 'float32'),
+        ('Attr_dt', 'float32'),
+        ('Attr_ZScore', 'float32'),
+        ('Explainer_Fidelity', 'float32'),
+        ('Explainer_Sensitivity', 'float32'),
+        ('Explainer_Complexity', 'float32')
     ]
-    for i in range(1, consecutive_anomalies + 1):
-        dt_fields.append((f'Pred_{i}', 'float32'))
-    for i in range(1, consecutive_anomalies + 1):
-        dt_fields.append((f'Std_{i}', 'float32'))
-    for i in range(1, consecutive_anomalies + 1):
-        dt_fields.append((f'Actual_{i}', 'float32'))
-    dt_fields.append(('Anomaly_Flag', 'uint8'))
-    dt_fields.append(('Attr_DoY', 'float32'))
-    dt_fields.append(('Attr_ToD', 'float32'))
-    dt_fields.append(('Attr_dt', 'float32'))
-    dt_fields.append(('Attr_ZScore', 'float32'))
     dt = np.dtype(dt_fields)
 
     total_anomalies = 0
@@ -152,7 +158,7 @@ def train_and_evaluate(h5_path, output_h5='inference_results.h5', weights_path='
         if 'baseline_epistemic_map' in f:
             del f['baseline_epistemic_map']
             
-        f.create_dataset('baseline_aleatoric_map', data=pixel_aleatoric_rmse.astype(np.float32))
+        f.create_dataset('baseline_aleatoric_map', data=pixel_aleatoric_mae.astype(np.float32))
         f.create_dataset('baseline_epistemic_map', data=pixel_epistemic_std.astype(np.float32))
         
         curr_idx = 0
@@ -162,14 +168,15 @@ def train_and_evaluate(h5_path, output_h5='inference_results.h5', weights_path='
             
             for batch in tqdm(eval_loader, desc="Evaluating inference results"):
                 X_seq = batch['X_seq'].to(device, non_blocking=True)
+                X_targets = batch['X_targets'].to(device, non_blocking=True)
                 seq_mask = batch['seq_mask'].to(device, non_blocking=True)
                 y_tensor = batch['Y_target'].to(device, non_blocking=True)
                 
                 batch_size = X_seq.size(0)
-                stochastic_preds = torch.zeros((mc_samples, batch_size, consecutive_anomalies), device=device)
+                stochastic_preds = torch.zeros((mc_samples, batch_size, 1), device=device)
                 
                 for i in range(mc_samples):
-                    stochastic_preds[i] = model(X_seq, seq_mask)
+                    stochastic_preds[i] = model(X_seq, X_targets, seq_mask)
                     
                 mean_preds = stochastic_preds.mean(dim=0)
                 std_preds = stochastic_preds.std(dim=0)
@@ -180,7 +187,7 @@ def train_and_evaluate(h5_path, output_h5='inference_results.h5', weights_path='
                 ts21 = meta[2].numpy()
                 ts_last = meta[3].numpy()
                 
-                batch_aleatoric = pixel_aleatoric_rmse[py, px][:, None]
+                batch_aleatoric = pixel_aleatoric_mae[py, px][:, None]
                 
                 preds_np = mean_preds.cpu().numpy()
                 stds_np = std_preds.cpu().numpy()
@@ -193,49 +200,98 @@ def train_and_evaluate(h5_path, output_h5='inference_results.h5', weights_path='
                 uncertainty_threshold = total_uncertainty * confidence_multiplier
                 
                 # Anomaly condition: Does the residual break the total uncertainty bound?
-                # (np.isnan comparisons safely evaluate to False)
-                is_anomaly = (residuals_np > uncertainty_threshold).any(axis=1)
-                
+                is_anomaly = (residuals_np > uncertainty_threshold).all(axis=1)
                 anomaly_flags = is_anomaly.astype(np.uint8)
+                confirmed_change_flags = np.zeros(batch_size, dtype=np.uint8)
+                
+                for i in range(batch_size):
+                    y_i = py[i]
+                    x_i = px[i]
+                    
+                    if is_anomaly[i]:
+                        consecutive_count_map[y_i, x_i] += 1
+                        if consecutive_count_map[y_i, x_i] >= consecutive_anomalies:
+                            confirmed_change_flags[i] = 1
+                    else:
+                        consecutive_count_map[y_i, x_i] = 0
                 
                 # Preserve raw reality: Assign 255 if baseline was NaN (missing data)
                 has_nan_baseline = np.isnan(total_uncertainty).any(axis=1)
                 anomaly_flags[has_nan_baseline] = 255
+                confirmed_change_flags[has_nan_baseline] = 255
                 
-                # Only count true anomalies
-                total_anomalies += np.sum(anomaly_flags == 1)
+                # Only count true confirmed changes
+                total_anomalies += np.sum(confirmed_change_flags == 1)
                 
-                # --- Captum GradientShap Attribution ---
+                # --- PnPXAI Attribution & Evaluation ---
                 attr_doy = np.full(batch_size, np.nan, dtype=np.float32)
                 attr_tod = np.full(batch_size, np.nan, dtype=np.float32)
                 attr_dt = np.full(batch_size, np.nan, dtype=np.float32)
                 attr_zscore = np.full(batch_size, np.nan, dtype=np.float32)
                 
+                explainer_fidelity = np.full(batch_size, np.nan, dtype=np.float32)
+                explainer_sensitivity = np.full(batch_size, np.nan, dtype=np.float32)
+                explainer_complexity = np.full(batch_size, np.nan, dtype=np.float32)
+                
                 anom_idx = np.where(anomaly_flags == 1)[0]
                 if len(anom_idx) > 0:
-                    if 'gradient_shap' not in locals():
-                        
-                        gradient_shap = GradientShap(model)
-                        
                     X_seq_anom = X_seq[anom_idx]
+                    X_targets_anom = X_targets[anom_idx]
                     seq_mask_anom = seq_mask[anom_idx]
                     
-                    base_seq = torch.zeros_like(X_seq_anom)
+                    # PnPXAI does not natively support additional_forward_args in 0.1.4
+                    # We wrap the model to only require the primary input
+                    class PnPXAIWrapper(nn.Module):
+                        def __init__(self, base_model, targets, mask):
+                            super().__init__()
+                            self.base_model = base_model
+                            self.targets = targets
+                            self.mask = mask
+                            
+                        def forward(self, x):
+                            return self.base_model(x, self.targets, self.mask)
+                            
+                    wrapped_model = PnPXAIWrapper(model, X_targets_anom, seq_mask_anom)
                     
-                    # GradientShap returns a single tensor if the input is a single tensor
-                    attrs = gradient_shap.attribute(inputs=X_seq_anom,
-                                                    baselines=base_seq,
-                                                    additional_forward_args=(seq_mask_anom,),
-                                                    target=0)
+                    explainer = IntegratedGradients(wrapped_model)
+                    metric_sens = Sensitivity(model=wrapped_model, explainer=explainer)
+                    metric_comp = Complexity(model=wrapped_model, explainer=explainer)
                     
-                    attr_X_seq = attrs.cpu().numpy()
+                    # Compute Attributions using Integrated Gradients
+                    attr_X_seq = explainer.attribute(
+                        inputs=X_seq_anom,
+                        targets=0
+                    )
                     
-                    abs_seq = np.sum(np.abs(attr_X_seq), axis=1) # Sum over SeqLen
+                    # Compute Evaluations
+                    # Fidelity requires perturbing the model and is extremely slow for some models, so we'll evaluate Sensitivity and Complexity
+                    sens_scores = metric_sens.evaluate(
+                        inputs=X_seq_anom,
+                        targets=0,
+                        attributions=attr_X_seq
+                    )
+                    
+                    comp_scores = metric_comp.evaluate(
+                        inputs=X_seq_anom,
+                        targets=0,
+                        attributions=attr_X_seq
+                    )
+                    
+                    if isinstance(attr_X_seq, torch.Tensor):
+                        attr_X_seq_np = attr_X_seq.cpu().numpy()
+                    else:
+                        attr_X_seq_np = attr_X_seq[0].cpu().numpy()
+                    
+                    abs_seq = np.sum(np.abs(attr_X_seq_np), axis=1) # Sum over SeqLen
                     
                     attr_doy[anom_idx] = np.sum(abs_seq[:, 0:2], axis=1)
                     attr_tod[anom_idx] = np.sum(abs_seq[:, 2:4], axis=1)
                     attr_dt[anom_idx] = np.sum(abs_seq[:, 4:-1], axis=1)
                     attr_zscore[anom_idx] = abs_seq[:, -1]
+                    
+                    # Extract Metrics
+                    explainer_sensitivity[anom_idx] = sens_scores.cpu().numpy()
+                    explainer_complexity[anom_idx] = comp_scores.cpu().numpy()
                 
                 # Extracted metadata above
                 
@@ -245,16 +301,19 @@ def train_and_evaluate(h5_path, output_h5='inference_results.h5', weights_path='
                 batch_results['Timestamp_T21'] = ts21
                 batch_results['Timestamp_T_Last'] = ts_last
                 
-                for k in range(consecutive_anomalies):
-                    batch_results[f'Pred_{k+1}'] = preds_np[:, k]
-                    batch_results[f'Std_{k+1}'] = total_uncertainty[:, k]
-                    batch_results[f'Actual_{k+1}'] = meta[4 + k].numpy()
+                batch_results['Pred_1'] = preds_np[:, 0]
+                batch_results['Std_1'] = total_uncertainty[:, 0]
+                batch_results['Actual_1'] = meta[4].numpy()
                     
                 batch_results['Anomaly_Flag'] = anomaly_flags
+                batch_results['Confirmed_Change'] = confirmed_change_flags
                 batch_results['Attr_DoY'] = attr_doy
                 batch_results['Attr_ToD'] = attr_tod
                 batch_results['Attr_dt'] = attr_dt
                 batch_results['Attr_ZScore'] = attr_zscore
+                batch_results['Explainer_Fidelity'] = explainer_fidelity
+                batch_results['Explainer_Sensitivity'] = explainer_sensitivity
+                batch_results['Explainer_Complexity'] = explainer_complexity
                 
                 dset[curr_idx:curr_idx + batch_size] = batch_results
                 curr_idx += batch_size

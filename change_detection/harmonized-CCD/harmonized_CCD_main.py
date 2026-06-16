@@ -28,18 +28,23 @@ def tqdm_joblib(tqdm_object):
 # ==========================================
 # 1. CONFIGURATION
 # ==========================================
-LOCATION = "Tait"
+LOCATION = "Malibu"
 H5_PATH = f"C:/satelliteImagery/HLST30/HLST_{LOCATION}_Harmonized_SC_EM-7_Norm-bandCount.h5"
-OUTPUT_H5 = f"C:/satelliteImagery/HLST30/CCD/{LOCATION}_CCD_Harmonized_Change_Detection.h5"
 
 TARGET_METRIC = 'sliding_volume_z_score'
 RMSE_MULTIPLIER = 3.0
 CONSECUTIVE_ANOMALIES = 4
 TIME_WINDOW_YEARS = 3.0
-ENABLE_ELASTIC_WINDOW = True  # Allows window to expand backwards to meet MIN_SAMPLES
+ENABLE_ELASTIC_WINDOW = False  # Allows window to expand backwards to meet MIN_SAMPLES
 MAX_ELASTIC_WINDOW_YEARS = TIME_WINDOW_YEARS + 2.0  # Maximum span to expand backwards
-TEMPORAL_PERIODS = [2/3, 1/2, 1.0, 3.0]
-MIN_SAMPLES = len(TEMPORAL_PERIODS) * 2 + 1 # Minimum required to solve OLS without being underdetermined
+
+# Harmonic Regression Configurations
+ENABLE_CONSTANT = True
+ENABLE_LINEAR = True
+ENABLE_QUADRATIC = False
+TEMPORAL_PERIODS = [1.0, 0.5, 0.33, 0.25]
+
+
 
 def extract_fractional_years(acq_times):
     """Converts UNIX timestamps into continuous fractional years (t)."""
@@ -54,18 +59,27 @@ def extract_fractional_years(acq_times):
         frac_years.append(year + (elapsed / year_duration))
     return np.array(frac_years)
 
-def build_harmonic_matrix(t, temporal_periods=TEMPORAL_PERIODS):
+def build_harmonic_matrix(t, temporal_periods=TEMPORAL_PERIODS, 
+                          enable_const=ENABLE_CONSTANT, 
+                          enable_lin=ENABLE_LINEAR, 
+                          enable_quad=ENABLE_QUADRATIC):
     """
-    Constructs a Fourier basis matrix using specific temporal periods (no linear trend).
+    Constructs a Fourier basis matrix with configurable polynomial trends and temporal periods.
     """
+    cols = []
+    if enable_const:
+        cols.append(np.ones_like(t))
+    if enable_lin:
+        cols.append(t)
+    if enable_quad:
+        cols.append(t**2)
+        
     w = 2.0 * math.pi
-    cols = [
-        np.ones_like(t),  # Intercept
-    ]
     for p in temporal_periods:
         cols.append(np.cos((w / p) * t))
         cols.append(np.sin((w / p) * t))
-    return np.column_stack(cols)
+        
+    return np.column_stack(cols) if cols else np.zeros((len(t), 0))
 
 def _process_row_chunk(chunk_args):
     y_start, y_end, width, y_data, valid_mask, frac_years, X_full, acq_times, min_samples, time_window_years, enable_elastic, max_elastic_years, rmse_mult, consec_anom = chunk_args
@@ -155,7 +169,23 @@ def _process_row_chunk(chunk_args):
 
     return y_start, y_end, chunk_pred, chunk_rmse, chunk_flags, chunk_date, chunk_count
 
-def main():
+def main(enable_const=ENABLE_CONSTANT, 
+         enable_lin=ENABLE_LINEAR, 
+         enable_quad=ENABLE_QUADRATIC, 
+         temporal_periods=None,
+         enable_elastic_window=ENABLE_ELASTIC_WINDOW,
+         launch_vis=True):
+    if temporal_periods is None:
+        temporal_periods = TEMPORAL_PERIODS
+        
+    _num_trend_terms = sum([enable_const, enable_lin, enable_quad])
+    min_samples = _num_trend_terms + len(temporal_periods) * 2 + 3
+    
+    _term_str = f"C{int(enable_const)}L{int(enable_lin)}Q{int(enable_quad)}"
+    _period_str = f"P{len(temporal_periods)}"
+    _elastic_str = f"E{int(enable_elastic_window)}"
+    output_h5 = f"C:/satelliteImagery/HLST30/CCD/{LOCATION}_CCD_Harmonized_Change_Detection_{_term_str}_{_period_str}_{_elastic_str}.h5"
+
     print(f"Loading data from {H5_PATH}...")
     with h5py.File(H5_PATH, 'r') as f:
         data_grp = f['/HDFEOS/GRIDS/HARMONIZED/Data Fields']
@@ -192,7 +222,8 @@ def main():
     rmse_series = np.full((num_frames, height, width), np.nan, dtype=np.float32)
     anomaly_flags = np.zeros((num_frames, height, width), dtype=np.uint8)
 
-    X_full = build_harmonic_matrix(frac_years)
+    X_full = build_harmonic_matrix(frac_years, temporal_periods=temporal_periods,
+                                   enable_const=enable_const, enable_lin=enable_lin, enable_quad=enable_quad)
 
     print("\nExecuting Sliding Window OLS Harmonic Regression...")
     
@@ -210,8 +241,8 @@ def main():
             y_start, y_end, width, 
             y_data, valid_mask, 
             frac_years, X_full, acq_times, 
-            MIN_SAMPLES, TIME_WINDOW_YEARS, 
-            ENABLE_ELASTIC_WINDOW, MAX_ELASTIC_WINDOW_YEARS, 
+            min_samples, TIME_WINDOW_YEARS, 
+            enable_elastic_window, MAX_ELASTIC_WINDOW_YEARS, 
             RMSE_MULTIPLIER, CONSECUTIVE_ANOMALIES
         )
         chunks.append(chunk_args)
@@ -228,18 +259,21 @@ def main():
         change_date_map[y_start:y_end, :] = c_date
         change_count_map[y_start:y_end, :] = c_count
 
-    os.makedirs(os.path.dirname(OUTPUT_H5), exist_ok=True)
-    print(f"\nSaving Results to {OUTPUT_H5}...")
-    with h5py.File(OUTPUT_H5, 'w') as out_file:
+    os.makedirs(os.path.dirname(output_h5), exist_ok=True)
+    print(f"\nSaving Results to {output_h5}...")
+    with h5py.File(output_h5, 'w') as out_file:
         out_file.attrs['spatial_ref'] = spatial_ref
         out_file.attrs['GeoTransform'] = geo_transform
         out_file.attrs['RMSE_MULTIPLIER'] = RMSE_MULTIPLIER
         out_file.attrs['CONSECUTIVE_ANOMALIES'] = CONSECUTIVE_ANOMALIES
         out_file.attrs['TIME_WINDOW_YEARS'] = TIME_WINDOW_YEARS
-        out_file.attrs['ENABLE_ELASTIC_WINDOW'] = ENABLE_ELASTIC_WINDOW
+        out_file.attrs['ENABLE_ELASTIC_WINDOW'] = enable_elastic_window
         out_file.attrs['MAX_ELASTIC_WINDOW_YEARS'] = MAX_ELASTIC_WINDOW_YEARS
-        out_file.attrs['MIN_SAMPLES'] = MIN_SAMPLES
-        out_file.attrs['TEMPORAL_PERIODS'] = TEMPORAL_PERIODS
+        out_file.attrs['MIN_SAMPLES'] = min_samples
+        out_file.attrs['TEMPORAL_PERIODS'] = temporal_periods
+        out_file.attrs['ENABLE_CONSTANT'] = enable_const
+        out_file.attrs['ENABLE_LINEAR'] = enable_lin
+        out_file.attrs['ENABLE_QUADRATIC'] = enable_quad
         out_file.attrs['TARGET_METRIC'] = TARGET_METRIC
         out_file.attrs['SOURCE_DATA'] = H5_PATH
         
@@ -250,6 +284,18 @@ def main():
         out_file.create_dataset('change_count', data=change_count_map, compression='gzip')
         
     print("Harmonized CCD Pipeline Complete!")
+
+    if launch_vis:
+        print("\nLaunching visualization...")
+        try:
+            from harmonized_CCD_vis import plot_spatial_anomaly_overlay
+            plot_spatial_anomaly_overlay(H5_PATH, output_h5)
+        except ImportError as e:
+            print(f"Could not import visualization module: {e}")
+        except Exception as e:
+            print(f"An error occurred while launching visualization: {e}")
+            
+    return output_h5
 
 if __name__ == "__main__":
     main()

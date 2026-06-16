@@ -5,6 +5,8 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
+LOCATION='Hurlingham'
+
 def analyze_sampling_rate(h5_path):
     print(f"Analyzing {h5_path}...")
     
@@ -141,7 +143,7 @@ def analyze_sampling_rate(h5_path):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Analyze sampling rate of HDF5 Harmonized dataset.")
-    parser.add_argument('--file', '-f', default=r"C:\satelliteImagery\HLST30\HLST_Tait_Harmonized_SC_EM-7_Norm-bandCount.h5", 
+    parser.add_argument('--file', '-f', default=f"C:/satelliteImagery/HLST30/HLST_{LOCATION}_Harmonized_SC_EM-7_Norm-bandCount.h5", 
                         help="Path to the HDF5 file.")
     args = parser.parse_args()
     

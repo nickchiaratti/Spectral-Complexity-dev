@@ -2,8 +2,9 @@ import torch
 import torch.nn as nn
 
 class MultiScaleSITSNet(nn.Module):
-    def __init__(self, in_channels=17, out_features=3):
+    def __init__(self, spatial_dim=40, in_channels=15, out_features=3, target_features_dim=56):
         super(MultiScaleSITSNet, self).__init__()
+        self.target_features_dim = target_features_dim
         self.in_channels = in_channels
         
         # Inception Block (Parallel Branches)
@@ -21,14 +22,12 @@ class MultiScaleSITSNet(nn.Module):
         # Regression Head
         # Sequence length is now dynamic, so we use Global Average Pooling
         # resulting in a fixed 64 channels.
-        spatial_dim = 40
-        
-        self.linear1 = nn.Linear(64 + spatial_dim, 128)
+        self.linear1 = nn.Linear(64 + spatial_dim + self.target_features_dim, 128)
         self.dropout = nn.Dropout(0.2)
         self.linear2 = nn.Linear(128, out_features)
 
-    def forward(self, X_seq, X_spatial, seq_mask=None):
-        # Permute X_seq from (Batch, SeqLen, 6) to (Batch, 6, SeqLen)
+    def forward(self, X_seq, X_spatial, X_targets, seq_mask=None):
+        # Permute X_seq from (Batch, SeqLen, in_channels) to (Batch, in_channels, SeqLen)
         x = X_seq.permute(0, 2, 1)
         
         if seq_mask is not None:
@@ -64,7 +63,8 @@ class MultiScaleSITSNet(nn.Module):
         x = sum_x / count_valid # (Batch, 64)
         
         # Regression Head
-        x = torch.cat([x, X_spatial], dim=1) # (Batch, 64 + 40 = 104)
+        # Concatenate 1D pooled features with spatial encoding and target embedding
+        x = torch.cat([x, X_spatial, X_targets], dim=1)
         x = self.linear1(x)
         x = self.relu(x)
         x = self.dropout(x)
