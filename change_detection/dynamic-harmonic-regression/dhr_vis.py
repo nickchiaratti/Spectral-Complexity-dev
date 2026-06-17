@@ -1,0 +1,308 @@
+import h5py
+import numpy as np
+import matplotlib.pyplot as plt
+from datetime import datetime, timezone
+import os
+import pyproj
+import matplotlib.patches as patches
+import scienceplots
+import warnings
+import copy
+import matplotlib.gridspec as gridspec
+
+plt.style.use(['science','no-latex'])
+
+LOCATION = "Tait"
+H5_PATH = f"C:/satelliteImagery/HLST30/HLST_{LOCATION}_Harmonized_SC_EM-7_Norm-bandCount.h5"
+
+import glob
+
+def get_inference_h5(location):
+    search_pattern = f"C:/satelliteImagery/HLST30/CCD/{location}_DHR_Change_Detection_*.h5"
+    files = glob.glob(search_pattern)
+    if not files:
+        return None
+    files.sort(key=os.path.getmtime, reverse=True)
+    return files[0]
+
+def plot_pixel_sits(pixel_y, pixel_x, source_h5_path, inference_results_h5, ax_ts_z, ax_ts_f, current_date=None):
+    ax_ts_z.clear()
+    ax_ts_f.clear()
+
+    lat, lon = None, None
+    with h5py.File(source_h5_path, 'r') as f:
+        harm_grp = f['/HDFEOS/GRIDS/HARMONIZED/Data Fields']
+        acq_time = harm_grp['sliding_volume_z_score'].attrs['acquisition_time'][:]
+        z_score = harm_grp['sliding_volume_z_score'][:, pixel_y, pixel_x]
+        
+        unified_masks = harm_grp['common_mask'][:, pixel_y, pixel_x]
+        is_invalid = unified_masks.astype(bool)
+        
+        spacecraft_bytes = harm_grp['sliding_volume_z_score'].attrs['source_spacecraft'][:]
+        spacecrafts = [s.decode('utf-8') if isinstance(s, bytes) else str(s) for s in spacecraft_bytes]
+        
+        geo_transform = harm_grp['sliding_volume_z_score'].attrs.get('GeoTransform')
+        spatial_ref = harm_grp['sliding_volume_z_score'].attrs.get('spatial_ref')
+        if geo_transform is not None and spatial_ref is not None:
+            try:
+                gt = geo_transform
+                x_geo = gt[0] + (pixel_x + 0.5) * gt[1] + (pixel_y + 0.5) * gt[2]
+                y_geo = gt[3] + (pixel_x + 0.5) * gt[4] + (pixel_y + 0.5) * gt[5]
+                if isinstance(spatial_ref, bytes):
+                    spatial_ref_str = spatial_ref.decode('utf-8')
+                else:
+                    spatial_ref_str = str(spatial_ref)
+                crs = pyproj.CRS.from_wkt(spatial_ref_str)
+                transformer = pyproj.Transformer.from_crs(crs, "epsg:4326", always_xy=True)
+                lon, lat = transformer.transform(x_geo, y_geo)
+            except Exception as e:
+                pass
+        
+    dates = [datetime.fromtimestamp(ts, timezone.utc) for ts in acq_time]
+    
+    with h5py.File(inference_results_h5, 'r') as f:
+        predicted = f['predicted_series'][:, pixel_y, pixel_x]
+        rmse = f['rmse_series'][:, pixel_y, pixel_x]
+        anomalies = f['anomaly_flags'][:, pixel_y, pixel_x]
+        dom_freq = f['dominant_frequencies_series'][:, :, pixel_y, pixel_x] # [N, K]
+        rmse_multiplier = f.attrs.get('RMSE_MULTIPLIER', 3.0)
+    
+    valid_mask = ~is_invalid
+    dates_arr = np.array(dates)
+    spacecrafts_arr = np.array(spacecrafts)
+    
+    # -----------------------
+    # PLOT 1: Z-SCORE & PREDS
+    # -----------------------
+    for marker_type, sc_keyword in [('s', 'Sentinel'), ('o', 'Landsat'), ('D', 'Tanager')]:
+        sc_mask = np.array([sc_keyword.lower() in str(sc).lower() for sc in spacecrafts_arr])
+        
+        idx_valid = valid_mask & sc_mask
+        if np.any(idx_valid):
+            ax_ts_z.plot(dates_arr[idx_valid], z_score[idx_valid], color='k', marker=marker_type, linestyle='None', label=f'Valid ({sc_keyword})')
+            
+        idx_invalid = is_invalid & sc_mask
+        if np.any(idx_invalid):
+            ax_ts_z.plot(dates_arr[idx_invalid], z_score[idx_invalid], color='gray', marker=marker_type, linestyle='None', markerfacecolor='none', label=f'Invalid ({sc_keyword})')
+            
+    pred_mask = ~np.isnan(predicted)
+    if np.any(pred_mask):
+        pred_dates = dates_arr[pred_mask]
+        preds = predicted[pred_mask]
+        rmses = rmse[pred_mask]
+        
+        upper_bound = preds + rmse_multiplier * rmses
+        lower_bound = preds - rmse_multiplier * rmses
+        
+        ax_ts_z.plot(pred_dates, preds, 'b--', label='Harmonic Prediction')
+        ax_ts_z.fill_between(pred_dates, lower_bound, upper_bound, color='blue', alpha=0.15, label=f'±{rmse_multiplier}σ Bound')
+        
+        anom_mask = anomalies[pred_mask] == 1
+        if np.any(anom_mask):
+            anom_dates = pred_dates[anom_mask]
+            anom_vals = z_score[pred_mask][anom_mask]
+            ax_ts_z.plot(anom_dates, anom_vals, 'rx', markersize=10, mew=2, label='Anomalies')
+            
+    if current_date is not None:
+        ax_ts_z.axvline(x=current_date, color='orange', linestyle='--', label='Displayed Frame')
+
+    title_str = f"Pixel: ({pixel_x}, {pixel_y})"
+    if lat is not None and lon is not None:
+        title_str += f" | Lat: {lat:.5f}, Lon: {lon:.5f}"
+    ax_ts_z.set_title(title_str)
+    ax_ts_z.set_ylabel('Z-Score')
+    ax_ts_z.legend(bbox_to_anchor=(1.01, 1), loc='upper left')
+    ax_ts_z.grid(True)
+    ax_ts_z.set_ylim([-4, 4])
+    
+    # -----------------------
+    # PLOT 2: FREQUENCIES
+    # -----------------------
+    if np.any(pred_mask):
+        dom_freq_valid = dom_freq[pred_mask] # [N_valid, K]
+        periods = (2.0 * np.pi) / dom_freq_valid
+        
+        for k in range(periods.shape[1]):
+            ax_ts_f.plot(pred_dates, periods[:, k], marker='.', linestyle='-', label=f'Top-{k+1} Period')
+            
+    if current_date is not None:
+        ax_ts_f.axvline(x=current_date, color='orange', linestyle='--')
+        
+    ax_ts_f.set_ylabel('Dominant Period (Years)')
+    ax_ts_f.set_xlabel('Date')
+    import matplotlib.dates as mdates
+    ax_ts_f.xaxis.set_major_locator(mdates.YearLocator())
+    ax_ts_f.legend(bbox_to_anchor=(1.01, 1), loc='upper left')
+    ax_ts_f.grid(True)
+    ax_ts_f.set_ylim([0.2, 5.0]) # Cap period display
+
+
+def plot_spatial_anomaly_overlay(source_h5_path, inference_results_h5):
+    with h5py.File(source_h5_path, 'r') as f:
+        harm_grp = f['/HDFEOS/GRIDS/HARMONIZED/Data Fields']
+        acq_time = harm_grp['sliding_volume_z_score'].attrs['acquisition_time'][:]
+        unified_masks = harm_grp['common_mask'][:]
+        full_valid_mask = ~unified_masks.astype(bool)
+        
+    def get_ortho(idx):
+        with h5py.File(source_h5_path, 'r') as f:
+            harm_grp = f['/HDFEOS/GRIDS/HARMONIZED/Data Fields']
+            spc = harm_grp['sliding_volume_z_score'].attrs['source_spacecraft'][idx]
+            spc = spc.decode('utf-8') if isinstance(spc, bytes) else str(spc)
+            o = harm_grp['ortho_visual'][idx]
+            o = np.transpose(o, (1, 2, 0)).astype(np.float32) / 255.0
+            valid_mask = np.all(o > 0, axis=-1)
+            o[~valid_mask] = 0.0
+            return o, spc
+            
+    dates = [datetime.fromtimestamp(ts, timezone.utc) for ts in acq_time]
+    target_date = datetime(2025, 9, 12, tzinfo=timezone.utc).date()
+    diffs = [abs((d.date() - target_date).days) for d in dates]
+    base_idx = np.argmin(diffs)
+    base_frame, base_sg = get_ortho(base_idx)
+    base_date = datetime.fromtimestamp(acq_time[base_idx], timezone.utc)
+    
+    with h5py.File(inference_results_h5, 'r') as f:
+        anomaly_map = f['change_date_timestamp'][:]
+        change_count_map = f['change_count'][:]
+        min_samples = f.attrs.get('MIN_SAMPLES', 8)
+        rmse_series = f['rmse_series'][:]
+        dom_freq = f['dominant_frequencies_series'][:] # [N, K, H, W]
+        
+    H, W = full_valid_mask.shape[1], full_valid_mask.shape[2]
+    
+    anomaly_map[change_count_map == 0] = np.nan
+    
+    valid_initial_counts = np.sum(full_valid_mask, axis=0)
+    insufficient_data = valid_initial_counts < min_samples
+    
+    # Pre-calculate maps
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=RuntimeWarning)
+        mean_uncertainty = np.nanmean(rmse_series, axis=0)
+        top1_freq = dom_freq[:, 0, :, :]
+        top1_period = (2.0 * np.pi) / top1_freq
+        mean_period_map = np.nanmean(top1_period, axis=0)
+        f_hz = top1_freq / (2.0 * np.pi)
+        freq_var_map = np.nanvar(f_hz, axis=0)
+        
+    mean_uncertainty[insufficient_data] = np.nan
+    mean_period_map[insufficient_data] = np.nan
+    freq_var_map[insufficient_data] = np.nan
+    
+    # Setup GridSpec
+    fig = plt.figure(figsize=(24, 12))
+    fig.canvas.manager.set_window_title('Dynamic Harmonic Regression Analysis')
+    
+    # 2 rows, 3 columns.
+    # Col 0, 1: spatial maps
+    # Col 2: time series (double width?)
+    gs = gridspec.GridSpec(2, 3, width_ratios=[1, 1, 1.5], wspace=0.3, hspace=0.3)
+    
+    ax_img = fig.add_subplot(gs[0, 0])
+    ax_unc = fig.add_subplot(gs[0, 1])
+    ax_per = fig.add_subplot(gs[1, 0])
+    ax_var = fig.add_subplot(gs[1, 1])
+    
+    ax_ts_z = fig.add_subplot(gs[0, 2])
+    ax_ts_f = fig.add_subplot(gs[1, 2], sharex=ax_ts_z)
+    
+    # 1. Base Ortho + Anomaly
+    ax_img.imshow(base_frame)
+    ax_img.set_title(f"Structural Anomalies\n{base_sg} Acquisition: {base_date.strftime('%Y-%m-%d')} UTC")
+    
+    gray = np.zeros((H, W, 4))
+    gray[insufficient_data] = [0.5, 0.5, 0.5, 0.5]
+    ax_img.imshow(gray)
+    
+    if not np.all(np.isnan(anomaly_map)):
+        from matplotlib.cm import viridis
+        masked_anom = np.ma.masked_invalid(anomaly_map)
+        cmap = copy.copy(viridis)
+        cmap.set_bad(color='white', alpha=0)
+        im1 = ax_img.imshow(masked_anom, cmap=cmap, alpha=0.7)
+        cbar = plt.colorbar(im1, ax=ax_img)
+        ticks = cbar.get_ticks()
+        min_anom, max_anom = np.nanmin(anomaly_map), np.nanmax(anomaly_map)
+        if not np.isnan(min_anom):
+            ticks = ticks[(ticks >= min_anom) & (ticks <= max_anom)]
+            cbar.set_ticks(ticks)
+            cbar.set_ticklabels([datetime.fromtimestamp(t, timezone.utc).strftime('%Y-%m-%d') for t in ticks])
+            
+    # 2. Mean Uncertainty
+    from matplotlib.cm import plasma, inferno
+    masked_unc = np.ma.masked_invalid(mean_uncertainty)
+    cmap_unc = copy.copy(plasma)
+    cmap_unc.set_bad(color='gray', alpha=1.0)
+    im2 = ax_unc.imshow(masked_unc, cmap=cmap_unc)
+    ax_unc.set_title("Mean Predictive Uncertainty (S)")
+    plt.colorbar(im2, ax=ax_unc, label="Mean S")
+    
+    # 3. Mean Dominant Period
+    masked_per = np.ma.masked_invalid(mean_period_map)
+    cmap_per = copy.copy(viridis)
+    cmap_per.set_bad(color='gray', alpha=1.0)
+    im3 = ax_per.imshow(masked_per, cmap=cmap_per, vmin=0.5, vmax=3.0)
+    ax_per.set_title("Mean Dominant Period (Mode)")
+    plt.colorbar(im3, ax=ax_per, label="Period (Years)")
+    
+    # 4. Frequency Variance
+    masked_var = np.ma.masked_invalid(freq_var_map)
+    cmap_var = copy.copy(inferno)
+    cmap_var.set_bad(color='gray', alpha=1.0)
+    im4 = ax_var.imshow(masked_var, cmap=cmap_var)
+    ax_var.set_title("Dominant Frequency Instability (Variance)")
+    plt.colorbar(im4, ax=ax_var, label="Variance (cycles/year)^2")
+    
+    # Initial state for time series axes
+    ax_ts_z.text(0.5, 0.5, 'Click a pixel on any map to view data', horizontalalignment='center', verticalalignment='center', transform=ax_ts_z.transAxes)
+    ax_ts_f.text(0.5, 0.5, 'Click a pixel on any map to view data', horizontalalignment='center', verticalalignment='center', transform=ax_ts_f.transAxes)
+
+    # Add selection rectangles to all axes
+    rects = []
+    for ax in [ax_img, ax_unc, ax_per, ax_var]:
+        rect = patches.Rectangle((-1, -1), 1, 1, linewidth=2, edgecolor='cyan', facecolor='none', visible=False)
+        ax.add_patch(rect)
+        rects.append(rect)
+
+    def update_pixel(x, y):
+        print(f"Selecting pixel {x}, {y}")
+        for r in rects:
+            r.set_xy((x - 0.5, y - 0.5))
+            r.set_visible(True)
+            
+        current_date_ts = None
+        current_sg = None
+        if not np.isnan(anomaly_map[y, x]):
+            anom_ts = anomaly_map[y, x]
+            idx = np.argmin(np.abs(acq_time - anom_ts))
+            new_base, current_sg = get_ortho(idx)
+            ax_img.images[0].set_array(new_base)
+            current_date_ts = acq_time[idx]
+        else:
+            ax_img.images[0].set_array(base_frame)
+            current_date_ts = acq_time[base_idx]
+            current_sg = base_sg
+            
+        current_date = datetime.fromtimestamp(current_date_ts, timezone.utc)
+        ax_img.set_title(f"Structural Anomalies\n{current_sg} Acquisition: {current_date.strftime('%Y-%m-%d')} UTC")
+        
+        plot_pixel_sits(y, x, source_h5_path, inference_results_h5, ax_ts_z, ax_ts_f, current_date=current_date)
+        fig.canvas.draw()
+
+    def onclick(event):
+        if event.inaxes not in [ax_img, ax_unc, ax_per, ax_var]: return
+        x, y = int(event.xdata), int(event.ydata)
+        if x < 0 or x >= W or y < 0 or y >= H: return
+        update_pixel(x, y)
+
+    fig.canvas.mpl_connect('button_press_event', onclick)
+    plt.show()
+
+if __name__ == "__main__":
+    inference_h5 = get_inference_h5(LOCATION)
+    if inference_h5 and os.path.exists(inference_h5):
+        print(f"Loading latest inference results: {inference_h5}")
+        plot_spatial_anomaly_overlay(H5_PATH, inference_h5)
+    else:
+        print("Run dhr_main.py first to create output h5")

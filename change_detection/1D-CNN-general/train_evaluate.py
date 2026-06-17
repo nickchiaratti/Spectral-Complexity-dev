@@ -164,19 +164,20 @@ def train_and_evaluate(h5_path, output_h5='inference_results.h5', weights_path='
         f.create_dataset('baseline_epistemic_map', data=pixel_epistemic_std.astype(np.float32))
         
         curr_idx = 0
-        with torch.no_grad():
-            model.eval()
-            model.apply(enable_mc_dropout)
+        curr_idx = 0
+        model.eval()
+        model.apply(enable_mc_dropout)
+        
+        for batch in tqdm(eval_loader, desc="Evaluating inference results"):
+            X_seq = batch['X_seq'].to(device, non_blocking=True)
+            X_targets = batch['X_targets'].to(device, non_blocking=True)
+            seq_mask = batch['seq_mask'].to(device, non_blocking=True)
+            y_tensor = batch['Y_target'].to(device, non_blocking=True)
             
-            for batch in tqdm(eval_loader, desc="Evaluating inference results"):
-                X_seq = batch['X_seq'].to(device, non_blocking=True)
-                X_targets = batch['X_targets'].to(device, non_blocking=True)
-                seq_mask = batch['seq_mask'].to(device, non_blocking=True)
-                y_tensor = batch['Y_target'].to(device, non_blocking=True)
-                
-                batch_size = X_seq.size(0)
-                stochastic_preds = torch.zeros((mc_samples, batch_size, 1), device=device)
-                
+            batch_size = X_seq.size(0)
+            stochastic_preds = torch.zeros((mc_samples, batch_size, 1), device=device)
+            
+            with torch.no_grad():
                 for i in range(mc_samples):
                     stochastic_preds[i] = model(X_seq, X_targets, seq_mask)
                     

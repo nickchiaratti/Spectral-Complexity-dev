@@ -8,36 +8,39 @@ class TimeSeriesH5Dataset(Dataset):
     def __init__(self, h5_path, dataset_name):
         """
         Loads the 3D HDF5 dataset into memory and provides 1D time-series 
-        for each spatial pixel. Uses linear interpolation to fill NaNs 
-        for FFT compatibility, and tracks which values were synthetic.
+        for each spatial pixel. Replaces NaNs and QA-masked values with 0.0
+        and maps acquisition times to [-pi, pi] for NUFFT compatibility.
         """
         self.h5_path = h5_path
         self.dataset_name = dataset_name
         
         # Load entirely into memory. 
-        # (573, 117, 147) in float32 is ~39MB, easily held in RAM, avoiding HDF5 chunking overhead.
         with h5py.File(self.h5_path, 'r') as f:
             self.data = f[self.dataset_name][:]
+            self.common_mask = f['/HDFEOS/GRIDS/HARMONIZED/Data Fields/common_mask'][:]
+            acq_time = f[self.dataset_name].attrs['acquisition_time'][:]
             
         self.time_steps, self.height, self.width = self.data.shape
         self.num_pixels = self.height * self.width
         
         # Reshape to (num_pixels, time_steps)
-        # We transpose because original is (T, H, W) -> reshape to (T, H*W) -> transpose to (H*W, T)
         self.flattened_data = self.data.reshape(self.time_steps, -1).T
         
-        # 1. Generate Interpolation Provenance Mask (True where data was NaN)
-        self.interpolation_mask = np.isnan(self.flattened_data)
+        # 1. Generate Master Validation Mask
+        flat_cmask = self.common_mask.reshape(self.time_steps, -1).T
+        self.invalid_mask = np.isnan(self.flattened_data) | (flat_cmask > 0)
         
-        # 2. Linear Interpolation using Pandas
-        # axis=1 interpolates across the time steps for each pixel
-        # limit_direction='both' ensures extrapolation (forward/backward fill) for bounding NaNs
-        print(f"Interpolating missing data for {self.num_pixels} pixels to satisfy FFT constraints...")
-        df = pd.DataFrame(self.flattened_data)
-        interpolated_data = df.interpolate(axis=1, limit_direction='both').values
+        # 2. Zero-out invalid data for NUFFT
+        # In Type 1 NUFFT, a coefficient of 0.0 perfectly ignores the point.
+        self.flattened_data[self.invalid_mask] = 0.0
         
-        # Ensure we use PyTorch float32
-        self.tensor_data = torch.tensor(interpolated_data, dtype=torch.float32)
+        self.tensor_data = torch.tensor(self.flattened_data, dtype=torch.float32)
+        
+        # 3. Map Acq Times to [-pi, pi]
+        # NUFFT requires points in [-pi, pi]
+        t_min, t_max = np.min(acq_time), np.max(acq_time)
+        scaled_time = -np.pi + 2 * np.pi * (acq_time - t_min) / (t_max - t_min)
+        self.points = torch.tensor(scaled_time, dtype=torch.float32)
 
     def __len__(self):
         return self.num_pixels
@@ -45,10 +48,8 @@ class TimeSeriesH5Dataset(Dataset):
     def __getitem__(self, idx):
         """
         Returns:
-            pixel_ts: 1D Tensor of shape (time_steps,)
-            h: Original row index
-            w: Original col index
+            points: 1D Tensor of scaled timestamps (time_steps,)
+            values: 1D Tensor of valid data (0.0 where invalid) (time_steps,)
+            idx: Global flat index for batching
         """
-        h = idx // self.width
-        w = idx % self.width
-        return self.tensor_data[idx], h, w
+        return self.points, self.tensor_data[idx], idx

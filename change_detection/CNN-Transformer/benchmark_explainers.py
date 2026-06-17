@@ -9,7 +9,7 @@ from dataset import SITSDataset
 from model import MultiScaleSITSNet
 
 # PnPXAI Imports
-from pnpxai.explainers import IntegratedGradients, LRPEpsilonPlus, DeepLiftShap, AttentionRollout, GradientShap, SmoothGrad
+from pnpxai.explainers import IntegratedGradients, LRPEpsilonPlus, DeepLiftShap, AttentionRollout, SmoothGrad
 from pnpxai.evaluator.metrics import Sensitivity, Complexity
 
 # ==========================================
@@ -91,7 +91,6 @@ def main():
         "LRP Epsilon Plus": LRPEpsilonPlus(wrapped_model),
         "DeepLiftSHAP": DeepLiftShap(wrapped_model, baselines),
         "Attention Rollout": AttentionRollout(wrapped_model),
-        "Gradient SHAP": GradientShap(wrapped_model, baselines),
         "SmoothGrad": SmoothGrad(wrapped_model)
     }
     
@@ -102,6 +101,7 @@ def main():
         print(f"Benchmarking {name}...")
         try:
             # 1. Compute Attributions
+            X_seq.requires_grad_(True)
             attrs = explainer.attribute(inputs=X_seq, targets=eval_targets)
                 
             # 2. Evaluate using Sensitivity and Complexity
@@ -111,7 +111,7 @@ def main():
             comp_scores = []
             
             for i in range(len(X_seq)):
-                x_i = X_seq[i:i+1]
+                x_i = X_seq[i:i+1].clone().detach().requires_grad_(True)
                 t_i = X_targets[i:i+1]
                 m_i = seq_mask[i:i+1]
                 a_i = attrs[i:i+1] if isinstance(attrs, torch.Tensor) else attrs[0][i:i+1]
@@ -119,7 +119,7 @@ def main():
                 
                 w_single = PnPXAIWrapper(model, t_i, m_i)
                 
-                if name in ["DeepLiftSHAP", "Gradient SHAP"]:
+                if name in ["DeepLiftSHAP"]:
                     baselines_single = torch.zeros_like(x_i)
                     expl_single = explainers[name].__class__(w_single, baselines_single)
                 else:
