@@ -16,9 +16,14 @@ The `dhr_main.py` script implements a highly-optimized, GPU-accelerated harmonic
    - To manage memory and leverage GPU parallelization efficiently, the spatial domain is divided into discrete chunks (e.g., 256x256 pixels). 
    - Processing heavily utilizes PyTorch tensor operations, aligning with best practices for computationally intensive remote sensing tasks.
 
-3. **Non-Uniform Discrete Fourier Transform (NDFT):**
-   - For each pixel, within a defined lookback window (e.g., 5 years), an NDFT is computed. This explicitly handles the irregularly spaced data without requiring synthetic interpolation or temporal smoothing (preserving the raw reality of the input datasets).
-   - The periodogram is evaluated over a continuous frequency grid to identify the top $K$ dominant frequencies ($K$ is typically 2).
+3. **Non-Uniform Discrete Fourier Transform (NUDFT):**
+   - For each pixel, within a defined lookback window (e.g., 5 years), an NUDFT is computed. This explicitly handles the irregularly spaced data without requiring synthetic interpolation or temporal smoothing (preserving the raw reality of the input datasets).
+   - The calculation evaluates the continuous Fourier integral as a discrete summation directly over the irregular acquisition times ($T_{win}$).
+   - The frequency grid ($\Omega$) is defined as a set of continuous frequencies to probe (e.g., $f_{grid} \in [0.2, 4.0]$ Hz).
+   - A complex exponential basis ($E$) is constructed directly mapping every frequency to every non-uniform time step ($E = e^{-i \Omega T_{win}}$).
+   - The valid active signal ($Y_{active}$) is mean-centered to remove the zero-frequency (DC) component.
+   - The amplitude spectrum is derived from the matrix multiplication of the exponential basis $E$ and the centered signal $Y_{active\_centered}$, mathematically representing the summation: $X(\omega) = \left| \sum x(t_n) e^{-i \omega t_n} \right|$. 
+   - By using batched dense matrix multiplication operations on the GPU (`torch.matmul`), the periodogram is evaluated extremely fast across the specific frequency grid to identify the top $K$ dominant frequencies ($K$ is typically 2). This direct evaluation is computationally superior to gridding-based NUFFT approaches (like Kaiser-Bessel interpolation) due to the highly-targeted narrow frequency band and short sequence lengths, maximizing GPU Tensor Core utilization and avoiding sparse memory overheads.
 
 4. **Dynamic Harmonic Regression:**
    - A design matrix is constructed dynamically using the top $K$ frequencies identified by the NDFT. The matrix includes a constant term, along with cosine and sine terms for each frequency.

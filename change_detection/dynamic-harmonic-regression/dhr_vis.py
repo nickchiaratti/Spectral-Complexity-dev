@@ -12,8 +12,8 @@ import matplotlib.gridspec as gridspec
 
 plt.style.use(['science','no-latex'])
 
-LOCATION = "Malibu"
-IGNORE_COMMON_MASK = False
+LOCATION = "Tait"
+IGNORE_COMMON_MASK = True
 H5_PATH = f"C:/satelliteImagery/HLST30/HLST_{LOCATION}_Harmonized_SC_EM-7_Norm-bandCount.h5"
 
 import glob

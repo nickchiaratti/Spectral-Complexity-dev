@@ -8,7 +8,7 @@ import pyproj
 plt.style.use(['science','no-latex'])
 
 LOCATION = "Tait"
-TRAIN_END_YEAR = "2022"
+TRAIN_END_YEAR = "2025"
 OUTPUT_DIR = f"C:/satelliteImagery/HLST30/1D-CNN-{LOCATION}-TrainEnd{TRAIN_END_YEAR}"
 H5_PATH = f"C:/satelliteImagery/HLST30/HLST_{LOCATION}_Harmonized_SC_EM-7_Norm-bandCount.h5"
 INFERENCE_H5 = os.path.join(OUTPUT_DIR, 'inference_results.h5')

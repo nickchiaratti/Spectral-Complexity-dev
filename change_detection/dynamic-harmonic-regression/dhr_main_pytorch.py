@@ -9,17 +9,17 @@ import torch
 # ==========================================
 # 1. CONFIGURATION
 # ==========================================
-LOCATION = "Malibu"
+LOCATION = "Tait"
 H5_PATH = f"C:/satelliteImagery/HLST30/HLST_{LOCATION}_Harmonized_SC_EM-7_Norm-bandCount.h5"
 
 TARGET_METRIC = 'sliding_volume_z_score'
-IGNORE_COMMON_MASK = True # If True, utilizes noisy/cloudy pixels and relies on NDFT to filter noise
+IGNORE_COMMON_MASK = False # If True, utilizes noisy/cloudy pixels and relies on NDFT to filter noise
 RMSE_MULTIPLIER = 2
 CONSECUTIVE_ANOMALIES = 4
 MAX_WINDOW_YEARS = 5.0
-MIN_WINDOW_YEARS = 3.0
+MIN_WINDOW_YEARS = 1.0
 K_FREQUENCIES = 2
-MIN_SAMPLES = 2 * K_FREQUENCIES + 1 + 3 # 8 parameters + 3 df
+MIN_SAMPLES = 3 * K_FREQUENCIES + 1 + 3 # 8 parameters + 3 df
 CHUNK_SIZE = 256 # Spatial block size
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -193,14 +193,27 @@ def main():
                 
                 beta = torch.linalg.solve(XtX, Xty) # [P_active, F, 1]
                 
-                # 4. Training RMSE
+                # 4. Robust Training Variance (MAD)
                 Y_train_pred = torch.bmm(X_active, beta) # [P_active, W, 1]
                 e = Y_active_expanded - Y_train_pred
                 e_masked = e * M_active_expanded
-                SSE = (e_masked ** 2).sum(dim=1) # [P_active, 1]
-                df = M_active_sum.unsqueeze(-1) - F
-                df = torch.clamp(df, min=1)
-                RMSE_sq = SSE / df # [P_active, 1]
+                
+                # Replace zeros in e_masked with NaN for valid median calculation
+                e_valid = torch.where(M_active_expanded.bool(), e_masked, torch.tensor(float('nan'), device=DEVICE))
+                
+                # Compute median of valid residuals along the time window axis (dim=1)
+                med_e = torch.nanmedian(e_valid, dim=1, keepdim=True).values
+                
+                # Compute MAD
+                mad_e = torch.nanmedian(torch.abs(e_valid - med_e), dim=1, keepdim=True).values
+                
+                # Convert MAD to robust standard deviation (1.4826 assumes asymptotic normality of the inliers)
+                # Clamp to a small positive value to prevent zero variance if all residuals perfectly match
+                sigma_robust = torch.clamp(1.4826 * mad_e, min=1e-5)
+                
+                # Robust Variance
+                RMSE_sq = sigma_robust ** 2 # [P_active, 1, 1]
+                RMSE_sq = RMSE_sq.squeeze(1) # [P_active, 1]
                 
                 # 5. Prediction & Uncertainty Bound
                 target_angles = target_time * Omega_active # [K, P_active]

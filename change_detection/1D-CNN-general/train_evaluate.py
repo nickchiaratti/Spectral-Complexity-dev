@@ -7,7 +7,8 @@ import numpy as np
 import h5py
 import os
 from tqdm import tqdm
-from pnpxai.explainers import IntegratedGradients, LRPEpsilonPlus, DeepLiftShap
+from pnpxai.explainers import IntegratedGradients, LRPEpsilonPlus
+from captum.attr import GradientShap
 from pnpxai.evaluator.metrics import Sensitivity, Complexity
 
 def enable_mc_dropout(m):
@@ -147,21 +148,10 @@ def train_and_evaluate(h5_path, output_h5='inference_results.h5', weights_path='
     dt = np.dtype(dt_fields)
 
     total_anomalies = 0
-    print(f"Saving inference results incrementally to {output_h5}...")
-    with h5py.File(output_h5, 'w') as f:
-        if 'inference_results' in f:
-            del f['inference_results']
-        dset = f.create_dataset('inference_results', shape=(len(eval_dataset),), dtype=dt)
-        dset.attrs['train_end_date'] = str(train_end_date)
-        dset.attrs['confidence_multiplier'] = float(confidence_multiplier)
-        
-        if 'baseline_aleatoric_map' in f:
-            del f['baseline_aleatoric_map']
-        if 'baseline_epistemic_map' in f:
-            del f['baseline_epistemic_map']
-            
-        f.create_dataset('baseline_aleatoric_map', data=pixel_aleatoric_mae.astype(np.float32))
-        f.create_dataset('baseline_epistemic_map', data=pixel_epistemic_std.astype(np.float32))
+    print(f"Allocating inference results in memory to prevent overwriting existing dataset on crash...")
+    from contextlib import nullcontext
+    with nullcontext():
+        dset = np.empty(len(eval_dataset), dtype=dt)
         
         curr_idx = 0
         curr_idx = 0
@@ -240,7 +230,8 @@ def train_and_evaluate(h5_path, output_h5='inference_results.h5', weights_path='
                 
                 anom_idx = np.where(anomaly_flags == 1)[0]
                 if len(anom_idx) > 0:
-                    X_seq_anom = X_seq[anom_idx]
+                    torch.set_grad_enabled(True)
+                    X_seq_anom = X_seq[anom_idx].clone().requires_grad_(True)
                     X_targets_anom = X_targets[anom_idx]
                     seq_mask_anom = seq_mask[anom_idx]
                     
@@ -271,7 +262,7 @@ def train_and_evaluate(h5_path, output_h5='inference_results.h5', weights_path='
                     # Initialize Explainers
                     explainer_ig = IntegratedGradients(wrapped_model)
                     explainer_lrp = LRPEpsilonPlus(wrapped_model)
-                    explainer_shap = DeepLiftShap(wrapped_model, baselines)
+                    explainer_shap = GradientShap(wrapped_model)
                     
                     # Compute Attributions (Full Batch)
                     eval_targets = torch.zeros(X_seq_anom.size(0), dtype=torch.long, device=device)
@@ -279,7 +270,7 @@ def train_and_evaluate(h5_path, output_h5='inference_results.h5', weights_path='
                     attr_ig = explainer_ig.attribute(inputs=X_seq_anom, targets=eval_targets)
                     attr_lrp = explainer_lrp.attribute(inputs=X_seq_anom, targets=eval_targets)
                     
-                    attr_shap = explainer_shap.attribute(inputs=X_seq_anom, targets=eval_targets)
+                    attr_shap = explainer_shap.attribute(inputs=X_seq_anom, baselines=baselines, target=eval_targets)
                     
                     # Compute Evaluations (Element-by-Element due to Sensitivity's internal batching)
                     sens_scores_list = []
@@ -305,13 +296,13 @@ def train_and_evaluate(h5_path, output_h5='inference_results.h5', weights_path='
                     comp_scores = torch.cat(comp_scores_list)
                     
                     if isinstance(attr_ig, torch.Tensor):
-                        attr_ig_np = attr_ig.cpu().numpy()
-                        attr_lrp_np = attr_lrp.cpu().numpy() if isinstance(attr_lrp, torch.Tensor) else attr_lrp[0].cpu().numpy()
-                        attr_shap_np = attr_shap.cpu().numpy() if isinstance(attr_shap, torch.Tensor) else attr_shap[0].cpu().numpy()
+                        attr_ig_np = attr_ig.detach().cpu().numpy()
+                        attr_lrp_np = attr_lrp.detach().cpu().numpy() if isinstance(attr_lrp, torch.Tensor) else attr_lrp[0].detach().cpu().numpy()
+                        attr_shap_np = attr_shap.detach().cpu().numpy() if isinstance(attr_shap, torch.Tensor) else attr_shap[0].detach().cpu().numpy()
                     else:
-                        attr_ig_np = attr_ig[0].cpu().numpy()
-                        attr_lrp_np = attr_lrp[0].cpu().numpy()
-                        attr_shap_np = attr_shap[0].cpu().numpy()
+                        attr_ig_np = attr_ig[0].detach().cpu().numpy()
+                        attr_lrp_np = attr_lrp[0].detach().cpu().numpy()
+                        attr_shap_np = attr_shap[0].detach().cpu().numpy()
                     
                     abs_seq_ig = np.sum(np.abs(attr_ig_np), axis=1) # Sum over SeqLen
                     abs_seq_lrp = np.sum(np.abs(attr_lrp_np), axis=1)
@@ -326,8 +317,10 @@ def train_and_evaluate(h5_path, output_h5='inference_results.h5', weights_path='
                     attr_shap_zscore[anom_idx] = abs_seq_shap[:, -1]
                     
                     # Extract Metrics
-                    explainer_sensitivity[anom_idx] = sens_scores.cpu().numpy()
-                    explainer_complexity[anom_idx] = comp_scores.cpu().numpy()
+                    explainer_sensitivity[anom_idx] = sens_scores.detach().cpu().numpy()
+                    explainer_complexity[anom_idx] = comp_scores.detach().cpu().numpy()
+                    
+                    torch.set_grad_enabled(False)
                 
                 # Extracted metadata above
                 
@@ -355,6 +348,15 @@ def train_and_evaluate(h5_path, output_h5='inference_results.h5', weights_path='
                 
                 dset[curr_idx:curr_idx + batch_size] = batch_results
                 curr_idx += batch_size
+
+    print(f"\nSaving inference results to {output_h5}...")
+    with h5py.File(output_h5, 'w') as f:
+        dset_out = f.create_dataset('inference_results', data=dset)
+        dset_out.attrs['train_end_date'] = str(train_end_date)
+        dset_out.attrs['confidence_multiplier'] = float(confidence_multiplier)
+        
+        f.create_dataset('baseline_aleatoric_map', data=pixel_aleatoric_mae.astype(np.float32))
+        f.create_dataset('baseline_epistemic_map', data=pixel_epistemic_std.astype(np.float32))
 
     anomaly_rate = (total_anomalies / len(eval_dataset)) * 100 if len(eval_dataset) > 0 else 0
     print("\n--- Evaluation Report ---")
