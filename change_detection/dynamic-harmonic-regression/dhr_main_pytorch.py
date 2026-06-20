@@ -17,9 +17,9 @@ IGNORE_COMMON_MASK = False # If True, utilizes noisy/cloudy pixels and relies on
 RMSE_MULTIPLIER = 2
 CONSECUTIVE_ANOMALIES = 4
 MAX_WINDOW_YEARS = 5.0
-MIN_WINDOW_YEARS = 1.0
+MIN_WINDOW_YEARS = 2.0
 K_FREQUENCIES = 2
-MIN_SAMPLES = 3 * K_FREQUENCIES + 1 + 3 # 8 parameters + 3 df
+MIN_SAMPLES = 2 * K_FREQUENCIES + 1 + 3 # 8 parameters + 3 df
 CHUNK_SIZE = 256 # Spatial block size
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -157,18 +157,48 @@ def main():
                 Y_active = Y_win[:, active_indices]
                 M_active = M_win[:, active_indices]
                 
-                # 1. Batched NDFT
+                # 1. Batched NDFT setup
                 E = torch.exp(-1j * Omega.unsqueeze(1) * T_win.unsqueeze(0)) # [K_grid, W]
                 Y_active_sum = (Y_active * M_active).sum(dim=0)
                 M_active_sum = M_active.sum(dim=0)
                 Y_active_mean = Y_active_sum / M_active_sum
                 Y_active_centered = (Y_active - Y_active_mean.unsqueeze(0)) * M_active
                 
-                Spectrum = torch.abs(torch.matmul(E, Y_active_centered.to(torch.complex64))) # [K_grid, P_active]
+                # 1 & 2. Iterative Frequency Extraction (ALFT/OMP)
+                Y_residual = Y_active_centered.clone()
+                Omega_active_list = []
                 
-                # 2. Peak Finding
-                topk_indices = torch.topk(Spectrum, K_FREQUENCIES, dim=0).indices # [K_FREQUENCIES, P_active]
-                Omega_active = Omega[topk_indices] # [K_FREQUENCIES, P_active]
+                for k in range(K_FREQUENCIES):
+                    Spectrum = torch.abs(torch.matmul(E, Y_residual.to(torch.complex64))) # [K_grid, P_active]
+                    top1_indices = torch.argmax(Spectrum, dim=0) # [P_active]
+                    Omega_k = Omega[top1_indices] # [P_active]
+                    Omega_active_list.append(Omega_k)
+                    
+                    if k < K_FREQUENCIES - 1:
+                        Omega_so_far = torch.stack(Omega_active_list, dim=0) # [k+1, P_active]
+                        angles_so_far = T_win.unsqueeze(1).unsqueeze(2) * Omega_so_far.unsqueeze(0) # [W, k+1, P_active]
+                        X_cos_so_far = torch.cos(angles_so_far)
+                        X_sin_so_far = torch.sin(angles_so_far)
+                        X_const_so_far = torch.ones(len(T_win), 1, P_active, device=DEVICE)
+                        X_active_so_far = torch.cat([X_const_so_far, X_cos_so_far, X_sin_so_far], dim=1)
+                        X_active_so_far = X_active_so_far.permute(2, 0, 1)
+                        
+                        M_active_expanded = M_active.transpose(0, 1).unsqueeze(-1)
+                        X_masked_so_far = X_active_so_far * M_active_expanded
+                        
+                        F_so_far = 2 * (k + 1) + 1
+                        XtX_so_far = torch.bmm(X_masked_so_far.transpose(1, 2), X_masked_so_far)
+                        XtX_so_far += torch.eye(F_so_far, device=DEVICE) * 1e-5
+                        
+                        Y_orig_expanded = Y_active_centered.transpose(0, 1).unsqueeze(-1)
+                        Xty_so_far = torch.bmm(X_masked_so_far.transpose(1, 2), Y_orig_expanded * M_active_expanded)
+                        
+                        beta_so_far = torch.linalg.solve(XtX_so_far, Xty_so_far)
+                        
+                        Y_pred_so_far = torch.bmm(X_active_so_far, beta_so_far).squeeze(-1).transpose(0, 1)
+                        Y_residual = (Y_active_centered - Y_pred_so_far) * M_active
+                
+                Omega_active = torch.stack(Omega_active_list, dim=0) # [K, P_active]
                 
                 # 3. Design Matrix
                 T_win_expanded = T_win.unsqueeze(1).unsqueeze(2) # [W, 1, 1]

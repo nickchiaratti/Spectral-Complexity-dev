@@ -154,7 +154,7 @@ def main():
                 Y_active = Y_win[:, active_indices]
                 M_active = M_win[:, active_indices]
                 
-                # 1. Batched NDFT
+                # 1. Batched NDFT setup
                 E = np.exp(-1j * Omega[:, None] * T_win[None, :]) # [K_grid, W]
                 Y_active_sum = (Y_active * M_active).sum(axis=0)
                 M_active_sum = M_active.sum(axis=0)
@@ -166,11 +166,42 @@ def main():
                 
                 Y_active_centered = (Y_active - Y_active_mean[None, :]) * M_active
                 
-                Spectrum = np.abs(np.matmul(E, Y_active_centered.astype(np.complex64))) # [K_grid, P_active]
+                # 1 & 2. Iterative Frequency Extraction (ALFT/OMP)
+                Y_residual = Y_active_centered.copy()
+                Omega_active_list = []
                 
-                # 2. Peak Finding
-                topk_indices = np.argsort(Spectrum, axis=0)[-K_FREQUENCIES:][::-1] # [K_FREQUENCIES, P_active]
-                Omega_active = Omega[topk_indices] # [K_FREQUENCIES, P_active]
+                for k in range(K_FREQUENCIES):
+                    Spectrum = np.abs(np.matmul(E, Y_residual.astype(np.complex64))) # [K_grid, P_active]
+                    top1_indices = np.argmax(Spectrum, axis=0) # [P_active]
+                    Omega_k = Omega[top1_indices] # [P_active]
+                    Omega_active_list.append(Omega_k)
+                    
+                    if k < K_FREQUENCIES - 1:
+                        Omega_so_far = np.stack(Omega_active_list, axis=0) # [k+1, P_active]
+                        angles_so_far = T_win[:, None, None] * Omega_so_far[None, :, :] # [W, k+1, P_active]
+                        
+                        X_cos_so_far = np.cos(angles_so_far)
+                        X_sin_so_far = np.sin(angles_so_far)
+                        X_const_so_far = np.ones((len(T_win), 1, P_active), dtype=np.float32)
+                        X_active_so_far = np.concatenate([X_const_so_far, X_cos_so_far, X_sin_so_far], axis=1) # [W, F_so_far, P_active]
+                        X_active_so_far = np.transpose(X_active_so_far, (2, 0, 1)) # [P_active, W, F_so_far]
+                        
+                        M_active_expanded = np.transpose(M_active, (1, 0))[:, :, None] # [P_active, W, 1]
+                        X_masked_so_far = X_active_so_far * M_active_expanded
+                        
+                        F_so_far = 2 * (k + 1) + 1
+                        XtX_so_far = np.matmul(np.transpose(X_masked_so_far, (0, 2, 1)), X_masked_so_far)
+                        XtX_so_far += np.eye(F_so_far) * 1e-5
+                        
+                        Y_orig_expanded = np.transpose(Y_active_centered, (1, 0))[:, :, None]
+                        Xty_so_far = np.matmul(np.transpose(X_masked_so_far, (0, 2, 1)), Y_orig_expanded * M_active_expanded)
+                        
+                        beta_so_far = np.linalg.solve(XtX_so_far, Xty_so_far)
+                        
+                        Y_pred_so_far = np.matmul(X_active_so_far, beta_so_far).squeeze(-1).T # [W, P_active]
+                        Y_residual = (Y_active_centered - Y_pred_so_far) * M_active
+                
+                Omega_active = np.stack(Omega_active_list, axis=0) # [K, P_active]
                 
                 # 3. Design Matrix
                 T_win_expanded = T_win[:, None, None] # [W, 1, 1]

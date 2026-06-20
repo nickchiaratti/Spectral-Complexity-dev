@@ -1,0 +1,1 @@
+The results appear to just fit the periodic data to a range of values and has a low pass filter to accept changes from a baseline. When the data deviate from this range of values, it is flagged as a change. It will flag the changes from the baseline if they deviate outside the expected range. A gradual change of periodic behavior would be slowly integrated in and not flagged. 

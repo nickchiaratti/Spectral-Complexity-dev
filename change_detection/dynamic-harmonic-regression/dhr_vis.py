@@ -13,7 +13,7 @@ import matplotlib.gridspec as gridspec
 plt.style.use(['science','no-latex'])
 
 LOCATION = "Tait"
-IGNORE_COMMON_MASK = True
+IGNORE_COMMON_MASK = False
 H5_PATH = f"C:/satelliteImagery/HLST30/HLST_{LOCATION}_Harmonized_SC_EM-7_Norm-bandCount.h5"
 
 import glob
@@ -79,6 +79,7 @@ def plot_pixel_sits(pixel_y, pixel_x, source_h5_path, inference_results_h5, ax_t
         predicted = f['predicted_series'][:, pixel_y, pixel_x]
         rmse = f['rmse_series'][:, pixel_y, pixel_x]
         anomalies = f['anomaly_flags'][:, pixel_y, pixel_x]
+        change_date_ts = f['change_date_timestamp'][pixel_y, pixel_x]
         dom_freq = f['dominant_frequencies_series'][:, :, pixel_y, pixel_x] # [N, K]
         rmse_multiplier = f.attrs.get('RMSE_MULTIPLIER', 3.0)
         max_window_years = f.attrs.get('MAX_WINDOW_YEARS', 5.0)
@@ -122,7 +123,13 @@ def plot_pixel_sits(pixel_y, pixel_x, source_h5_path, inference_results_h5, ax_t
         if np.any(anom_mask):
             anom_dates = pred_dates[anom_mask]
             anom_vals = z_score[pred_mask][anom_mask]
-            ax_ts_z.plot(anom_dates, anom_vals, 'rx', markersize=10, mew=2, label='Anomalies')
+            ax_ts_z.scatter(anom_dates, anom_vals, color='red', s=30, zorder=4, label='Anomaly (Unconfirmed)')
+            
+            if not np.isnan(change_date_ts):
+                change_dt = datetime.fromtimestamp(change_date_ts, timezone.utc)
+                conf_mask = np.array([d >= change_dt for d in anom_dates])
+                if np.any(conf_mask):
+                    ax_ts_z.scatter(anom_dates[conf_mask], anom_vals[conf_mask], color='darkred', marker='*', s=150, zorder=6, label='Confirmed Structural Change')
             
     if current_date is not None:
         ax_ts_z.axvline(x=current_date, color='orange', linestyle='--', label='Displayed Frame')
