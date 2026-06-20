@@ -9,9 +9,9 @@ plt.style.use(['science','no-latex'])
 
 LOCATION = "Tait"
 TRAIN_END_YEAR = "2025"
-OUTPUT_DIR = f"C:/satelliteImagery/HLST30/1D-CNN-{LOCATION}-TrainEnd{TRAIN_END_YEAR}"
+OUTPUT_DIR = f"C:/satelliteImagery/HLST30/CNN-Transformer-{LOCATION}-TrainEnd{TRAIN_END_YEAR}"
 H5_PATH = f"C:/satelliteImagery/HLST30/HLST_{LOCATION}_Harmonized_SC_EM-7_Norm-bandCount.h5"
-INFERENCE_H5 = os.path.join(OUTPUT_DIR, f'CNN_{LOCATION}_baseline_weights_pre{TRAIN_END_YEAR}.h5')
+INFERENCE_H5 = os.path.join(OUTPUT_DIR, f'CNN-Transformer_{LOCATION}_baseline_weights_pre{TRAIN_END_YEAR}.h5')
 
 
 def plot_pixel_sits(pixel_y, pixel_x, source_h5_path, inference_results_h5, ax=None, current_date=None):
@@ -122,6 +122,7 @@ def plot_pixel_sits(pixel_y, pixel_x, source_h5_path, inference_results_h5, ax=N
         
         preds = {k: [] for k in range(1, num_preds + 1)}
         stds = {k: [] for k in range(1, num_preds + 1)}
+        actuals = {k: [] for k in range(1, num_preds + 1)}
         
         valid_idx = np.where(~is_invalid)[0]
         valid_acq_time = acq_time[valid_idx]
@@ -144,6 +145,7 @@ def plot_pixel_sits(pixel_y, pixel_x, source_h5_path, inference_results_h5, ax=N
             for k in range(1, num_preds + 1):
                 preds[k].append(row[f'Pred_{k}'])
                 stds[k].append(row[f'Std_{k}'])
+                actuals[k].append(row[f'Actual_{k}'])
                 
         srt = np.argsort(pred_dates)
         pred_dates = np.array(pred_dates)[srt]
@@ -153,6 +155,7 @@ def plot_pixel_sits(pixel_y, pixel_x, source_h5_path, inference_results_h5, ax=N
         for k in range(1, num_preds + 1):
             preds[k] = np.array(preds[k])[srt]
             stds[k] = np.array(stds[k])[srt]
+            actuals[k] = np.array(actuals[k])[srt]
             
         tot_upper = preds[1] + conf_mult * stds[1]
         tot_lower = preds[1] - conf_mult * stds[1]
@@ -174,12 +177,12 @@ def plot_pixel_sits(pixel_y, pixel_x, source_h5_path, inference_results_h5, ax=N
         
         # Anomalies
         anom_dates = pred_dates[anomaly_flags == 1]
-        anom_vals = preds[1][anomaly_flags == 1]
+        anom_vals = actuals[1][anomaly_flags == 1]
         ax.scatter(anom_dates, anom_vals, color='red', s=30, zorder=4, label='Anomaly (Unconfirmed)')
         
         # Confirmed Anomalies
         conf_dates = pred_dates[confirmed_flags == 1]
-        conf_vals = preds[1][confirmed_flags == 1]
+        conf_vals = actuals[1][confirmed_flags == 1]
         if len(conf_dates) > 0:
             ax.scatter(conf_dates, conf_vals, color='darkred', marker='*', s=150, zorder=6, label='Confirmed Structural Change')
         

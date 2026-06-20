@@ -9,10 +9,11 @@ import torch
 # ==========================================
 # 1. CONFIGURATION
 # ==========================================
-LOCATION = "Tait"
+LOCATION = "Malibu"
 H5_PATH = f"C:/satelliteImagery/HLST30/HLST_{LOCATION}_Harmonized_SC_EM-7_Norm-bandCount.h5"
 
 TARGET_METRIC = 'sliding_volume_z_score'
+IGNORE_COMMON_MASK = True # If True, utilizes noisy/cloudy pixels and relies on NDFT to filter noise
 RMSE_MULTIPLIER = 2
 CONSECUTIVE_ANOMALIES = 4
 MAX_WINDOW_YEARS = 5.0
@@ -38,7 +39,8 @@ def extract_fractional_years(acq_times):
 def main():
     _term_str = f"K{K_FREQUENCIES}"
     _win_str = f"W{int(MAX_WINDOW_YEARS)}"
-    output_h5 = f"C:/satelliteImagery/HLST30/CCD/{LOCATION}_DHR_Change_Detection_{_term_str}_{_win_str}.h5"
+    _mask_str = "_unmasked" if IGNORE_COMMON_MASK else ""
+    output_h5 = f"C:/satelliteImagery/HLST30/DHR/{LOCATION}_DHR_Change_Detection_{_term_str}_{_win_str}{_mask_str}.h5"
 
     print(f"Loading data from {H5_PATH}...")
     with h5py.File(H5_PATH, 'r') as f:
@@ -49,7 +51,10 @@ def main():
         y_data = metric_ds[...]
         
         common_mask = data_grp['common_mask'][...]
-        valid_mask = (common_mask == 0) & ~np.isnan(y_data)
+        if IGNORE_COMMON_MASK:
+            valid_mask = ~np.isnan(y_data)
+        else:
+            valid_mask = (common_mask == 0) & ~np.isnan(y_data)
         
         geo_transform = metric_ds.attrs.get('GeoTransform')
         spatial_ref = metric_ds.attrs.get('spatial_ref')
@@ -73,6 +78,7 @@ def main():
     predicted_series = np.full((num_frames, height, width), np.nan, dtype=np.float32)
     rmse_series = np.full((num_frames, height, width), np.nan, dtype=np.float32)
     dominant_frequencies_series = np.full((num_frames, K_FREQUENCIES, height, width), np.nan, dtype=np.float32)
+    amplitude_series = np.full((num_frames, K_FREQUENCIES, height, width), np.nan, dtype=np.float32)
     anomaly_flags = np.zeros((num_frames, height, width), dtype=np.uint8)
 
     y_data_torch = torch.from_numpy(y_data).float()
@@ -120,6 +126,7 @@ def main():
             c_pred = torch.full((num_frames, P), np.nan, dtype=torch.float32, device=DEVICE)
             c_rmse = torch.full((num_frames, P), np.nan, dtype=torch.float32, device=DEVICE)
             c_freq = torch.full((num_frames, K_FREQUENCIES, P), np.nan, dtype=torch.float32, device=DEVICE)
+            c_amp = torch.full((num_frames, K_FREQUENCIES, P), np.nan, dtype=torch.float32, device=DEVICE)
             c_flags = torch.zeros((num_frames, P), dtype=torch.uint8, device=DEVICE)
 
             for t in range(num_frames):
@@ -221,6 +228,13 @@ def main():
                 c_rmse[t, active_indices] = S.squeeze(-1)
                 c_freq[t, :, active_indices] = Omega_active
                 
+                # Extract amplitude from beta: sqrt(cos_coeff^2 + sin_coeff^2)
+                # beta shape is [P_active, F, 1]
+                cos_coeffs = beta[:, 1:K_FREQUENCIES+1, 0] # [P_active, K]
+                sin_coeffs = beta[:, K_FREQUENCIES+1:2*K_FREQUENCIES+1, 0] # [P_active, K]
+                amplitudes = torch.sqrt(cos_coeffs**2 + sin_coeffs**2).transpose(0, 1) # [K, P_active]
+                c_amp[t, :, active_indices] = amplitudes
+                
                 anom_mask = is_anomaly.squeeze(-1)
                 active_anom_indices = active_indices[anom_mask]
                 active_norm_indices = active_indices[~anom_mask]
@@ -250,6 +264,7 @@ def main():
             c_pred_cpu = c_pred.cpu().numpy().reshape(num_frames, chunk_h, chunk_w)
             c_rmse_cpu = c_rmse.cpu().numpy().reshape(num_frames, chunk_h, chunk_w)
             c_freq_cpu = c_freq.cpu().numpy().reshape(num_frames, K_FREQUENCIES, chunk_h, chunk_w)
+            c_amp_cpu = c_amp.cpu().numpy().reshape(num_frames, K_FREQUENCIES, chunk_h, chunk_w)
             c_flags_cpu = c_flags.cpu().numpy().reshape(num_frames, chunk_h, chunk_w)
             c_date_cpu = chunk_date.cpu().numpy().reshape(chunk_h, chunk_w)
             c_count_cpu = chunk_count.cpu().numpy().reshape(chunk_h, chunk_w)
@@ -257,6 +272,7 @@ def main():
             predicted_series[:, y_start:y_end, x_start:x_end] = c_pred_cpu
             rmse_series[:, y_start:y_end, x_start:x_end] = c_rmse_cpu
             dominant_frequencies_series[:, :, y_start:y_end, x_start:x_end] = c_freq_cpu
+            amplitude_series[:, :, y_start:y_end, x_start:x_end] = c_amp_cpu
             anomaly_flags[:, y_start:y_end, x_start:x_end] = c_flags_cpu
             change_date_map[y_start:y_end, x_start:x_end] = c_date_cpu
             change_count_map[y_start:y_end, x_start:x_end] = c_count_cpu
@@ -277,11 +293,13 @@ def main():
         out_file.attrs['MIN_SAMPLES'] = MIN_SAMPLES
         out_file.attrs['K_FREQUENCIES'] = K_FREQUENCIES
         out_file.attrs['TARGET_METRIC'] = TARGET_METRIC
+        out_file.attrs['IGNORE_COMMON_MASK'] = IGNORE_COMMON_MASK
         out_file.attrs['SOURCE_DATA'] = H5_PATH
         
         out_file.create_dataset('predicted_series', data=predicted_series, compression='gzip')
         out_file.create_dataset('rmse_series', data=rmse_series, compression='gzip')
         out_file.create_dataset('dominant_frequencies_series', data=dominant_frequencies_series, compression='gzip')
+        out_file.create_dataset('amplitude_series', data=amplitude_series, compression='gzip')
         out_file.create_dataset('anomaly_flags', data=anomaly_flags, compression='gzip')
         out_file.create_dataset('change_date_timestamp', data=change_date_map, compression='gzip')
         out_file.create_dataset('change_count', data=change_count_map, compression='gzip')

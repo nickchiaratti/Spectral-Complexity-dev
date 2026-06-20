@@ -90,7 +90,7 @@ def main():
         "Integrated Gradients": IntegratedGradients(wrapped_model),
         "LRP Epsilon Plus": LRPEpsilonPlus(wrapped_model),
         "DeepLiftSHAP": DeepLiftShap(wrapped_model, baselines),
-        "Attention Rollout": AttentionRollout(wrapped_model),
+        # "Attention Rollout": AttentionRollout(wrapped_model),
         "SmoothGrad": SmoothGrad(wrapped_model)
     }
     

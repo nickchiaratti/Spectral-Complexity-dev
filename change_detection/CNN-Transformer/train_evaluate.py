@@ -7,8 +7,7 @@ import numpy as np
 import h5py
 import os
 from tqdm import tqdm
-from pnpxai.explainers import IntegratedGradients, LRPEpsilonPlus, DeepLiftShap, AttentionRollout
-from pnpxai.evaluator.metrics import Sensitivity, Complexity
+
 
 def enable_mc_dropout(m):
     if type(m) == nn.Dropout:
@@ -240,107 +239,7 @@ def train_and_evaluate(h5_path, output_h5='inference_results.h5', weights_path='
                 explainer_sensitivity = np.full(batch_size, np.nan, dtype=np.float32)
                 explainer_complexity = np.full(batch_size, np.nan, dtype=np.float32)
                 
-                anom_idx = np.where(anomaly_flags == 1)[0]
-                if len(anom_idx) > 0:
-                    X_seq_anom = X_seq[anom_idx]
-                    X_targets_anom = X_targets[anom_idx]
-                    seq_mask_anom = seq_mask[anom_idx]
-                    
-                    # PnPXAI does not natively support additional_forward_args in 0.1.4
-                    # We wrap the model to only require the primary input
-                    class PnPXAIWrapper(nn.Module):
-                        def __init__(self, base_model, targets, mask):
-                            super().__init__()
-                            self.base_model = base_model
-                            self.targets = targets
-                            self.mask = mask
-                            
-                        def forward(self, x):
-                            batch_ratio = x.size(0) // self.targets.size(0)
-                            if batch_ratio > 1:
-                                t = self.targets.repeat(batch_ratio, *([1] * (self.targets.dim() - 1)))
-                                m = self.mask.repeat(batch_ratio, *([1] * (self.mask.dim() - 1)))
-                            else:
-                                t = self.targets
-                                m = self.mask
-                            return self.base_model(x, t, m)
-                            
-                    wrapped_model = PnPXAIWrapper(model, X_targets_anom, seq_mask_anom)
-                    
-                    # DeepLiftShap requires a baseline distribution at initialization.
-                    baselines = torch.zeros_like(X_seq_anom)
-                    
-                    # Initialize Explainers
-                    explainer_ig = IntegratedGradients(wrapped_model)
-                    explainer_lrp = LRPEpsilonPlus(wrapped_model)
-                    explainer_shap = DeepLiftShap(wrapped_model, baselines)
-                    explainer_attn = AttentionRollout(wrapped_model)
-                    
-                    # Compute Attributions (Full Batch)
-                    eval_targets = torch.zeros(X_seq_anom.size(0), dtype=torch.long, device=device)
-                    X_seq_anom.requires_grad_(True)
-                    
-                    attr_ig = explainer_ig.attribute(inputs=X_seq_anom, targets=eval_targets)
-                    attr_lrp = explainer_lrp.attribute(inputs=X_seq_anom, targets=eval_targets)
-                    attr_attn = explainer_attn.attribute(inputs=X_seq_anom, targets=eval_targets)
-                    
-                    attr_shap = explainer_shap.attribute(inputs=X_seq_anom, targets=eval_targets)
-                    
-                    # Compute Evaluations (Element-by-Element due to Sensitivity's internal batching)
-                    sens_scores_list = []
-                    comp_scores_list = []
-                    
-                    for i in range(len(X_seq_anom)):
-                        x_i = X_seq_anom[i:i+1].clone().detach().requires_grad_(True)
-                        t_i = X_targets_anom[i:i+1]
-                        m_i = seq_mask_anom[i:i+1]
-                        a_i = attr_ig[i:i+1]
-                        tgt_i = eval_targets[i:i+1]
-                        
-                        w_single = PnPXAIWrapper(model, t_i, m_i)
-                        expl_single = IntegratedGradients(w_single)
-                        
-                        metric_sens = Sensitivity(model=w_single, explainer=expl_single)
-                        metric_comp = Complexity(model=w_single, explainer=expl_single)
-                        
-                        sens_scores_list.append(metric_sens.evaluate(x_i, targets=tgt_i, attributions=a_i))
-                        comp_scores_list.append(metric_comp.evaluate(x_i, targets=tgt_i, attributions=a_i))
-                        
-                    sens_scores = torch.cat(sens_scores_list)
-                    comp_scores = torch.cat(comp_scores_list)
-                    
-                    if isinstance(attr_ig, torch.Tensor):
-                        attr_ig_np = attr_ig.cpu().numpy()
-                        attr_lrp_np = attr_lrp.cpu().numpy() if isinstance(attr_lrp, torch.Tensor) else attr_lrp[0].cpu().numpy()
-                        attr_shap_np = attr_shap.cpu().numpy() if isinstance(attr_shap, torch.Tensor) else attr_shap[0].cpu().numpy()
-                        attr_attn_np = attr_attn.cpu().numpy() if isinstance(attr_attn, torch.Tensor) else attr_attn[0].cpu().numpy()
-                    else:
-                        attr_ig_np = attr_ig[0].cpu().numpy()
-                        attr_lrp_np = attr_lrp[0].cpu().numpy()
-                        attr_shap_np = attr_shap[0].cpu().numpy()
-                        attr_attn_np = attr_attn[0].cpu().numpy()
-                    
-                    abs_seq_ig = np.sum(np.abs(attr_ig_np), axis=1) # Sum over SeqLen
-                    abs_seq_lrp = np.sum(np.abs(attr_lrp_np), axis=1)
-                    abs_seq_shap = np.sum(np.abs(attr_shap_np), axis=1)
-                    # AttentionRollout outputs sequence-level attention weights directly, no channels to sum.
-                    abs_seq_attn = np.sum(np.abs(attr_attn_np), axis=1) if attr_attn_np.ndim > 2 else attr_attn_np
-                    
-                    attr_doy[anom_idx] = np.sum(abs_seq_ig[:, 0:2], axis=1)
-                    attr_tod[anom_idx] = np.sum(abs_seq_ig[:, 2:4], axis=1)
-                    attr_dt[anom_idx] = np.sum(abs_seq_ig[:, 4:-1], axis=1)
-                    attr_zscore[anom_idx] = abs_seq_ig[:, -1]
-                    
-                    attr_lrp_zscore[anom_idx] = abs_seq_lrp[:, -1]
-                    attr_shap_zscore[anom_idx] = abs_seq_shap[:, -1]
-                    
-                    # Store attention directly (we store the max or mean attention weight across the sequence if needed)
-                    # For visualization, we just want to know if there's high attention *somewhere*.
-                    attr_attention[anom_idx] = np.max(abs_seq_attn, axis=1) if abs_seq_attn.ndim > 1 else abs_seq_attn
-                    
-                    # Extract Metrics
-                    explainer_sensitivity[anom_idx] = sens_scores.cpu().numpy()
-                    explainer_complexity[anom_idx] = comp_scores.cpu().numpy()
+
                 
                 # Extracted metadata above
                 

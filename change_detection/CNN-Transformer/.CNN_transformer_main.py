@@ -8,9 +8,9 @@ os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
 # IDE CONFIGURATION
 # ==========================================
 LOCATION = "Tait"
-TRAIN_END_YEAR = "2025"
+TRAIN_END_YEAR = "2024"
 H5_PATH = f"C:/satelliteImagery/HLST30/HLST_{LOCATION}_Harmonized_SC_EM-7_Norm-bandCount.h5"
-OUTPUT_DIR = f"C:/satelliteImagery/HLST30/CNN-Transformer-{LOCATION}-TrainEnd{TRAIN_END_YEAR}"
+OUTPUT_DIR = f"C:/satelliteImagery/HLST30/CNN-Transformer/CNN-Transformer-{LOCATION}-TrainEnd{TRAIN_END_YEAR}"
 TRAIN_END_DATE = f"{TRAIN_END_YEAR}-01-01"
 SKIP_TRAIN = True
 MC_SAMPLES = 5

@@ -12,20 +12,17 @@ from pnpxai.explainers import IntegratedGradients
 # ==========================================
 # 1. SETUP & CONFIGURATION
 # ==========================================
-LOCATION = "Malibu"
-H5_PATH = f"E:/satelliteImagery/HLST30/HLST_{LOCATION}_Harmonized_SC_EM-7_Norm-bandCount.h5"
+LOCATION = "Tait"
+H5_PATH = f"C:/satelliteImagery/HLST30/HLST_{LOCATION}_Harmonized_SC_EM-7_Norm-bandCount.h5"
 DATASET_NAME = "HDFEOS/GRIDS/HARMONIZED/Data Fields/sliding_volume_z_score"
-OUTPUT_DIR = f"E:/satelliteImagery/HLST30/OOD/{LOCATION}"
+OUTPUT_DIR = f"C:/satelliteImagery/HLST30/OOD/{LOCATION}"
 
 BATCH_SIZE = 256
 EPOCHS = 10
 LATENT_DIM = 8
 CONTAMINATION_RATE = 0.2
+NUM_BINS = 76
 
-# Configuration Options for Overlay Filtering
-# Filtering logic is removed because synthetic interpolation is mathematically removed via NUFFT
-
-# Ensure computationally intensive tasks are optimized for GPU
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
 
@@ -43,7 +40,7 @@ print(f"Loaded dataset: {dataset.num_pixels} pixels, {sequence_length} time step
 # ==========================================
 # 3. MODEL INITIALIZATION
 # ==========================================
-model = FrequencyAutoencoder(sequence_length=sequence_length, latent_dim=LATENT_DIM).to(device)
+model = FrequencyAutoencoder(sequence_length=sequence_length, latent_dim=LATENT_DIM, num_bins=NUM_BINS).to(device)
 optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
 
 # Using L1 Loss (MAE) is critical here to prevent the model from 
@@ -262,10 +259,23 @@ if __name__ == "__main__":
     time_map = compute_temporal_ood_map(ood_map)
     
     results_path = os.path.join(OUTPUT_DIR, f"{LOCATION}_ood_results.h5")
+    
+    print("Computing mean dataset frequency representation...")
+    mean_loader = DataLoader(dataset, batch_size=256, shuffle=False)
+    all_freq_amps = []
+    with torch.no_grad():
+        for pts, vals, _ in mean_loader:
+            pts, vals = pts.to(device), vals.to(device)
+            f_amps, _ = model(pts, vals)
+            all_freq_amps.append(f_amps.cpu())
+    mean_frame_freq = torch.cat(all_freq_amps, dim=0).mean(dim=0).numpy().flatten()
+    
     with h5py.File(results_path, 'w') as f_out:
+        f_out.attrs['NUM_BINS'] = NUM_BINS
         dset_map = f_out.create_dataset("ood_map", data=ood_map.astype(np.uint8))
         dset_err = f_out.create_dataset("reconstruction_errors", data=errors)
         dset_time = f_out.create_dataset("ood_time_map", data=time_map, dtype=np.int32)
+        f_out.create_dataset("mean_frame_freq", data=mean_frame_freq)
         
         # Copy geospatial metadata from source
         with h5py.File(H5_PATH, 'r') as f_in:

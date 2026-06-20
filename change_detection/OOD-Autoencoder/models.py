@@ -3,7 +3,7 @@ import torch.nn as nn
 import torchkbnufft as tkbn
 
 class FrequencyAutoencoder(nn.Module):
-    def __init__(self, sequence_length, latent_dim):
+    def __init__(self, sequence_length, latent_dim, num_bins=None):
         """
         Autoencoder that works strictly in the frequency domain.
         It uses the Fast Fourier Transform to extract the amplitude spectrum
@@ -11,11 +11,13 @@ class FrequencyAutoencoder(nn.Module):
         """
         super(FrequencyAutoencoder, self).__init__()
         
-        # Length of the output from the NUFFT slice [:, sequence_length // 2:]
-        self.freq_length = sequence_length - (sequence_length // 2)
+        self.num_bins = num_bins if num_bins is not None else sequence_length
+        
+        # Length of the output from the NUFFT slice [:, num_bins // 2:]
+        self.freq_length = self.num_bins - (self.num_bins // 2)
         
         # NUFFT Object (Type 1: Non-uniform to Uniform)
-        self.nufft = tkbn.KbNufftAdjoint(im_size=(sequence_length,))
+        self.nufft = tkbn.KbNufftAdjoint(im_size=(self.num_bins,))
         
         # Encoder: Fully connected layers to reduce dimensionality
         self.encoder = nn.Sequential(
@@ -57,11 +59,11 @@ class FrequencyAutoencoder(nn.Module):
         # values shape needs to be (batch_size, 1, sequence_length) and complex64
         val_1d = values.unsqueeze(1).to(torch.complex64)
         
-        # Compute NUFFT. Output shape: (batch_size, 1, sequence_length)
+        # Compute NUFFT. Output shape: (batch_size, 1, num_bins)
         freq_complex = self.nufft(val_1d, pts_1d).squeeze(1)
         
         # Slicing the positive frequencies (and DC) to match rfft shape
-        freq_complex = freq_complex[:, sequence_length // 2:]
+        freq_complex = freq_complex[:, self.num_bins // 2:]
         
         # 2. Extract Amplitude Spectrum
         freq_amplitudes = torch.abs(freq_complex)

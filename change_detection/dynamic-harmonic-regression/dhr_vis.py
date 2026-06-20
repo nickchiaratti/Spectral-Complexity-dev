@@ -12,22 +12,37 @@ import matplotlib.gridspec as gridspec
 
 plt.style.use(['science','no-latex'])
 
-LOCATION = "Tait"
+LOCATION = "Malibu"
+IGNORE_COMMON_MASK = False
 H5_PATH = f"C:/satelliteImagery/HLST30/HLST_{LOCATION}_Harmonized_SC_EM-7_Norm-bandCount.h5"
 
 import glob
 
-def get_inference_h5(location):
-    search_pattern = f"C:/satelliteImagery/HLST30/CCD/{location}_DHR_Change_Detection_*.h5"
+def get_inference_h5(location, ignore_common_mask=True):
+    search_pattern = f"C:/satelliteImagery/HLST30/DHR/{location}_DHR_Change_Detection_*.h5"
     files = glob.glob(search_pattern)
     if not files:
         return None
-    files.sort(key=os.path.getmtime, reverse=True)
-    return files[0]
+        
+    filtered_files = []
+    for f in files:
+        is_unmasked = f.endswith("_unmasked.h5")
+        if ignore_common_mask and is_unmasked:
+            filtered_files.append(f)
+        elif not ignore_common_mask and not is_unmasked:
+            filtered_files.append(f)
+            
+    if not filtered_files:
+        return None
+        
+    filtered_files.sort(key=os.path.getmtime, reverse=True)
+    return filtered_files[0]
 
-def plot_pixel_sits(pixel_y, pixel_x, source_h5_path, inference_results_h5, ax_ts_z, ax_ts_f, current_date=None):
+def plot_pixel_sits(pixel_y, pixel_x, source_h5_path, inference_results_h5, ax_ts_z, ax_ts_f, ax_ts_a=None, current_date=None):
     ax_ts_z.clear()
     ax_ts_f.clear()
+    if ax_ts_a is not None:
+        ax_ts_a.clear()
 
     lat, lon = None, None
     with h5py.File(source_h5_path, 'r') as f:
@@ -66,6 +81,12 @@ def plot_pixel_sits(pixel_y, pixel_x, source_h5_path, inference_results_h5, ax_t
         anomalies = f['anomaly_flags'][:, pixel_y, pixel_x]
         dom_freq = f['dominant_frequencies_series'][:, :, pixel_y, pixel_x] # [N, K]
         rmse_multiplier = f.attrs.get('RMSE_MULTIPLIER', 3.0)
+        max_window_years = f.attrs.get('MAX_WINDOW_YEARS', 5.0)
+        if 'amplitude_series' in f:
+            amp_series_pixel = f['amplitude_series'][:, :, pixel_y, pixel_x]
+            has_amp = True
+        else:
+            has_amp = False
     
     valid_mask = ~is_invalid
     dates_arr = np.array(dates)
@@ -121,9 +142,54 @@ def plot_pixel_sits(pixel_y, pixel_x, source_h5_path, inference_results_h5, ax_t
     if np.any(pred_mask):
         dom_freq_valid = dom_freq[pred_mask] # [N_valid, K]
         periods = (2.0 * np.pi) / dom_freq_valid
+        if has_amp:
+            amp_valid = amp_series_pixel[pred_mask]
         
-        for k in range(periods.shape[1]):
-            ax_ts_f.plot(pred_dates, periods[:, k], marker='.', linestyle='-', label=f'Top-{k+1} Period')
+        # Calculate actual data span and pseudo-Nyquist limit for each prediction date
+        valid_ts = acq_time[~is_invalid]
+        pred_spans = np.zeros(len(pred_dates))
+        pred_samples = np.zeros(len(pred_dates))
+        for i, pd in enumerate(pred_dates):
+            pd_ts = pd.timestamp()
+            win_start = pd_ts - max_window_years * 365.25 * 86400
+            in_win = valid_ts[(valid_ts >= win_start) & (valid_ts < pd_ts)]
+            if len(in_win) > 0:
+                pred_spans[i] = (pd_ts - in_win.min()) / (365.25 * 86400)
+                pred_samples[i] = len(in_win)
+            else:
+                pred_spans[i] = 0.0
+                pred_samples[i] = 0
+                
+        nyquist_periods = np.full_like(pred_spans, np.nan)
+        valid_n_idx = pred_samples > 0
+        nyquist_periods[valid_n_idx] = 2.0 * pred_spans[valid_n_idx] / pred_samples[valid_n_idx]
+        
+        colors = ['tab:blue', 'tab:orange', 'tab:green']
+        for k in range(min(3, periods.shape[1])):
+            color = colors[k] if k < len(colors) else 'tab:red'
+            periods_k = periods[:, k].copy()
+            
+            # When the period is equal to or greater than the actual data span, 
+            # or the maximum window capacity, it indicates a pattern was not found.
+            invalid_mask = (periods_k >= (pred_spans * 0.95)) | (periods_k >= (max_window_years * 0.98))
+            periods_k[invalid_mask] = np.nan
+            
+            valid_p = periods_k[~np.isnan(periods_k)]
+            if len(valid_p) > 0:
+                med_days = np.median(valid_p) * 365.25
+                label_str = f'Top-{k+1} Period (~{med_days:.0f} days)'
+            else:
+                label_str = f'Top-{k+1} Period (Not Found)'
+                
+            ax_ts_f.plot(pred_dates, periods_k, marker='.', linestyle='-', color=color, label=label_str)
+            
+            if has_amp:
+                amp_k = amp_valid[:, k].copy()
+                amp_k[invalid_mask] = np.nan
+                ax_ts_a.plot(pred_dates, amp_k, marker='x', linestyle=':', color=color, alpha=0.4)
+                
+        # Plot Nyquist Limit Bounding Line
+        ax_ts_f.plot(pred_dates, nyquist_periods, color='black', linestyle='--', linewidth=1.5, label='Nyquist Limit (Period)')
             
     if current_date is not None:
         ax_ts_f.axvline(x=current_date, color='orange', linestyle='--')
@@ -134,7 +200,10 @@ def plot_pixel_sits(pixel_y, pixel_x, source_h5_path, inference_results_h5, ax_t
     ax_ts_f.xaxis.set_major_locator(mdates.YearLocator())
     ax_ts_f.legend(bbox_to_anchor=(1.01, 1), loc='upper left')
     ax_ts_f.grid(True)
-    ax_ts_f.set_ylim([0.2, 5.0]) # Cap period display
+    if ax_ts_a is not None:
+        ax_ts_a.set_ylabel('Amplitude (Z-Score)', color='gray')
+        ax_ts_a.tick_params(axis='y', labelcolor='gray')
+    #ax_ts_f.set_ylim([0.2, 3.0]) # Cap period display
 
 
 def plot_spatial_anomaly_overlay(source_h5_path, inference_results_h5):
@@ -168,6 +237,11 @@ def plot_spatial_anomaly_overlay(source_h5_path, inference_results_h5):
         min_samples = f.attrs.get('MIN_SAMPLES', 8)
         rmse_series = f['rmse_series'][:]
         dom_freq = f['dominant_frequencies_series'][:] # [N, K, H, W]
+        if 'amplitude_series' in f:
+            amp_series = f['amplitude_series'][:]
+            has_amp = True
+        else:
+            has_amp = False
         
     H, W = full_valid_mask.shape[1], full_valid_mask.shape[2]
     
@@ -185,27 +259,39 @@ def plot_spatial_anomaly_overlay(source_h5_path, inference_results_h5):
         mean_period_map = np.nanmean(top1_period, axis=0)
         f_hz = top1_freq / (2.0 * np.pi)
         freq_var_map = np.nanvar(f_hz, axis=0)
+        if has_amp:
+            mean_amp = np.nanmean(amp_series[:, 0, :, :], axis=0)
         
     mean_uncertainty[insufficient_data] = np.nan
     mean_period_map[insufficient_data] = np.nan
     freq_var_map[insufficient_data] = np.nan
+    if has_amp:
+        mean_amp[insufficient_data] = np.nan
     
     # Setup GridSpec
-    fig = plt.figure(figsize=(24, 12))
-    fig.canvas.manager.set_window_title('Dynamic Harmonic Regression Analysis')
+    # Window 1: Main Analysis (Ortho + Time Series)
+    fig1 = plt.figure(figsize=(18, 9))
+    window1_title = f'DHR Main Analysis: {os.path.basename(inference_results_h5)}'
+    fig1.canvas.manager.set_window_title(window1_title)
     
-    # 2 rows, 3 columns.
-    # Col 0, 1: spatial maps
-    # Col 2: time series (double width?)
-    gs = gridspec.GridSpec(2, 3, width_ratios=[1, 1, 1.5], wspace=0.3, hspace=0.3)
+    gs1 = gridspec.GridSpec(2, 2, width_ratios=[1, 1.5], wspace=0.2, hspace=0.3)
+    ax_img = fig1.add_subplot(gs1[:, 0])
     
-    ax_img = fig.add_subplot(gs[0, 0])
-    ax_unc = fig.add_subplot(gs[0, 1])
-    ax_per = fig.add_subplot(gs[1, 0])
-    ax_var = fig.add_subplot(gs[1, 1])
+    ax_ts_z = fig1.add_subplot(gs1[0, 1])
+    ax_ts_f = fig1.add_subplot(gs1[1, 1], sharex=ax_ts_z)
+    ax_ts_a = ax_ts_f.twinx() if has_amp else None
     
-    ax_ts_z = fig.add_subplot(gs[0, 2])
-    ax_ts_f = fig.add_subplot(gs[1, 2], sharex=ax_ts_z)
+    # Window 2: Maps
+    fig2 = plt.figure(figsize=(16, 12))
+    window2_title = f'DHR Parameter Maps: {os.path.basename(inference_results_h5)}'
+    fig2.canvas.manager.set_window_title(window2_title)
+    
+    gs2 = gridspec.GridSpec(2, 2, wspace=0.3, hspace=0.3)
+    ax_unc = fig2.add_subplot(gs2[0, 0])
+    ax_amp = fig2.add_subplot(gs2[0, 1])
+    ax_amp.axis('off') # default to off if no amp
+    ax_per = fig2.add_subplot(gs2[1, 0])
+    ax_var = fig2.add_subplot(gs2[1, 1])
     
     # 1. Base Ortho + Anomaly
     ax_img.imshow(base_frame)
@@ -229,14 +315,30 @@ def plot_spatial_anomaly_overlay(source_h5_path, inference_results_h5):
             cbar.set_ticks(ticks)
             cbar.set_ticklabels([datetime.fromtimestamp(t, timezone.utc).strftime('%Y-%m-%d') for t in ticks])
             
-    # 2. Mean Uncertainty
+    # 2. Uncertainty to Amplitude Ratio
     from matplotlib.cm import plasma, inferno
-    masked_unc = np.ma.masked_invalid(mean_uncertainty)
-    cmap_unc = copy.copy(plasma)
-    cmap_unc.set_bad(color='gray', alpha=1.0)
-    im2 = ax_unc.imshow(masked_unc, cmap=cmap_unc)
-    ax_unc.set_title("Mean Predictive Uncertainty (S)")
-    plt.colorbar(im2, ax=ax_unc, label="Mean S")
+    if has_amp:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", category=RuntimeWarning)
+            unc_amp_ratio = mean_uncertainty / mean_amp
+            
+        masked_unc = np.ma.masked_invalid(unc_amp_ratio)
+        cmap_unc = copy.copy(plasma)
+        cmap_unc.set_bad(color='gray', alpha=1.0)
+        
+        valid_ratio = unc_amp_ratio[~np.isnan(unc_amp_ratio) & ~np.isinf(unc_amp_ratio)]
+        vmax = np.percentile(valid_ratio, 95) if len(valid_ratio) > 0 else 1.0
+        
+        im2 = ax_unc.imshow(masked_unc, cmap=cmap_unc, vmax=vmax)
+        ax_unc.set_title("Uncertainty-to-Amplitude Ratio")
+        plt.colorbar(im2, ax=ax_unc, label="Ratio (S / Amp)")
+    else:
+        masked_unc = np.ma.masked_invalid(mean_uncertainty)
+        cmap_unc = copy.copy(plasma)
+        cmap_unc.set_bad(color='gray', alpha=1.0)
+        im2 = ax_unc.imshow(masked_unc, cmap=cmap_unc)
+        ax_unc.set_title("Mean Predictive Uncertainty (S)")
+        plt.colorbar(im2, ax=ax_unc, label="Mean S")
     
     # 3. Mean Dominant Period
     masked_per = np.ma.masked_invalid(mean_period_map)
@@ -254,22 +356,36 @@ def plot_spatial_anomaly_overlay(source_h5_path, inference_results_h5):
     ax_var.set_title("Dominant Frequency Instability (Variance)")
     plt.colorbar(im4, ax=ax_var, label="Variance (cycles/year)^2")
     
+    # 5. Amplitude (If Available)
+    if has_amp:
+        ax_amp.axis('on')
+        masked_amp = np.ma.masked_invalid(mean_amp)
+        cmap_amp = copy.copy(plasma)
+        cmap_amp.set_bad(color='gray', alpha=1.0)
+        im5 = ax_amp.imshow(masked_amp, cmap=cmap_amp)
+        ax_amp.set_title("Mean Top-1 Amplitude")
+        plt.colorbar(im5, ax=ax_amp, label="Amplitude (Z-Score)")
+    
     # Initial state for time series axes
     ax_ts_z.text(0.5, 0.5, 'Click a pixel on any map to view data', horizontalalignment='center', verticalalignment='center', transform=ax_ts_z.transAxes)
     ax_ts_f.text(0.5, 0.5, 'Click a pixel on any map to view data', horizontalalignment='center', verticalalignment='center', transform=ax_ts_f.transAxes)
 
     # Add selection rectangles to all axes
     rects = []
-    for ax in [ax_img, ax_unc, ax_per, ax_var]:
+    maps_axes = [ax_img, ax_unc, ax_per, ax_var]
+    if has_amp:
+        maps_axes.append(ax_amp)
+        
+    for ax in maps_axes:
         rect = patches.Rectangle((-1, -1), 1, 1, linewidth=2, edgecolor='cyan', facecolor='none', visible=False)
         ax.add_patch(rect)
         rects.append(rect)
 
     def update_pixel(x, y):
         print(f"Selecting pixel {x}, {y}")
-        for r in rects:
-            r.set_xy((x - 0.5, y - 0.5))
-            r.set_visible(True)
+        for rect in rects:
+            rect.set_xy((x-0.5, y-0.5))
+            rect.set_visible(True)
             
         current_date_ts = None
         current_sg = None
@@ -287,22 +403,27 @@ def plot_spatial_anomaly_overlay(source_h5_path, inference_results_h5):
         current_date = datetime.fromtimestamp(current_date_ts, timezone.utc)
         ax_img.set_title(f"Structural Anomalies\n{current_sg} Acquisition: {current_date.strftime('%Y-%m-%d')} UTC")
         
-        plot_pixel_sits(y, x, source_h5_path, inference_results_h5, ax_ts_z, ax_ts_f, current_date=current_date)
-        fig.canvas.draw()
+        plot_pixel_sits(y, x, source_h5_path, inference_results_h5, ax_ts_z, ax_ts_f, ax_ts_a=ax_ts_a, current_date=current_date)
+        fig1.canvas.draw()
+        fig2.canvas.draw()
 
     def onclick(event):
-        if event.inaxes not in [ax_img, ax_unc, ax_per, ax_var]: return
+        maps_axes = [ax_img, ax_unc, ax_per, ax_var]
+        if has_amp:
+            maps_axes.append(ax_amp)
+        if event.inaxes not in maps_axes: return
         x, y = int(event.xdata), int(event.ydata)
         if x < 0 or x >= W or y < 0 or y >= H: return
         update_pixel(x, y)
 
-    fig.canvas.mpl_connect('button_press_event', onclick)
-    plt.show()
+    fig1.canvas.mpl_connect('button_press_event', onclick)
+    fig2.canvas.mpl_connect('button_press_event', onclick)
 
 if __name__ == "__main__":
-    inference_h5 = get_inference_h5(LOCATION)
+    inference_h5 = get_inference_h5(LOCATION, IGNORE_COMMON_MASK)
     if inference_h5 and os.path.exists(inference_h5):
         print(f"Loading latest inference results: {inference_h5}")
         plot_spatial_anomaly_overlay(H5_PATH, inference_h5)
+        plt.show()
     else:
         print("Run dhr_main.py first to create output h5")

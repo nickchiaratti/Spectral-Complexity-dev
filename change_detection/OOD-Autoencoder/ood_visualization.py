@@ -10,22 +10,16 @@ import matplotlib.patches as patches
 import matplotlib.dates as mdates
 from pnpxai.explainers import IntegratedGradients
 from torch.utils.data import DataLoader
-
-# Attempt to use scienceplots if available
-try:
-    import scienceplots
-    plt.style.use(['science', 'no-latex'])
-except ImportError:
-    pass
-
+import scienceplots
+plt.style.use(['science', 'no-latex'])
 from dataset import TimeSeriesH5Dataset
 from models import FrequencyAutoencoder
 
-LOCATION = "Malibu"
-H5_PATH = rf"E:\satelliteImagery\HLST30\HLST_{LOCATION}_Harmonized_SC_EM-7_Norm-bandCount.h5"
+LOCATION = "Tait"
+H5_PATH = f"C:/satelliteImagery/HLST30/HLST_{LOCATION}_Harmonized_SC_EM-7_Norm-bandCount.h5"
 DATASET_NAME = "HDFEOS/GRIDS/HARMONIZED/Data Fields/sliding_volume_z_score"
-OOD_MAP_PATH = f"E:/satelliteImagery/HLST30/OOD/{LOCATION}/{LOCATION}_ood_results.h5"
-MODEL_PATH = f"E:/satelliteImagery/HLST30/OOD/{LOCATION}/{LOCATION}_ood_model.pth"
+OOD_MAP_PATH = f"C:/satelliteImagery/HLST30/OOD/{LOCATION}/{LOCATION}_ood_results.h5"
+MODEL_PATH = f"C:/satelliteImagery/HLST30/OOD/{LOCATION}/{LOCATION}_ood_model.pth"
 
 LATENT_DIM = 8
 
@@ -56,27 +50,19 @@ def main():
     print("Loading dataset in memory (this may take a moment)...")
     dataset = TimeSeriesH5Dataset(h5_path=H5_PATH, dataset_name=DATASET_NAME)
     
+    print("Loading inference maps and configuration...")
+    with h5py.File(OOD_MAP_PATH, 'r') as f:
+        ood_map = f['ood_map'][:].astype(bool)
+        ood_time_map = f['ood_time_map'][:]
+        num_bins = int(f.attrs.get('NUM_BINS', dataset.time_steps))
+        mean_frame_freq = f['mean_frame_freq'][:]
+        
     print("Loading trained PyTorch model...")
-    model = FrequencyAutoencoder(sequence_length=dataset.time_steps, latent_dim=LATENT_DIM).to(device)
+    model = FrequencyAutoencoder(sequence_length=dataset.time_steps, latent_dim=LATENT_DIM, num_bins=num_bins).to(device)
     model.load_state_dict(torch.load(MODEL_PATH, map_location=device, weights_only=True))
     model.eval()
     
     # PnPXAI wrapper removed here, dynamically constructed in onclick
-
-    print("Computing mean dataset frequency representation...")
-    loader = DataLoader(dataset, batch_size=256, shuffle=False)
-    all_freq_amps = []
-    with torch.no_grad():
-        for pts, vals, _ in loader:
-            pts, vals = pts.to(device), vals.to(device)
-            f_amps, _ = model(pts, vals)
-            all_freq_amps.append(f_amps.cpu())
-    mean_frame_freq = torch.cat(all_freq_amps, dim=0).mean(dim=0).numpy().flatten()
-
-    print("Loading inference maps...")
-    with h5py.File(OOD_MAP_PATH, 'r') as f:
-        ood_map = f['ood_map'][:].astype(bool)
-        ood_time_map = f['ood_time_map'][:]
         
     print("Loading common mask...")
     with h5py.File(H5_PATH, 'r') as f:
@@ -251,12 +237,12 @@ def main():
             except:
                 pass
             
-        # Exclude DC (Bin 0) to avoid infinite period issues
-        freq_bins = np.arange(1, len(freq_true_np))
-        ax_freq.plot(freq_bins, freq_true_np[1:], color='blue', label='True Signal Spectrum')
-        ax_freq.plot(freq_bins, freq_rec_np[1:], color='orange', linestyle='--', label='Reconstructed Spectrum')
-        ax_freq.plot(freq_bins, mean_frame_freq[1:], color='green', alpha=0.6, linestyle='-', label='Mean Frame Spectrum')
-        ax_freq.set_title(f"Frequency Domain Representation (Excluding DC)", fontweight="bold")
+        # Exclude DC (Bin 0) and Bin 1 (No Periodicity) to focus on valid cyclic patterns
+        freq_bins = np.arange(2, len(freq_true_np))
+        ax_freq.plot(freq_bins, freq_true_np[2:], color='blue', label='True Signal Spectrum')
+        ax_freq.plot(freq_bins, freq_rec_np[2:], color='orange', linestyle='--', label='Reconstructed Spectrum')
+        ax_freq.plot(freq_bins, mean_frame_freq[2:], color='green', alpha=0.6, linestyle='-', label='Mean Frame Spectrum')
+        ax_freq.set_title(f"Frequency Domain (Excluding DC & Bin 1)", fontweight="bold")
         ax_freq.set_xlabel("Cycle Length (Days)")
         ax_freq.set_ylabel("Amplitude")
         ax_freq.legend(loc='upper right')
@@ -265,20 +251,22 @@ def main():
         # Use a FuncFormatter to translate the linear frequency bins into Period in Days for the x-axis labels
         import matplotlib.ticker as ticker
         def format_fn(tick_val, tick_pos):
-            if tick_val <= 0: return ""
+            if tick_val <= 1: return ""
             return f"{total_days / tick_val:.0f}"
             
         ax_freq.xaxis.set_major_formatter(ticker.FuncFormatter(format_fn))
         
-        # Exclude DC (Bin 0) from the top peaks statistics
-        top3_px_idx = np.argsort(freq_true_np[1:])[-3:][::-1] + 1
+        # Exclude DC (Bin 0) and Bin 1 from the top peaks statistics
+        top3_px_idx = np.argsort(freq_true_np[2:])[-3:][::-1] + 2
         top3_px_vals = freq_true_np[top3_px_idx]
         
-        top3_fr_idx = np.argsort(mean_frame_freq[1:])[-3:][::-1] + 1
+        top3_fr_idx = np.argsort(mean_frame_freq[2:])[-3:][::-1] + 2
         top3_fr_vals = mean_frame_freq[top3_fr_idx]
         
         def bin_to_days(k):
-            return "DC" if k == 0 else f"{total_days / k:.1f}d"
+            if k == 0: return "DC (No Periodicity)"
+            if k == 1: return "Full span (No Periodicity)"
+            return f"{total_days / k:.1f}d"
             
         px_text = "Pixel Top 3 Freqs:\n" + "\n".join([f"Bin {k} ({bin_to_days(k)}): {v:.2f}" for k, v in zip(top3_px_idx, top3_px_vals)])
         fr_text = "Frame Top 3 Freqs:\n" + "\n".join([f"Bin {k} ({bin_to_days(k)}): {v:.2f}" for k, v in zip(top3_fr_idx, top3_fr_vals)])
