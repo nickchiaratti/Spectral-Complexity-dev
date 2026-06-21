@@ -106,7 +106,7 @@ from model import OOD_Anomaly_Detector, BatchedStreamingDriftDetector
 # 8. OUTPUT & MAIN
 # ==========================================
 def save_results(output_h5, score_map, status_map, first_drift_ts,
-                 drift_count_map, acq_times, geo_transform, spatial_ref):
+                 drift_count_map, alft_features, alft_freqs, acq_times, geo_transform, spatial_ref):
     """Saves inference results to HDF5 with spatial metadata."""
     os.makedirs(os.path.dirname(output_h5), exist_ok=True)
 
@@ -151,6 +151,12 @@ def save_results(output_h5, score_map, status_map, first_drift_ts,
         out.create_dataset(
             'drift_count', data=drift_count_map, compression='gzip'
         )
+        out.create_dataset(
+            'alft_features', data=alft_features, compression='gzip'
+        )
+        out.create_dataset(
+            'alft_frequencies', data=alft_freqs, compression='gzip'
+        )
 
 
 def main():
@@ -188,7 +194,7 @@ def main():
     )
 
     # ── 2. Pre-compute ALFT Features ──
-    alft_features, alft_valid = precompute_alft_features(
+    alft_features, alft_freqs, alft_valid = precompute_alft_features(
         y_data, valid_mask, frac_years, ALFT_DIM, WINDOWS, K_FREQUENCIES,
         F_GRID_MIN, F_GRID_MAX, F_GRID_N, MIN_SAMPLES, CHUNK_SIZE, DEVICE
     )
@@ -222,7 +228,7 @@ def main():
     # ── 5. Save Results ──
     save_results(
         output_h5, score_map, status_map, first_drift_ts,
-        drift_count_map, acq_times, geo_transform, spatial_ref
+        drift_count_map, alft_features, alft_freqs, acq_times, geo_transform, spatial_ref
     )
 
     # ── Summary ──

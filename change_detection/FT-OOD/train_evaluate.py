@@ -18,6 +18,7 @@ def extract_alft_window_batched(Y_chunk, M_chunk, frac_years_gpu, t_idx,
     P = Y_chunk.shape[1]
     fpw = 2 * k_freqs + 2
     out_features = torch.full((P, fpw), float('nan'), device=device)
+    out_freqs = torch.full((P, k_freqs), float('nan'), device=device)
     out_valid = torch.zeros(P, dtype=torch.bool, device=device)
 
     target_time = frac_years_gpu[t_idx]
@@ -29,7 +30,7 @@ def extract_alft_window_batched(Y_chunk, M_chunk, frac_years_gpu, t_idx,
     W = len(W_indices)
 
     if W < min_samples:
-        return out_features, out_valid
+        return out_features, out_freqs, out_valid
 
     Y_win = Y_chunk[W_indices, :]     # (W, P)
     M_win = M_chunk[W_indices, :]     # (W, P)
@@ -41,7 +42,7 @@ def extract_alft_window_batched(Y_chunk, M_chunk, frac_years_gpu, t_idx,
     active_indices = torch.where(has_enough)[0]
 
     if len(active_indices) == 0:
-        return out_features, out_valid
+        return out_features, out_freqs, out_valid
 
     P_active = len(active_indices)
     Y_active = Y_win[:, active_indices]  # (W, P_active)
@@ -151,9 +152,10 @@ def extract_alft_window_batched(Y_chunk, M_chunk, frac_years_gpu, t_idx,
     ], dim=1)  # (P_active, 2K+2)
 
     out_features[active_indices] = features
+    out_freqs[active_indices] = Omega_active.transpose(0, 1)
     out_valid[active_indices] = True
 
-    return out_features, out_valid
+    return out_features, out_freqs, out_valid
 
 
 def precompute_alft_features(y_data, valid_mask, frac_years, alft_dim, windows, 
@@ -167,6 +169,9 @@ def precompute_alft_features(y_data, valid_mask, frac_years, alft_dim, windows,
 
     alft_features = np.full(
         (num_frames, height, width, alft_dim), np.nan, dtype=np.float32
+    )
+    alft_freqs = np.full(
+        (num_frames, height, width, len(windows), k_frequencies), np.nan, dtype=np.float32
     )
     alft_valid = np.zeros((num_frames, height, width), dtype=bool)
 
@@ -206,6 +211,9 @@ def precompute_alft_features(y_data, valid_mask, frac_years, alft_dim, windows,
             chunk_features = torch.full(
                 (num_frames, P, alft_dim), float('nan'), device=device
             )
+            chunk_freqs = torch.full(
+                (num_frames, P, len(windows), k_frequencies), float('nan'), device=device
+            )
             chunk_valid = torch.zeros(
                 (num_frames, P), dtype=torch.bool, device=device
             )
@@ -214,12 +222,13 @@ def precompute_alft_features(y_data, valid_mask, frac_years, alft_dim, windows,
                 all_windows_valid = torch.ones(P, dtype=torch.bool, device=device)
 
                 for w_idx, w_len in enumerate(windows):
-                    feat, valid = extract_alft_window_batched(
+                    feat, freqs, valid = extract_alft_window_batched(
                         Y_chunk, M_chunk, frac_years_gpu, t,
                         w_len, k_frequencies, Omega, min_samples, device
                     )
                     offset = w_idx * fpw
                     chunk_features[t, :, offset:offset + fpw] = feat
+                    chunk_freqs[t, :, w_idx, :] = freqs
                     # If ANY window fails, mark entire multi-scale token invalid
                     all_windows_valid &= valid
 
@@ -229,10 +238,14 @@ def precompute_alft_features(y_data, valid_mask, frac_years, alft_dim, windows,
             cf_cpu = chunk_features.cpu().numpy().reshape(
                 num_frames, chunk_h, chunk_w, alft_dim
             )
+            cfr_cpu = chunk_freqs.cpu().numpy().reshape(
+                num_frames, chunk_h, chunk_w, len(windows), k_frequencies
+            )
             cv_cpu = chunk_valid.cpu().numpy().reshape(
                 num_frames, chunk_h, chunk_w
             )
             alft_features[:, y_start:y_end, x_start:x_end, :] = cf_cpu
+            alft_freqs[:, y_start:y_end, x_start:x_end, :, :] = cfr_cpu
             alft_valid[:, y_start:y_end, x_start:x_end] = cv_cpu
 
             pbar.update(1)
@@ -244,7 +257,7 @@ def precompute_alft_features(y_data, valid_mask, frac_years, alft_dim, windows,
     print(f"Valid ALFT tokens: {valid_count:,} / {total_tokens:,} "
           f"({100.0 * valid_count / total_tokens:.1f}%)")
 
-    return alft_features, alft_valid
+    return alft_features, alft_freqs, alft_valid
 
 def train_svdd(model, alft_features, alft_valid, frac_years,
                train_end_frac_year, l_max, alft_dim, stride, 
