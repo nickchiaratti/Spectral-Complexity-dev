@@ -69,7 +69,7 @@ SVDD_DIM = 64        # Deep SVDD hypersphere dimension
 
 # Training
 TRAIN_END_DATE = "2024-01-01"
-SKIP_TRAIN = False
+SKIP_TRAIN = True
 EPOCHS = 10
 LEARNING_RATE = 1e-3
 WEIGHT_DECAY = 1e-6
@@ -78,17 +78,18 @@ TRAIN_STRIDE = 4     # Subsample training target timesteps (every Nth)
 CENTER_INIT_SAMPLES = 10000  # Max samples for hypersphere center initialization
 
 # Spatial Processing
-CHUNK_SIZE = 128
+CHUNK_SIZE = 256
 
 # Drift Detection Hyperparameters
 WARNING_SIGMA = 2.0
-DRIFT_SIGMA = 3.0
+DRIFT_SIGMA = 2.0
 CONSECUTIVE_ANOMALIES = 3
 EMA_ALPHA = 0.05
 WARMUP_PERIOD = 20
 
 # Inference
-INFERENCE_BATCH = 256  # Sub-batch size for model forward pass
+INFERENCE_BATCH = 128  # Sub-batch size for model forward pass
+ENABLE_XAI = True      # Compute PnPXAI attributions for WARNING/DRIFT tokens
 
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -106,7 +107,10 @@ from model import OOD_Anomaly_Detector, BatchedStreamingDriftDetector
 # 8. OUTPUT & MAIN
 # ==========================================
 def save_results(output_h5, score_map, status_map, first_drift_ts,
-                 drift_count_map, alft_features, alft_freqs, acq_times, geo_transform, spatial_ref):
+                 drift_count_map, alft_features, alft_freqs, acq_times,
+                 geo_transform, spatial_ref,
+                 window_attr_map=None, xai_sensitivity_map=None,
+                 xai_mu_fidelity_map=None, xai_complexity_map=None):
     """Saves inference results to HDF5 with spatial metadata."""
     os.makedirs(os.path.dirname(output_h5), exist_ok=True)
 
@@ -124,6 +128,7 @@ def save_results(output_h5, score_map, status_map, first_drift_ts,
         out.attrs['TARGET_METRIC'] = TARGET_METRIC
         out.attrs['WINDOWS'] = WINDOWS
         out.attrs['K_FREQUENCIES'] = K_FREQUENCIES
+        out.attrs['FEATURES_PER_WINDOW'] = FEATURES_PER_WINDOW
         out.attrs['L_MAX'] = L_MAX
         out.attrs['D_MODEL'] = D_MODEL
         out.attrs['NUM_HEADS'] = NUM_HEADS
@@ -137,6 +142,7 @@ def save_results(output_h5, score_map, status_map, first_drift_ts,
         out.attrs['EMA_ALPHA'] = EMA_ALPHA
         out.attrs['WARMUP_PERIOD'] = WARMUP_PERIOD
         out.attrs['SOURCE_DATA'] = H5_PATH
+        out.attrs['ENABLE_XAI'] = ENABLE_XAI
 
         # Datasets
         out.create_dataset(
@@ -157,6 +163,24 @@ def save_results(output_h5, score_map, status_map, first_drift_ts,
         out.create_dataset(
             'alft_frequencies', data=alft_freqs, compression='gzip'
         )
+
+        # XAI datasets (only present when ENABLE_XAI=True)
+        if window_attr_map is not None:
+            out.create_dataset(
+                'window_attribution', data=window_attr_map, compression='gzip'
+            )
+        if xai_sensitivity_map is not None:
+            out.create_dataset(
+                'xai_sensitivity', data=xai_sensitivity_map, compression='gzip'
+            )
+        if xai_mu_fidelity_map is not None:
+            out.create_dataset(
+                'xai_mu_fidelity', data=xai_mu_fidelity_map, compression='gzip'
+            )
+        if xai_complexity_map is not None:
+            out.create_dataset(
+                'xai_complexity', data=xai_complexity_map, compression='gzip'
+            )
 
 
 def main():
@@ -219,16 +243,34 @@ def main():
         )
 
     # ── 4. Retrospective Inference ──
-    score_map, status_map, first_drift_ts, drift_count_map = run_inference(
+    inference_results = run_inference(
         model, alft_features, alft_valid, frac_years, acq_times, 
         L_MAX, ALFT_DIM, CHUNK_SIZE, INFERENCE_BATCH, WARNING_SIGMA, 
-        DRIFT_SIGMA, CONSECUTIVE_ANOMALIES, EMA_ALPHA, WARMUP_PERIOD, DEVICE
+        DRIFT_SIGMA, CONSECUTIVE_ANOMALIES, EMA_ALPHA, WARMUP_PERIOD, DEVICE,
+        enable_xai=ENABLE_XAI, windows=WINDOWS,
+        features_per_window=FEATURES_PER_WINDOW
     )
+
+    if ENABLE_XAI:
+        (score_map, status_map, first_drift_ts, drift_count_map,
+         window_attr_map, xai_sensitivity_map, xai_mu_fidelity_map,
+         xai_complexity_map) = inference_results
+    else:
+        score_map, status_map, first_drift_ts, drift_count_map = inference_results
+        window_attr_map = None
+        xai_sensitivity_map = None
+        xai_mu_fidelity_map = None
+        xai_complexity_map = None
 
     # ── 5. Save Results ──
     save_results(
         output_h5, score_map, status_map, first_drift_ts,
-        drift_count_map, alft_features, alft_freqs, acq_times, geo_transform, spatial_ref
+        drift_count_map, alft_features, alft_freqs, acq_times,
+        geo_transform, spatial_ref,
+        window_attr_map=window_attr_map,
+        xai_sensitivity_map=xai_sensitivity_map,
+        xai_mu_fidelity_map=xai_mu_fidelity_map,
+        xai_complexity_map=xai_complexity_map
     )
 
     # ── Summary ──

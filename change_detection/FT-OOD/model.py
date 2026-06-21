@@ -187,7 +187,7 @@ class BatchedStreamingDriftDetector:
         self.warmup_period = warmup_period
 
         self.means = torch.zeros(batch_size, device=device)
-        self.stds = torch.ones(batch_size, device=device)
+        self.stds = torch.full((batch_size,), 1e-5, device=device)
         self.drift_counters = torch.zeros(
             batch_size, dtype=torch.int32, device=device
         )

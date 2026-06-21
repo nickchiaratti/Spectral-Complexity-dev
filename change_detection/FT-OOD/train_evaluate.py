@@ -1,5 +1,6 @@
 import os
 import torch
+import torch.nn as nn
 import math
 import numpy as np
 import h5py
@@ -8,6 +9,61 @@ from torch.utils.data import DataLoader
 
 from dataset import ALFTSequenceDataset
 from model import BatchedStreamingDriftDetector
+
+from pnpxai.explainers import IntegratedGradients
+from pnpxai.evaluator.metrics import Sensitivity, MuFidelity, Complexity
+
+
+class PnPXAIWrapper(nn.Module):
+    """Wraps OOD_Anomaly_Detector for PnPXAI single-input interface.
+
+    PnPXAI v0.1.4 does not support additional_forward_args. This wrapper
+    freezes T_seq and padding_mask as closure state and exposes only X_alft
+    as the differentiable input. The scalar SVDD distance is reshaped to
+    (B, 1) so PnPXAI can attribute against target index 0.
+
+    The wrapper also handles internal batch expansion that PnPXAI metrics
+    (e.g., Sensitivity) may perform during evaluation.
+    """
+    def __init__(self, base_model, T_seq, padding_mask):
+        super().__init__()
+        self.base_model = base_model
+        self.T_seq = T_seq
+        self.padding_mask = padding_mask
+
+    def forward(self, x):
+        orig_shape = x.shape
+        # x could be (B, L, D) or (B, n_subsets, L, D) during MuFidelity
+        x_flat = x.view(-1, orig_shape[-2], orig_shape[-1])
+        flat_batch = x_flat.size(0)
+
+        # Chunk large batches internally to prevent OOM
+        # (PnPXAI's MuFidelity often passes thousands of subsets in a single batch
+        # because it chunks by dim=0, which is just 1 for individual pixels)
+        MAX_CHUNK = 64
+        all_scores = []
+        
+        for i in range(0, flat_batch, MAX_CHUNK):
+            chunk = x_flat[i:i + MAX_CHUNK]
+            chunk_size = chunk.size(0)
+            
+            # Expand T_seq and padding_mask to match the chunk size
+            batch_ratio = chunk_size // self.T_seq.size(0)
+            if batch_ratio > 1:
+                t = self.T_seq.repeat_interleave(batch_ratio, dim=0)
+                m = self.padding_mask.repeat_interleave(batch_ratio, dim=0)
+            else:
+                t = self.T_seq[:chunk_size]
+                m = self.padding_mask[:chunk_size]
+                
+            chunk_scores = self.base_model(chunk, t, m)  # (chunk_size,)
+            all_scores.append(chunk_scores)
+            
+        scores = torch.cat(all_scores, dim=0)
+
+        # PnPXAI expects (B, n_subsets, 1) for the target score indexing
+        out_shape = orig_shape[:-2] + (1,)
+        return scores.view(out_shape)
 
 def extract_alft_window_batched(Y_chunk, M_chunk, frac_years_gpu, t_idx,
                                 window_years, k_freqs, Omega, min_samples, device):
@@ -344,18 +400,47 @@ def train_svdd(model, alft_features, alft_valid, frac_years,
 def run_inference(model, alft_features, alft_valid, frac_years, acq_times, 
                   l_max, alft_dim, chunk_size, inference_batch, 
                   warning_sigma, drift_sigma, consecutive_anomalies, 
-                  ema_alpha, warmup_period, device):
+                  ema_alpha, warmup_period, device,
+                  enable_xai=False, windows=None, features_per_window=None):
     """
     Full retrospective inference with streaming drift detection.
+
+    When enable_xai=True, computes PnPXAI IntegratedGradients attributions
+    for all WARNING and DRIFT timesteps. Attributions are aggregated per
+    ALFT window to quantify each temporal scale's contribution to the
+    anomaly score.
+
+    Args:
+        windows: list of window lengths (e.g. [0.5, 1.0, 3.0]). Required
+                 when enable_xai=True. Length determines the number of
+                 attribution buckets.
+        features_per_window: int, features per window (2*K+2). Required
+                             when enable_xai=True.
     """
     num_frames, height, width = alft_valid.shape
     frac_years_f32 = frac_years.astype(np.float32)
+    num_windows = len(windows) if windows is not None else 0
 
     # Output arrays (spatial map format)
     score_map = np.full((num_frames, height, width), np.nan, dtype=np.float32)
     status_map = np.zeros((num_frames, height, width), dtype=np.uint8)
     first_drift_ts = np.full((height, width), np.nan, dtype=np.float64)
     drift_count_map = np.zeros((height, width), dtype=np.int32)
+
+    # XAI output arrays (only allocated when enabled)
+    if enable_xai:
+        window_attr_map = np.full(
+            (num_frames, height, width, num_windows), np.nan, dtype=np.float32
+        )
+        xai_sensitivity_map = np.full(
+            (num_frames, height, width), np.nan, dtype=np.float32
+        )
+        xai_mu_fidelity_map = np.full(
+            (num_frames, height, width), np.nan, dtype=np.float32
+        )
+        xai_complexity_map = np.full(
+            (num_frames, height, width), np.nan, dtype=np.float32
+        )
 
     model.eval()
 
@@ -364,6 +449,9 @@ def run_inference(model, alft_features, alft_valid, frac_years, acq_times,
     total_chunks = len(y_chunks) * len(x_chunks)
 
     print(f"\nPhase 3: Retrospective Inference ({total_chunks} spatial chunks)...")
+    if enable_xai:
+        print(f"  XAI enabled: IntegratedGradients + [Sensitivity, MuFidelity, Complexity]")
+        print(f"  Attribution buckets: {num_windows} windows ({windows})")
     pbar = tqdm(total=total_chunks, desc="Inference")
 
     with torch.no_grad():
@@ -396,6 +484,17 @@ def run_inference(model, alft_features, alft_valid, frac_years, acq_times,
                 l_status = np.zeros((num_frames, P), dtype=np.uint8)
                 l_first_drift = np.full(P, np.nan, dtype=np.float64)
                 l_drift_count = np.zeros(P, dtype=np.int32)
+
+                if enable_xai:
+                    l_window_attr = np.full(
+                        (num_frames, P, num_windows), np.nan, dtype=np.float32
+                    )
+                    l_xai_sens = np.full((num_frames, P), np.nan, dtype=np.float32)
+                    l_xai_mufid = np.full((num_frames, P), np.nan, dtype=np.float32)
+                    l_xai_comp = np.full((num_frames, P), np.nan, dtype=np.float32)
+                    # Collect (timestep, pixel_indices, assembled tensors)
+                    # for deferred XAI pass after the no_grad scoring loop
+                    xai_targets = []
 
                 for t in range(num_frames):
                     # ── Assemble L_MAX-length sequences ──
@@ -485,6 +584,126 @@ def run_inference(model, alft_features, alft_valid, frac_years, acq_times,
                     l_first_drift[new_drift] = acq_times[t]
                     l_drift_count[drift_cpu] += 1
 
+                    # ── Collect XAI targets (WARNING or DRIFT pixels) ──
+                    if enable_xai:
+                        status_np = l_status[t, :]
+                        anom_pix = np.where(
+                            (status_np == BatchedStreamingDriftDetector.STATUS_WARNING) |
+                            (status_np == BatchedStreamingDriftDetector.STATUS_DRIFT)
+                        )[0]
+                        if len(anom_pix) > 0:
+                            # Store the sequence assembly info for deferred XAI
+                            xai_targets.append((
+                                t, anom_pix, seq_start, actual_len, pad_len
+                            ))
+
+                # ── Deferred XAI Attribution Pass ──
+                if enable_xai and len(xai_targets) > 0:
+                    torch.set_grad_enabled(True)
+                    total_xai = sum(len(entry[1]) for entry in xai_targets)
+                    xai_pbar = tqdm(
+                        total=total_xai,
+                        desc=f"  XAI chunk ({y_start},{x_start})",
+                        leave=False
+                    )
+
+                    for t, anom_pix, seq_start, actual_len, pad_len in xai_targets:
+                        # Re-assemble sequences for anomalous pixels
+                        feat_slice = c_feat[seq_start:seq_start + actual_len, :, :]
+                        valid_slice = c_valid[seq_start:seq_start + actual_len, :]
+
+                        time_vec = np.zeros(l_max, dtype=np.float32)
+                        time_vec[pad_len:] = frac_years_f32[seq_start:seq_start + actual_len]
+                        T_seq_xai = torch.from_numpy(time_vec).float().view(
+                            1, l_max, 1
+                        ).to(device)
+
+                        # Process one pixel at a time for Sensitivity metric
+                        # (Sensitivity internally perturbs and re-runs, which
+                        # requires consistent wrapper state per sample)
+                        for pix_idx in anom_pix:
+                            feat_sub = feat_slice[:, pix_idx:pix_idx+1, :]
+                            valid_sub = valid_slice[:, pix_idx:pix_idx+1]
+
+                            if pad_len > 0:
+                                fp = np.full(
+                                    (l_max, 1, alft_dim), np.nan, dtype=np.float32
+                                )
+                                fp[pad_len:, :, :] = feat_sub
+                                vp = np.zeros((l_max, 1), dtype=bool)
+                                vp[pad_len:, :] = valid_sub
+                            else:
+                                fp = feat_sub
+                                vp = valid_sub
+
+                            # (1, L_MAX, ALFT_DIM)
+                            x_xai = torch.tensor(
+                                np.ascontiguousarray(fp.transpose(1, 0, 2)),
+                                dtype=torch.float32, device=device
+                            ).requires_grad_(True)
+
+                            m_xai = torch.tensor(
+                                np.ascontiguousarray(~vp.T),
+                                dtype=torch.bool, device=device
+                            )
+                            t_xai = T_seq_xai.clone()
+
+                            # Create per-sample wrapper
+                            wrapper = PnPXAIWrapper(model, t_xai, m_xai)
+                            explainer = IntegratedGradients(wrapper)
+
+                            eval_target = torch.zeros(1, dtype=torch.long, device=device)
+
+                            # Compute attributions
+                            attr = explainer.attribute(
+                                inputs=x_xai, targets=eval_target
+                            )  # (1, L_MAX, ALFT_DIM)
+
+                            # Aggregate attributions by window:
+                            # Sum absolute attribution across sequence length,
+                            # then partition by window feature indices
+                            attr_np = attr.detach().cpu().numpy()  # (1, L_MAX, ALFT_DIM)
+                            abs_attr_seq = np.sum(np.abs(attr_np[0]), axis=0)  # (ALFT_DIM,)
+
+                            fpw = features_per_window
+                            for w_idx in range(num_windows):
+                                w_start = w_idx * fpw
+                                w_end = w_start + fpw
+                                l_window_attr[t, pix_idx, w_idx] = (
+                                    np.sum(abs_attr_seq[w_start:w_end])
+                                )
+
+                            # Evaluate attribution quality
+                            metric_sens = Sensitivity(
+                                model=wrapper, explainer=explainer
+                            )
+                            metric_mufid = MuFidelity(
+                                model=wrapper, explainer=explainer
+                            )
+                            metric_comp = Complexity(
+                                model=wrapper, explainer=explainer
+                            )
+
+                            # Sensitivity calls explainer.attribute internally, so it needs gradients
+                            l_xai_sens[t, pix_idx] = metric_sens.evaluate(
+                                x_xai, targets=eval_target, attributions=attr
+                            ).item()
+
+                            # MuFidelity and Complexity only do forward passes or operations on the 
+                            # already-computed attributions, so they don't need gradients.
+                            with torch.no_grad():
+                                l_xai_mufid[t, pix_idx] = metric_mufid.evaluate(
+                                    x_xai, targets=eval_target, attributions=attr
+                                ).item()
+                                l_xai_comp[t, pix_idx] = metric_comp.evaluate(
+                                    x_xai, targets=eval_target, attributions=attr
+                                ).item()
+
+                            xai_pbar.update(1)
+
+                    xai_pbar.close()
+                    torch.set_grad_enabled(False)
+
                 # Write chunk to output arrays
                 score_map[:, y_start:y_end, x_start:x_end] = (
                     l_scores.reshape(num_frames, ch, cw)
@@ -499,7 +718,26 @@ def run_inference(model, alft_features, alft_valid, frac_years, acq_times,
                     l_drift_count.reshape(ch, cw)
                 )
 
+                if enable_xai:
+                    window_attr_map[:, y_start:y_end, x_start:x_end, :] = (
+                        l_window_attr.reshape(num_frames, ch, cw, num_windows)
+                    )
+                    xai_sensitivity_map[:, y_start:y_end, x_start:x_end] = (
+                        l_xai_sens.reshape(num_frames, ch, cw)
+                    )
+                    xai_mu_fidelity_map[:, y_start:y_end, x_start:x_end] = (
+                        l_xai_mufid.reshape(num_frames, ch, cw)
+                    )
+                    xai_complexity_map[:, y_start:y_end, x_start:x_end] = (
+                        l_xai_comp.reshape(num_frames, ch, cw)
+                    )
+
                 pbar.update(1)
 
     pbar.close()
+
+    if enable_xai:
+        return (score_map, status_map, first_drift_ts, drift_count_map,
+                window_attr_map, xai_sensitivity_map, xai_mu_fidelity_map,
+                xai_complexity_map)
     return score_map, status_map, first_drift_ts, drift_count_map
