@@ -17,10 +17,10 @@ IGNORE_COMMON_MASK = False # If True, utilizes noisy/cloudy pixels and relies on
 RMSE_MULTIPLIER = 2
 CONSECUTIVE_ANOMALIES = 4
 MAX_WINDOW_YEARS = 5.0
-MIN_WINDOW_YEARS = 2.0
-K_FREQUENCIES = 2
+MIN_WINDOW_YEARS = 0.1
+K_FREQUENCIES = 3
 MIN_SAMPLES = 2 * K_FREQUENCIES + 1 + 3 # 8 parameters + 3 df
-CHUNK_SIZE = 256 # Spatial block size
+CHUNK_SIZE = 128 # Spatial block size
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 def extract_fractional_years(acq_times):

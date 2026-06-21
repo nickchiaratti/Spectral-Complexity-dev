@@ -188,7 +188,7 @@ def plot_pixel_sits(pixel_y, pixel_x, source_h5_path, inference_results_h5, ax_t
             else:
                 label_str = f'Top-{k+1} Period (Not Found)'
                 
-            ax_ts_f.plot(pred_dates, periods_k, marker='.', linestyle='-', color=color, label=label_str)
+            ax_ts_f.plot(pred_dates, periods_k * 365.25, marker='.', linestyle='-', color=color, label=label_str)
             
             if has_amp:
                 amp_k = amp_valid[:, k].copy()
@@ -196,18 +196,20 @@ def plot_pixel_sits(pixel_y, pixel_x, source_h5_path, inference_results_h5, ax_t
                 ax_ts_a.plot(pred_dates, amp_k, marker='x', linestyle=':', color=color, alpha=0.4)
                 
         # Plot Nyquist Limit Bounding Line
-        ax_ts_f.plot(pred_dates, nyquist_periods, color='black', linestyle='--', linewidth=1.5, label='Nyquist Limit (Period)')
+        ax_ts_f.plot(pred_dates, nyquist_periods * 365.25, color='black', linestyle='--', linewidth=1.5, label='Nyquist Limit (Period)')
             
     if current_date is not None:
         ax_ts_f.axvline(x=current_date, color='orange', linestyle='--')
         
-    ax_ts_f.set_ylabel('Dominant Period (Years)')
+    ax_ts_f.set_ylabel('Dominant Period (Days)')
     ax_ts_f.set_xlabel('Date')
     import matplotlib.dates as mdates
     ax_ts_f.xaxis.set_major_locator(mdates.YearLocator())
     ax_ts_f.legend(bbox_to_anchor=(1.01, 1), loc='upper left')
     ax_ts_f.grid(True)
     if ax_ts_a is not None:
+        ax_ts_a.yaxis.tick_right()
+        ax_ts_a.yaxis.set_label_position("right")
         ax_ts_a.set_ylabel('Amplitude (Z-Score)', color='gray')
         ax_ts_a.tick_params(axis='y', labelcolor='gray')
     #ax_ts_f.set_ylim([0.2, 3.0]) # Cap period display
