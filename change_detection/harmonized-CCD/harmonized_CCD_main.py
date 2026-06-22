@@ -28,7 +28,7 @@ def tqdm_joblib(tqdm_object):
 # ==========================================
 # 1. CONFIGURATION
 # ==========================================
-LOCATION = "Hurlingham"
+LOCATION = "Tait"
 H5_PATH = f"C:/satelliteImagery/HLST30/HLST_{LOCATION}_Harmonized_SC_EM-7_Norm-bandCount.h5"
 
 TARGET_METRIC = 'sliding_volume_z_score'
@@ -42,7 +42,7 @@ MAX_ELASTIC_WINDOW_YEARS = TIME_WINDOW_YEARS + 2.0  # Maximum span to expand bac
 ENABLE_CONSTANT = True
 ENABLE_LINEAR = True
 ENABLE_QUADRATIC = False
-TEMPORAL_PERIODS = [1.0, 0.5, 0.33, 0.25]
+TEMPORAL_PERIODS = [1.19, 1.499, 1]
 
 
 

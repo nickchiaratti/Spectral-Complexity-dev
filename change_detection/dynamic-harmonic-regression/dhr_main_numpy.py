@@ -19,7 +19,7 @@ MAX_WINDOW_YEARS = 5.0
 MIN_WINDOW_YEARS = 1.0
 K_FREQUENCIES = 2
 MIN_SAMPLES = 1 * K_FREQUENCIES + 1 + 3 # 8 parameters + 3 df
-CHUNK_SIZE = 256 # Spatial block size
+CHUNK_SIZE = 128 # Spatial block size
 
 def extract_fractional_years(acq_times):
     """Converts UNIX timestamps into continuous fractional years (t)."""

@@ -9,7 +9,14 @@ import scienceplots
 import warnings
 import copy
 import matplotlib.gridspec as gridspec
-
+import matplotlib.widgets as widgets
+import sys
+# Add the project root to sys.path so we can import pixel_extractor
+_current_dir = os.path.dirname(os.path.abspath(__file__))
+_root_dir = os.path.abspath(os.path.join(_current_dir, '..', '..'))
+if _root_dir not in sys.path:
+    sys.path.insert(0, _root_dir)
+from pixel_extractor import append_single_pixel
 plt.style.use(['science','no-latex'])
 
 LOCATION = "Tait"
@@ -379,6 +386,64 @@ def plot_spatial_anomaly_overlay(source_h5_path, inference_results_h5):
     ax_ts_z.text(0.5, 0.5, 'Click a pixel on any map to view data', horizontalalignment='center', verticalalignment='center', transform=ax_ts_z.transAxes)
     ax_ts_f.text(0.5, 0.5, 'Click a pixel on any map to view data', horizontalalignment='center', verticalalignment='center', transform=ax_ts_f.transAxes)
 
+    # Window 3: Data Extraction
+    fig3 = plt.figure(figsize=(4, 4))
+    fig3.canvas.manager.set_window_title("Pixel Extraction")
+    
+    current_pixel = {'x': None, 'y': None}
+    
+    ax_radio = fig3.add_axes([0.1, 0.4, 0.8, 0.5])
+    ax_radio.set_title("Select Category")
+    categories = ('structural change', 'transient event', 'stable periodic patterns', 'noisy data', 'indeterminate data')
+    radio = widgets.RadioButtons(ax_radio, categories)
+    
+    # Custom visual feedback since scienceplots style hides the default radio circles
+    def update_radio_style(label):
+        for text in radio.labels:
+            if text.get_text() == label:
+                text.set_color('red')
+                text.set_fontweight('bold')
+            else:
+                text.set_color('black')
+                text.set_fontweight('normal')
+        fig3.canvas.draw_idle()
+        
+    radio.on_clicked(update_radio_style)
+    update_radio_style(categories[0]) # initialize first option
+    
+    # Store reference to prevent garbage collection of event listeners
+    fig3.radio = radio
+    
+    ax_btn = fig3.add_axes([0.3, 0.1, 0.4, 0.15])
+    btn = widgets.Button(ax_btn, 'Extract Pixel')
+    
+    # Store reference to prevent garbage collection of event listeners
+    fig3.btn = btn
+    
+    def on_extract_clicked(event):
+        if current_pixel['x'] is None or current_pixel['y'] is None:
+            print("No pixel selected yet. Please click on a map first.")
+            return
+            
+        category = radio.value_selected
+        x, y = current_pixel['x'], current_pixel['y']
+        print(f"Extracting pixel ({x}, {y}) as '{category}'...")
+        
+        try:
+            append_single_pixel(
+                h5_path=source_h5_path,
+                location=LOCATION,
+                x=x,
+                y=y,
+                category=category,
+                json_path="z-score-samples.json"
+            )
+            print("Extraction successful.")
+        except Exception as e:
+            print(f"Error extracting pixel: {e}")
+            
+    btn.on_clicked(on_extract_clicked)
+
     # Add selection rectangles to all axes
     rects = []
     maps_axes = [ax_img, ax_unc, ax_per, ax_var]
@@ -392,6 +457,8 @@ def plot_spatial_anomaly_overlay(source_h5_path, inference_results_h5):
 
     def update_pixel(x, y):
         print(f"Selecting pixel {x}, {y}")
+        current_pixel['x'] = x
+        current_pixel['y'] = y
         for rect in rects:
             rect.set_xy((x-0.5, y-0.5))
             rect.set_visible(True)

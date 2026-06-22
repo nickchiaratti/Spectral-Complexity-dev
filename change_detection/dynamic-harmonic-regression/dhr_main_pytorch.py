@@ -21,6 +21,9 @@ MIN_WINDOW_YEARS = 0.1
 K_FREQUENCIES = 3
 MIN_SAMPLES = 2 * K_FREQUENCIES + 1 + 3 # 8 parameters + 3 df
 CHUNK_SIZE = 128 # Spatial block size
+NDFT_MIN_CPY = 0.2
+NDFT_MAX_CPY = 4.0
+NDFT_GRID_BINS = 100
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 def extract_fractional_years(acq_times):
@@ -88,7 +91,7 @@ def main():
     acq_times_torch = torch.from_numpy(acq_times).double().to(DEVICE)
 
     # Frequency Grid for NDFT
-    f_grid = torch.linspace(0.2, 4.0, 150, device=DEVICE)
+    f_grid = torch.linspace(NDFT_MIN_CPY, NDFT_MAX_CPY, NDFT_GRID_BINS, device=DEVICE)
     Omega = 2.0 * math.pi * f_grid
     
     print("\nExecuting Batched Dynamic Harmonic Regression...")

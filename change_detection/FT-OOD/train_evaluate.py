@@ -625,15 +625,19 @@ def run_inference(model, alft_features, alft_valid, frac_years, acq_times,
                             feat_sub = feat_slice[:, pix_idx:pix_idx+1, :]
                             valid_sub = valid_slice[:, pix_idx:pix_idx+1]
 
+                            # Replace any NaNs in the invalid parts of feat_sub with 0.0 
+                            # to prevent them from contaminating the gradients in XAI.
+                            feat_sub_clean = np.nan_to_num(feat_sub, nan=0.0)
+
                             if pad_len > 0:
-                                fp = np.full(
-                                    (l_max, 1, alft_dim), np.nan, dtype=np.float32
+                                fp = np.zeros(
+                                    (l_max, 1, alft_dim), dtype=np.float32
                                 )
-                                fp[pad_len:, :, :] = feat_sub
+                                fp[pad_len:, :, :] = feat_sub_clean
                                 vp = np.zeros((l_max, 1), dtype=bool)
                                 vp[pad_len:, :] = valid_sub
                             else:
-                                fp = feat_sub
+                                fp = feat_sub_clean
                                 vp = valid_sub
 
                             # (1, L_MAX, ALFT_DIM)

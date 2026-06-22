@@ -23,3 +23,9 @@ streamlit
 streamlit-folium
 torch
 tqdm
+pnpxai
+captum
+joblib
+pandas
+torchdiffeq
+torchkbnufft
