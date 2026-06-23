@@ -65,8 +65,7 @@ def main():
     loc_config = load_config(CONFIG_FILE_PATH, args.location)
     location_name = loc_config["LocationName"]
     target_location = args.location if args.location else location_name
-    print(f"Starting pipeline for location: {location_name}")
-    
+    print(f"Starting pipeline for location: {location_name}")    
     # Define the execution order
     steps = [
         ("mgrs_view.py", None),

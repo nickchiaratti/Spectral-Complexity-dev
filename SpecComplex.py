@@ -593,7 +593,7 @@ def calculate_global_z_score(volume_array, valid_pixel_mask):
     # Graceful fallback per user directive: Return NaNs for entire frame if no valid background exists.
     if not np.any(stats_mask):
         warnings.warn("calculate_global_z_score warning: No radiometrically valid pixels with volume > 0 found. Returning NaNs.")
-        return z_scores
+        return z_scores, np.nan, np.nan
         
     # Extract subset volumes strictly for statistical estimation
     stats_vols = volume_array[stats_mask]
@@ -614,7 +614,96 @@ def calculate_global_z_score(volume_array, valid_pixel_mask):
     # Apply standard Z-score equation
     z_scores[stats_mask] = (log_apply_vols - global_mean) / global_std
     
-    return z_scores
+    return z_scores, global_mean, global_std
+
+def calculate_temporal_z_score(volume_cube, valid_pixel_mask_cube):
+    """
+    Calculates the temporal Z-score across an entire time series of spectral complexity volumes.
+    Evaluates the Z-score on a per-pixel, per-frame basis relative to the global statistics
+    of the entire radiometrically valid time series subset. This extracts annual periodic 
+    patterns by comparing against a spatiotemporal global scalar.
+    """
+    frames, height, width = volume_cube.shape
+    z_scores_cube = np.full((frames, height, width), np.nan, dtype=np.float32)
+    
+    # Identify valid pixels across the entire cube (strictly positive for log transform)
+    global_valid_mask = volume_cube > 0.0
+    
+    # Intersect with radiometrically valid pixels for the statistical background model
+    stats_mask = global_valid_mask & valid_pixel_mask_cube
+    
+    if not np.any(stats_mask):
+        raise ValueError("calculate_temporal_z_score failed: No radiometrically valid pixels with volume > 0 found in the entire time series.")
+        
+    # Extract subset volumes strictly for statistical estimation
+    stats_vols = volume_cube[stats_mask]
+    log_stats_vols = np.log(stats_vols)
+    
+    # Calculate global temporal statistics (using ddof=1 for unbiased sample estimator)
+    temporal_mean = np.mean(log_stats_vols)
+    temporal_std = np.std(log_stats_vols, ddof=1)
+    
+    # Strict failure handling: Prevent training on synthetically flat time series
+    if temporal_std == 0:
+        raise ValueError("calculate_temporal_z_score failed: Temporal standard deviation of the radiometrically valid subset is exactly zero.")
+        
+    # Evaluate ALL geometrically valid pixels using the pure background model
+    apply_vols = volume_cube[stats_mask]
+    log_apply_vols = np.log(apply_vols)
+    
+    # Apply standard Z-score equation
+    z_scores_cube[stats_mask] = (log_apply_vols - temporal_mean) / temporal_std
+    
+    return z_scores_cube
+
+def calculate_pixel_temporal_z_score(volume_cube, valid_pixel_mask_cube):
+    """
+    Calculates the temporal Z-score across an entire time series of spectral complexity volumes.
+    Evaluates the Z-score on a per-pixel, per-frame basis relative to the pixel's OWN temporal 
+    history, rather than the global spatial scene.
+    """
+    frames, height, width = volume_cube.shape
+    z_scores_cube = np.full((frames, height, width), np.nan, dtype=np.float32)
+    
+    # Identify valid pixels across the entire cube (strictly positive for log transform)
+    stats_mask = (volume_cube > 0.0) & valid_pixel_mask_cube
+    
+    if not np.any(stats_mask):
+        raise ValueError("calculate_temporal_z_score failed: No radiometrically valid pixels with volume > 0 found in the entire time series.")
+        
+    # Log transform the entire cube (suppress warnings for zeros/nans, we will mask them anyway)
+    with np.errstate(divide='ignore', invalid='ignore'):
+        log_volume_cube = np.log(volume_cube)
+        
+    # Apply strict masking to log volumes
+    masked_log_cube = np.where(stats_mask, log_volume_cube, np.nan)
+    
+    # 1. Temporal Count: Number of valid frames per pixel
+    valid_counts = np.sum(stats_mask, axis=0) # (H, W)
+    
+    # We strictly require at least 2 valid frames to calculate standard deviation
+    sufficient_history_mask = valid_counts >= 2
+    
+    # 2. Pixel-wise Temporal Mean
+    with np.errstate(invalid='ignore'):
+        temporal_mean = np.nanmean(masked_log_cube, axis=0) # (H, W)
+        
+        # 3. Pixel-wise Temporal Standard Deviation (ddof=1)
+        temporal_std = np.nanstd(masked_log_cube, axis=0, ddof=1) # (H, W)
+        
+    # Ensure zero-variance pixels are treated rigorously
+    valid_stats_mask = sufficient_history_mask & (temporal_std > 0)
+    
+    # 4. Evaluate Z-Score strictly for pixels with valid statistics
+    # Broadcast spatial statistics back to the temporal dimension
+    z_scores_cube[:, valid_stats_mask] = (
+        log_volume_cube[:, valid_stats_mask] - temporal_mean[valid_stats_mask]
+    ) / temporal_std[valid_stats_mask]
+    
+    # Re-apply the initial frame-level validity mask so we don't output Z-scores for NaN frames
+    z_scores_cube[~stats_mask] = np.nan
+    
+    return z_scores_cube
 
 def calculate_local_z_score(volume_array, window_size, stride):
     """

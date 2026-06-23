@@ -129,79 +129,83 @@ def process_volume_sliding_tile(frame_data, tile_size, stride, num_endmembers, g
     windows = unfolded.permute(2, 0, 1) # (L, C, N_pixels)
     L = windows.shape[0]
     
-    # Calculate Dynamic Chunk Size (80% of VRAM) to prevent OOM
+    # Calculate Dynamic Chunk Size to prevent OOM
     if device == 'cuda':
         total_vram = torch.cuda.get_device_properties(device).total_memory
         target_vram = total_vram * 0.8
         
-        # Estimate bytes per window: (C * N_pixels * 8 bytes) + intermediate overhead
-        # Overhead multiplier ~ 15 for Q, R, projections, etc.
-        bytes_per_window = 15 * bands * N_pixels * 8
+        # Estimate bytes per window: (C * N_pixels * 8 bytes)
+        # Overhead multiplier heavily increased to 150 to account for QR decomposition and broadcasting
+        bytes_per_window = 150 * bands * N_pixels * 8
         batch_size = max(1, int(target_vram // bytes_per_window))
+        # Cap batch size strictly to prevent unified memory swapping
+        batch_size = min(batch_size, 100000)
     else:
         # Standard generous chunk size for CPU RAM
-        batch_size = 10000 
+        batch_size = 5000 
+
         
     vol_vals = torch.zeros(L, dtype=torch.float64, device=device)
     valid_mask = torch.zeros(L, dtype=torch.bool, device=device)
     
-    # Process windows in memory-safe batches
-    for i in range(0, L, batch_size):
-        batch_windows = windows[i:i+batch_size] # (B, C, N)
+    # Process windows in memory-safe batches without gradients
+    with torch.no_grad():
+        for i in range(0, L, batch_size):
+            batch_windows = windows[i:i+batch_size] # (B, C, N)
         
-        # Find windows that have enough valid pixels to extract endmembers
-        # A pixel is valid if all its band values are not NaN.
-        pixel_validity = ~torch.isnan(batch_windows).any(dim=1) # (B, N)
-        valid_pixels_per_window = pixel_validity.sum(dim=1) # (B)
+            # Find windows that have enough valid pixels to extract endmembers
+            # A pixel is valid if all its band values are not NaN.
+            pixel_validity = ~torch.isnan(batch_windows).any(dim=1) # (B, N)
+            valid_pixels_per_window = pixel_validity.sum(dim=1) # (B)
         
-        # Strict Validity: Window is only processed if ALL pixels are valid.
-        # This matches the Docstring specification of SpecComplex.py 
-        # "Window is only processed if ALL pixels are valid."
-        batch_valid = valid_pixels_per_window == N_pixels
+            # Strict Validity: Window is only processed if ALL pixels are valid.
+            # This matches the Docstring specification of SpecComplex.py 
+            # "Window is only processed if ALL pixels are valid."
+            batch_valid = valid_pixels_per_window == N_pixels
         
-        valid_mask[i:i+batch_size] = batch_valid
+            valid_mask[i:i+batch_size] = batch_valid
         
-        if not batch_valid.any():
-            continue
+            if not batch_valid.any():
+                continue
             
-        valid_data = batch_windows[batch_valid].clone()
-        valid_pixel_mask = pixel_validity[batch_valid] # (B_valid, N)
+            valid_data = batch_windows[batch_valid].clone()
+            valid_pixel_mask = pixel_validity[batch_valid] # (B_valid, N)
         
-        # Zero out NaNs to prevent NaN propagation during tensor math
-        valid_data[torch.isnan(valid_data)] = 0.0
+            # Zero out NaNs to prevent NaN propagation during tensor math
+            valid_data[torch.isnan(valid_data)] = 0.0
         
-        # 1. Batched Maximum Distance Simplices
-        endmembers = maximumDistance_torch(valid_data, num_endmembers, valid_pixel_mask) # (B_valid, C, E)
+            # 1. Batched Maximum Distance Simplices
+            endmembers = maximumDistance_torch(valid_data, num_endmembers, valid_pixel_mask) # (B_valid, C, E)
         
-        # 2. Batched Gram Volumes (QR Decomposition)
-        if gram_type == 'datasetMean':
-            # NaNs were zeroed, but since we require ALL pixels to be valid, mean is safe
-            meanVector = valid_data.mean(dim=2) # (B_valid, C)
-            volume = calcGramLocalVolumes_QR_torch(endmembers, meanVector)
-        elif gram_type == 'minEndmember':
-            localizationVec = endmembers[:, :, 1]
-            remainingEndmembers = torch.cat((endmembers[:, :, 0:1], endmembers[:, :, 2:]), dim=2)
-            volume = calcGramLocalVolumes_QR_torch(remainingEndmembers, localizationVec)
+            # 2. Batched Gram Volumes (QR Decomposition)
+            if gram_type == 'datasetMean':
+                # NaNs were zeroed, but since we require ALL pixels to be valid, mean is safe
+                meanVector = valid_data.mean(dim=2) # (B_valid, C)
+                volume = calcGramLocalVolumes_QR_torch(endmembers, meanVector)
+            elif gram_type == 'minEndmember':
+                localizationVec = endmembers[:, :, 1]
+                remainingEndmembers = torch.cat((endmembers[:, :, 0:1], endmembers[:, :, 2:]), dim=2)
+                volume = calcGramLocalVolumes_QR_torch(remainingEndmembers, localizationVec)
             
-            # Prepend 0.0 volume for mathematical consistency
-            zeros = torch.zeros(volume.shape[0], 1, dtype=torch.float64, device=device)
-            volume = torch.cat((zeros, volume), dim=1)
-        else:
-            origin = torch.zeros(bands, dtype=torch.float64, device=device)
-            volume = calcGramLocalVolumes_QR_torch(endmembers, origin)
+                # Prepend 0.0 volume for mathematical consistency
+                zeros = torch.zeros(volume.shape[0], 1, dtype=torch.float64, device=device)
+                volume = torch.cat((zeros, volume), dim=1)
+            else:
+                origin = torch.zeros(bands, dtype=torch.float64, device=device)
+                volume = calcGramLocalVolumes_QR_torch(endmembers, origin)
             
-        # 3. Optional Normalization
-        if norm_type == 'bandCount':
-            m_array = torch.arange(1, volume.shape[1] + 1, dtype=torch.float64, device=device)
-            volume = volume / torch.pow(bands, (m_array / 2.0))
+            # 3. Optional Normalization
+            if norm_type == 'bandCount':
+                m_array = torch.arange(1, volume.shape[1] + 1, dtype=torch.float64, device=device)
+                volume = volume / torch.pow(bands, (m_array / 2.0))
             
-        # 4. Extract target metric
-        if volume.shape[1] > 2:
-            vol_val = torch.max(volume[:, 2:], dim=1)[0]
-        else:
-            vol_val = torch.zeros(volume.shape[0], dtype=torch.float64, device=device)
+            # 4. Extract target metric
+            if volume.shape[1] > 2:
+                vol_val = torch.max(volume[:, 2:], dim=1)[0]
+            else:
+                vol_val = torch.zeros(volume.shape[0], dtype=torch.float64, device=device)
             
-        vol_vals[i:i+batch_size][batch_valid] = vol_val
+            vol_vals[i:i+batch_size][batch_valid] = vol_val
         
     # --- Fold spatial output map ---
     # Reconstruct the overlapping sum_map and count_map natively via F.fold

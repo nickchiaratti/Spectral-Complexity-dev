@@ -12,7 +12,7 @@ import os
 import argparse
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--location", type=str, default="Rochesterv2", help="Location name (e.g. Rochesterv2, Tait)")
+parser.add_argument("--location", type=str, default="Tait", help="Location name (e.g. Rochesterv2, Tait)")
 args = parser.parse_args()
 
 LOCATION = args.location

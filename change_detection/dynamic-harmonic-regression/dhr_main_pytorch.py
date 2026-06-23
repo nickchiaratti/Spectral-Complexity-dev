@@ -5,6 +5,7 @@ import datetime
 import math
 from tqdm import tqdm
 import torch
+import psutil
 
 # ==========================================
 # 1. CONFIGURATION
@@ -19,9 +20,9 @@ LOCATION = args.location
 H5_PATH = f"C:/satelliteImagery/HLST30/HLST_{LOCATION}_Harmonized_SC_EM-7_Norm-bandCount.h5"
 
 # 'ALFT' (Iterative Grid Search), 'NDFT' (Static Grid), 'NOMP', 'CBPDN', 'CIRL'
-FREQUENCY_ESTIMATOR = 'NOMP'
+FREQUENCY_ESTIMATOR = 'ALFT'
 
-START_DATE = "2020-01-01"
+START_DATE = "2015-01-01"
 END_DATE = "2026-06-01"
 
 TARGET_METRIC = 'sliding_volume_z_score'
@@ -32,7 +33,7 @@ MAX_WINDOW_YEARS = 4.0
 MIN_WINDOW_YEARS = 0.1
 K_FREQUENCIES = 2
 MIN_SAMPLES = 2 * K_FREQUENCIES + 1 + 3 # 8 parameters + 3 df
-CHUNK_SIZE = 128 # Spatial block size
+CHUNK_SIZE = None # Spatial block size, dynamically computed based on VRAM/RAM
 NDFT_MIN_CPY = 0.2
 NDFT_MAX_CPY = 4.0
 NDFT_GRID_BINS = 100
@@ -325,6 +326,36 @@ def main():
     Omega = 2.0 * math.pi * f_grid
     
     print("\nExecuting Batched Dynamic Harmonic Regression...")
+    
+    global CHUNK_SIZE
+    if CHUNK_SIZE is None:
+        def calculate_dynamic_chunk_size(n_frames, device_type, w, h):
+            # Heuristic memory usage per pixel (bytes). Accounts for model weights, gradients, states
+            bytes_per_pixel = n_frames * 400
+            
+            if device_type.type == 'cuda':
+                free_mem, _ = torch.cuda.mem_get_info(device_type)
+                target_mem = free_mem * 0.8
+                print(f"GPU VRAM: {free_mem / 1e9:.2f} GB free, targeting {target_mem / 1e9:.2f} GB (80%)")
+            else:
+                if psutil is not None:
+                    vm = psutil.virtual_memory()
+                    target_mem = vm.available * 0.8
+                    print(f"CPU RAM: {vm.available / 1e9:.2f} GB available, targeting {target_mem / 1e9:.2f} GB (80%)")
+                else:
+                    target_mem = 8 * 1024**3
+                    print(f"psutil not found, using fallback CPU memory target: {target_mem / 1e9:.2f} GB")
+                    
+            max_pixels = max(1, int(target_mem / bytes_per_pixel))
+            c_size = int(math.sqrt(max_pixels))
+            c_size = min(c_size, max(w, h))
+            c_size = max(16, c_size) # floor size at 16x16
+            
+            print(f"Estimated dynamic memory per pixel: {bytes_per_pixel} bytes")
+            print(f"Dynamically calculated CHUNK_SIZE: {c_size}")
+            return c_size
+
+        CHUNK_SIZE = calculate_dynamic_chunk_size(num_frames, DEVICE, width, height)
     
     y_chunks = list(range(0, height, CHUNK_SIZE))
     x_chunks = list(range(0, width, CHUNK_SIZE))

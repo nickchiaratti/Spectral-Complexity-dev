@@ -123,9 +123,11 @@ def compute_frame_metrics(payload):
     
         # --- 6. Global Z-Score ---
         z_map = None
+        global_mean = np.nan
+        global_std = np.nan
         if flags['z_score']:
             t0 = time.perf_counter()
-            z_map = sc.calculate_global_z_score(slide_map, valid_mask)
+            z_map, global_mean, global_std = sc.calculate_global_z_score(slide_map, valid_mask)
             telemetry['Z_Score'] = time.perf_counter() - t0
 
         # --- 7. Ortho Visual Consolidation ---
@@ -159,6 +161,8 @@ def compute_frame_metrics(payload):
             'slide': slide_map,
             'msd': msd_map,
             'z_map': z_map,
+            'global_mean': global_mean,
+            'global_std': global_std,
             'em': em_out,
             'em_idx': endmember_idx,
             'vol': vol_curve,
@@ -183,11 +187,13 @@ def main(target_location=None, tile_size=3, num_endmembers=7, norm_param='bandCo
     # Set to True to calculate and overwrite. Set to False to skip processing and 
     # retain existing datasets in the ARD cube.
     CALC_NDVI = True
-    CALC_NDBI = True
+    CALC_NDBI = False
     CALC_MSD = False
     CALC_GLOBAL_ENDMEMBERS = True
     CALC_SLIDING_VOLUME = True
     CALC_Z_SCORE = True
+    CALC_TEMPORAL_Z_SCORE = True
+    CALC_PIXEL_TEMPORAL_Z_SCORE = True
 
     # ==========================================
     # 3. FILE MANAGEMENT & I/O
@@ -330,6 +336,8 @@ def main(target_location=None, tile_size=3, num_endmembers=7, norm_param='bandCo
             ds_harm_ndbi = overwrite_dset(harm_grp, 'ndbi_map', (total_frames, height, width), spatial_ref=spatial_ref, geo_transform=geo_transform, chunks=chunks_3d) if CALC_NDBI else None
             ds_harm_msd = overwrite_dset(harm_grp, 'msd_map', (total_frames, height, width), spatial_ref=spatial_ref, geo_transform=geo_transform, chunks=chunks_3d) if CALC_MSD else None
             ds_harm_z = overwrite_dset(harm_grp, 'sliding_volume_z_score', (total_frames, height, width), spatial_ref=spatial_ref, geo_transform=geo_transform, chunks=chunks_3d) if CALC_Z_SCORE else None
+            ds_harm_temp_z = overwrite_dset(harm_grp, 'temporal_z_score', (total_frames, height, width), spatial_ref=spatial_ref, geo_transform=geo_transform, chunks=chunks_3d) if CALC_TEMPORAL_Z_SCORE else None
+            ds_harm_pixel_temp_z = overwrite_dset(harm_grp, 'pixel_temporal_z_score', (total_frames, height, width), spatial_ref=spatial_ref, geo_transform=geo_transform, chunks=chunks_3d) if CALC_PIXEL_TEMPORAL_Z_SCORE else None
 
             sensor_dsets = {}
             if CALC_GLOBAL_ENDMEMBERS:
@@ -386,6 +394,8 @@ def main(target_location=None, tile_size=3, num_endmembers=7, norm_param='bandCo
             })
 
         agg_telemetry = {'Total_Worker_Time': []}
+        global_means_list = []
+        global_stds_list = []
 
         completed_frames = 0
         max_workers = 2
@@ -425,6 +435,9 @@ def main(target_location=None, tile_size=3, num_endmembers=7, norm_param='bandCo
                 sensor_dsets[grid_name]['em'][t_local, ...] = result['em']
                 sensor_dsets[grid_name]['idx'][t_local, ...] = result['em_idx']
                 sensor_dsets[grid_name]['vol'][t_local, ...] = result['vol']
+                
+            global_means_list.append(result['global_mean'])
+            global_stds_list.append(result['global_std'])
         
             completed_frames += 1
             print(f"  [{completed_frames}/{total_frames}] {grid_name} (Global Index {global_idx}) processed in {result['telemetry']['Total_Worker_Time']:.2f}s")
@@ -450,6 +463,48 @@ def main(target_location=None, tile_size=3, num_endmembers=7, norm_param='bandCo
         print("="*50)
 
         # ==========================================
+        # 7.5 CALCULATE TEMPORAL Z-SCORES PER SENSOR
+        # ==========================================
+        if (CALC_TEMPORAL_Z_SCORE or CALC_PIXEL_TEMPORAL_Z_SCORE) and ds_harm_slide is not None:
+            t0_temp_z = time.perf_counter()
+            print("\nCalculating Temporal Z-Scores per Sensor...")
+            
+            # Group frame indices by sensor
+            sensor_indices = {"Landsat": [], "Sentinel": [], "Tanager": []}
+            for idx, meta in enumerate(timeline):
+                grid = meta['grid']
+                if "HLSL30" in grid:
+                    sensor_indices["Landsat"].append(idx)
+                elif "HLSS30" in grid:
+                    sensor_indices["Sentinel"].append(idx)
+                elif "TANAGER" in grid:
+                    sensor_indices["Tanager"].append(idx)
+                    
+            for sensor, indices in sensor_indices.items():
+                if len(indices) == 0: continue
+                print(f"  Processing {sensor} ({len(indices)} frames)...")
+                
+                # Load sliding volumes and masks for this sensor
+                sensor_volumes = np.empty((len(indices), height, width), dtype=np.float32)
+                sensor_masks = np.empty((len(indices), height, width), dtype=np.bool_)
+                for i, idx in enumerate(indices):
+                    sensor_volumes[i] = ds_harm_slide[idx, :, :]
+                    sensor_masks[i] = ds_harm_mask[idx, :, :]
+                
+                # Calculate temporal z-score using SpecComplex
+                if CALC_TEMPORAL_Z_SCORE:
+                    temp_z_cube = sc.calculate_temporal_z_score(sensor_volumes, sensor_masks)
+                    for i, idx in enumerate(indices):
+                        ds_harm_temp_z[idx, :, :] = temp_z_cube[i]
+                        
+                if CALC_PIXEL_TEMPORAL_Z_SCORE:
+                    pixel_temp_z_cube = sc.calculate_pixel_temporal_z_score(sensor_volumes, sensor_masks)
+                    for i, idx in enumerate(indices):
+                        ds_harm_pixel_temp_z[idx, :, :] = pixel_temp_z_cube[i]
+            
+            print(f"Temporal Z-Scores completed in {time.perf_counter() - t0_temp_z:.2f}s")
+
+        # ==========================================
         # 8. APPLY STRICT DATA PROVENANCE ATTRIBUTES
         # ==========================================
         print("\nApplying Absolute Data Provenance Attributes...")
@@ -461,7 +516,7 @@ def main(target_location=None, tile_size=3, num_endmembers=7, norm_param='bandCo
         prov_idx = np.array([m['local_idx'] for m in timeline], dtype='int32')
     
         # Only tag the datasets that were actually generated in this run
-        created_harm_dsets = [ds for ds in [ds_harm_mask, ds_harm_ortho, ds_harm_slide, ds_harm_ndvi, ds_harm_ndbi, ds_harm_msd, ds_harm_z] if ds is not None]
+        created_harm_dsets = [ds for ds in [ds_harm_mask, ds_harm_ortho, ds_harm_slide, ds_harm_ndvi, ds_harm_ndbi, ds_harm_msd, ds_harm_z, ds_harm_temp_z, ds_harm_pixel_temp_z] if ds is not None]
     
         for ds in created_harm_dsets:
             ds.attrs.create('source_grid', data=prov_grid)
@@ -478,12 +533,20 @@ def main(target_location=None, tile_size=3, num_endmembers=7, norm_param='bandCo
                 ds.attrs['Normalization'] = NORM_PARAM if NORM_PARAM else "None"
             elif ds.name.endswith('msd_map'):
                 ds.attrs['description'] = "Mean Spectral Distance (MSD) for each pixel"
+            elif ds.name.endswith('temporal_z_score'):
+                ds.attrs['description'] = "Temporal Z-score for sliding volume evaluated per-sensor against the global spatial time series"
+                ds.attrs['tile_size'] = TILE_SIZE
+                ds.attrs['sliding_stride'] = SLIDING_STRIDE
+            elif ds.name.endswith('pixel_temporal_z_score'):
+                ds.attrs['description'] = "Temporal Z-score for sliding volume evaluated exclusively against the pixel's own temporal history"
                 ds.attrs['tile_size'] = TILE_SIZE
                 ds.attrs['sliding_stride'] = SLIDING_STRIDE
             elif ds.name.endswith('sliding_volume_z_score'):
                 ds.attrs['description'] = "Global Spectral Complexity Z-score. ARD Masked pixels excluded from background stats."
                 ds.attrs['MASKING_APPLIED'] = MASKING
                 ds.attrs['MASK_SOURCE'] = "HARMONIZED_common_mask"
+                ds.attrs['frame_global_means'] = np.array(global_means_list, dtype=np.float32)
+                ds.attrs['frame_global_stds'] = np.array(global_stds_list, dtype=np.float32)
 
         if CALC_GLOBAL_ENDMEMBERS:
             for grid in grids:
@@ -512,17 +575,14 @@ def main(target_location=None, tile_size=3, num_endmembers=7, norm_param='bandCo
         if target_location is not None:
             location = target_location
         else:
-            try:
-                from pathlib import Path
-                script_dir = Path(__file__).resolve().parent
-                config_path = os.path.join(script_dir, "locations_config.yaml")
-                if not os.path.exists(config_path):
-                    config_path = os.path.join(script_dir.parent, "locations_config.yaml")
-                with open(config_path, "r") as f:
-                    config_data = yaml.safe_load(f)
-                location = config_data.get("current_run", {}).get("location")
-            except Exception:
-                location = None
+            from pathlib import Path
+            script_dir = Path(__file__).resolve().parent
+            config_path = os.path.join(script_dir, "locations_config.yaml")
+            if not os.path.exists(config_path):
+                config_path = os.path.join(script_dir.parent, "locations_config.yaml")
+            with open(config_path, "r") as f:
+                config_data = yaml.safe_load(f)
+            location = config_data.get("current_run", {}).get("location")
                 
         if location:
             file_path = f"C:/satelliteImagery/HLST30/HLST_{location}_Harmonized.h5"

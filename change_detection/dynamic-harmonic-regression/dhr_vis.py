@@ -24,7 +24,7 @@ IGNORE_COMMON_MASK = False
 H5_PATH = f"C:/satelliteImagery/HLST30/HLST_{LOCATION}_Harmonized_SC_EM-7_Norm-bandCount.h5"
 
 # 'ALFT', 'NDFT', 'NOMP', 'CBPDN', 'CIRL'
-FREQUENCY_ESTIMATOR = "NOMP"
+FREQUENCY_ESTIMATOR = "ALFT"
 
 import glob
 
@@ -296,15 +296,25 @@ def plot_spatial_anomaly_overlay(source_h5_path, inference_results_h5):
         warnings.simplefilter("ignore", category=RuntimeWarning)
         mean_uncertainty = np.nanmean(rmse_series, axis=0)
         top1_freq = dom_freq[:, 0, :, :]
-        top1_period = (2.0 * np.pi) / top1_freq
-        mean_period_map = np.nanmean(top1_period, axis=0)
+        top1_period_days = ((2.0 * np.pi) / top1_freq) * 365.25
+        
+        import scipy.stats as stats
+        rounded_period_days = np.round(top1_period_days, decimals=0)
+        try:
+            mode_res = stats.mode(rounded_period_days, axis=0, nan_policy='omit')
+            mode_period_map = mode_res.mode if hasattr(mode_res, 'mode') else mode_res[0]
+            if mode_period_map.ndim > 2 and mode_period_map.shape[0] == 1:
+                mode_period_map = mode_period_map[0]
+        except Exception:
+            mode_period_map = np.nanmedian(top1_period_days, axis=0)
+            
         f_hz = top1_freq / (2.0 * np.pi)
         freq_var_map = np.nanvar(f_hz, axis=0)
         if has_amp:
             mean_amp = np.nanmean(amp_series[:, 0, :, :], axis=0)
         
     mean_uncertainty[insufficient_data] = np.nan
-    mean_period_map[insufficient_data] = np.nan
+    mode_period_map[insufficient_data] = np.nan
     freq_var_map[insufficient_data] = np.nan
     if has_amp:
         mean_amp[insufficient_data] = np.nan
@@ -381,13 +391,13 @@ def plot_spatial_anomaly_overlay(source_h5_path, inference_results_h5):
         ax_unc.set_title("Mean Predictive Uncertainty (S)")
         plt.colorbar(im2, ax=ax_unc, label="Mean S")
     
-    # 3. Mean Dominant Period
-    masked_per = np.ma.masked_invalid(mean_period_map)
-    cmap_per = copy.copy(viridis)
+    # 3. Mode Dominant Period
+    masked_per = np.ma.masked_invalid(mode_period_map)
+    cmap_per = copy.copy(plt.get_cmap('hsv'))
     cmap_per.set_bad(color='gray', alpha=1.0)
-    im3 = ax_per.imshow(masked_per, cmap=cmap_per, vmin=0.5, vmax=3.0)
-    ax_per.set_title("Mean Dominant Period (Mode)")
-    plt.colorbar(im3, ax=ax_per, label="Period (Years)")
+    im3 = ax_per.imshow(masked_per, cmap=cmap_per, vmin=180, vmax=1100)
+    ax_per.set_title("Mode Dominant Period")
+    plt.colorbar(im3, ax=ax_per, label="Period (Days)")
     
     # 4. Frequency Variance
     masked_var = np.ma.masked_invalid(freq_var_map)
