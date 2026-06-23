@@ -9,16 +9,28 @@ import torch
 # ==========================================
 # 1. CONFIGURATION
 # ==========================================
-LOCATION = "Tait"
+import argparse
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--location", type=str, default="Tait", help="Location name")
+args = parser.parse_args()
+
+LOCATION = args.location
 H5_PATH = f"C:/satelliteImagery/HLST30/HLST_{LOCATION}_Harmonized_SC_EM-7_Norm-bandCount.h5"
+
+# 'ALFT' (Iterative Grid Search), 'NDFT' (Static Grid), 'NOMP', 'CBPDN', 'CIRL'
+FREQUENCY_ESTIMATOR = 'NOMP'
+
+START_DATE = "2020-01-01"
+END_DATE = "2026-06-01"
 
 TARGET_METRIC = 'sliding_volume_z_score'
 IGNORE_COMMON_MASK = False # If True, utilizes noisy/cloudy pixels and relies on NDFT to filter noise
 RMSE_MULTIPLIER = 2
 CONSECUTIVE_ANOMALIES = 4
-MAX_WINDOW_YEARS = 5.0
+MAX_WINDOW_YEARS = 4.0
 MIN_WINDOW_YEARS = 0.1
-K_FREQUENCIES = 3
+K_FREQUENCIES = 2
 MIN_SAMPLES = 2 * K_FREQUENCIES + 1 + 3 # 8 parameters + 3 df
 CHUNK_SIZE = 128 # Spatial block size
 NDFT_MIN_CPY = 0.2
@@ -39,11 +51,217 @@ def extract_fractional_years(acq_times):
         frac_years.append(year + (elapsed / year_duration))
     return np.array(frac_years)
 
+def batched_ndft_init(t, y, valid_mask, min_f, max_f, bins=1000, max_atoms=20):
+    f_grid = torch.linspace(min_f, max_f, bins, device=DEVICE)
+    omega = 2 * math.pi * f_grid
+    
+    E = torch.exp(-1j * omega.unsqueeze(1) * t.unsqueeze(0))
+    y_masked = (y * valid_mask).to(torch.complex64)
+    
+    spectrum = torch.abs(torch.matmul(y_masked, E.T.conj()))
+    
+    top_amps, top_indices = torch.topk(spectrum, max_atoms, dim=1)
+    f_init = f_grid[top_indices]
+    
+    return f_init, spectrum.max(dim=1)[0], f_init[:, 0]
+
+def get_top_unique_frequencies(f_batch, amps_batch, k_freqs=3):
+    N = f_batch.shape[0]
+    top_f = torch.full((k_freqs, N), NDFT_MIN_CPY, device=DEVICE) # Fallback initialization
+    
+    for i in range(N):
+        f_arr = f_batch[i]
+        a_arr = amps_batch[i]
+        
+        threshold = 0.05 * torch.max(a_arr)
+        active = a_arr > threshold
+        f_active = f_arr[active]
+        a_active = a_arr[active]
+        
+        if len(a_active) < k_freqs:
+            # Fallback to no threshold
+            f_active = f_arr
+            a_active = a_arr
+            
+        f_unique = []
+        amps_unique = []
+        
+        sort_active = torch.argsort(a_active, descending=True)
+        for idx in sort_active:
+            f = f_active[idx]
+            amp = a_active[idx]
+            if not any(abs(f - uf) < 0.05 for uf in f_unique):
+                f_unique.append(f)
+                amps_unique.append(amp)
+                if len(f_unique) == k_freqs:
+                    break
+                    
+        # Pad if still not enough unique frequencies
+        while len(f_unique) < k_freqs:
+            f_unique.append(f_arr[torch.argmax(a_arr)])
+            
+        for j in range(k_freqs):
+            top_f[j, i] = f_unique[j]
+            
+    return top_f
+
+def compute_batched_nomp(t, y, valid_mask, min_f=0.3, max_f=4.0, bins=1000, max_components=3):
+    B, T = y.shape
+    f_grid = torch.linspace(min_f, max_f, bins, device=DEVICE)
+    omega_grid = 2 * math.pi * f_grid
+    
+    E = torch.exp(-1j * omega_grid.unsqueeze(1) * t.unsqueeze(0))
+    y_masked = (y * valid_mask).to(torch.complex64)
+    
+    frequencies = []
+    
+    def build_X(freqs_tensor):
+        K = freqs_tensor.shape[1]
+        omega = 2 * math.pi * freqs_tensor
+        wt = omega.unsqueeze(2) * t.view(1, 1, T)
+        A_real = torch.cos(wt)
+        A_imag = torch.sin(wt)
+        X = torch.cat([A_real.transpose(1, 2), A_imag.transpose(1, 2)], dim=2)
+        return X * valid_mask.unsqueeze(2)
+
+    for k in range(max_components):
+        if len(frequencies) > 0:
+            f_tensor = torch.stack(frequencies, dim=1)
+            X = build_X(f_tensor)
+            
+            XtX = torch.bmm(X.transpose(1, 2), X)
+            I = torch.eye(X.shape[2], device=DEVICE).unsqueeze(0)
+            XtX += 1e-5 * I
+            Xty = torch.bmm(X.transpose(1, 2), y_masked.real.unsqueeze(2))
+            beta = torch.bmm(torch.inverse(XtX), Xty)
+            
+            y_pred = torch.bmm(X, beta).squeeze(2)
+            residual = y_masked.real - y_pred
+        else:
+            residual = y_masked.real.clone()
+            
+        spectrum = torch.abs(torch.matmul(residual.to(torch.complex64), E.T.conj()))
+        top_indices = torch.argmax(spectrum, dim=1)
+        f_new = f_grid[top_indices]
+        frequencies.append(f_new)
+        
+        f_tensor = torch.stack(frequencies, dim=1).detach().requires_grad_(True)
+        optimizer = torch.optim.Adam([f_tensor], lr=0.01)
+        
+        for _ in range(30):
+            optimizer.zero_grad()
+            f_clamped = torch.clamp(f_tensor, min=min_f, max=max_f)
+            X_opt = build_X(f_clamped)
+            
+            XtX_opt = torch.bmm(X_opt.transpose(1, 2), X_opt)
+            I_opt = torch.eye(X_opt.shape[2], device=DEVICE).unsqueeze(0)
+            XtX_opt = XtX_opt + 1e-4 * I_opt
+            Xty_opt = torch.bmm(X_opt.transpose(1, 2), y_masked.real.unsqueeze(2))
+            
+            beta_opt = torch.bmm(torch.inverse(XtX_opt), Xty_opt)
+            y_pred_opt = torch.bmm(X_opt, beta_opt).squeeze(2)
+            
+            loss = torch.sum(valid_mask * (y_masked.real - y_pred_opt)**2)
+            loss.backward()
+            optimizer.step()
+            
+        frequencies = [torch.clamp(f_tensor[:, i].detach(), min=min_f, max=max_f) for i in range(k+1)]
+        
+    f_final = torch.stack(frequencies, dim=1)
+    X_final = build_X(f_final)
+    XtX_final = torch.bmm(X_final.transpose(1, 2), X_final)
+    I_final = torch.eye(X_final.shape[2], device=DEVICE).unsqueeze(0)
+    XtX_final += 1e-5 * I_final
+    Xty_final = torch.bmm(X_final.transpose(1, 2), y_masked.real.unsqueeze(2))
+    beta_final = torch.bmm(torch.inverse(XtX_final), Xty_final).squeeze(2)
+    
+    amps = []
+    for i in range(max_components):
+        c = beta_final[:, i]
+        s = beta_final[:, i + max_components]
+        amps.append(torch.sqrt(c**2 + s**2))
+        
+    amps_final = torch.stack(amps, dim=1)
+    
+    return get_top_unique_frequencies(f_final, amps_final, max_components)
+
+def compute_batched_cbpdn(t, y, valid_mask, f_init, max_spec, min_f, max_f, max_atoms=20, max_components=3):
+    N, T = y.shape
+    
+    freqs = f_init.clone().detach().requires_grad_(True)
+    a_real = torch.randn((N, max_atoms), dtype=torch.float32, device=DEVICE, requires_grad=True)
+    a_imag = torch.randn((N, max_atoms), dtype=torch.float32, device=DEVICE, requires_grad=True)
+    
+    optimizer = torch.optim.Adam([freqs, a_real, a_imag], lr=0.05)
+    lambda_reg = 0.15 * max_spec.unsqueeze(1)
+    
+    for _ in range(800):
+        optimizer.zero_grad()
+        omega = 2 * math.pi * torch.clamp(freqs, min=min_f, max=max_f)
+        
+        wt = omega.unsqueeze(2) * t.view(1, 1, T)
+        A_real = torch.cos(wt)
+        A_imag = torch.sin(wt)
+        
+        pred_real = torch.bmm(a_real.unsqueeze(1), A_real).squeeze(1)
+        pred_imag = torch.bmm(a_imag.unsqueeze(1), A_imag).squeeze(1)
+        
+        y_pred = pred_real - pred_imag
+        
+        mse = torch.sum(valid_mask * (y - y_pred)**2, dim=1)
+        
+        l1 = lambda_reg.squeeze(1) * torch.sum(torch.sqrt(a_real**2 + a_imag**2 + 1e-8), dim=1)
+        
+        loss = torch.sum(mse + l1)
+        loss.backward()
+        optimizer.step()
+        
+    f_final = torch.clamp(freqs, min=min_f, max=max_f).detach()
+    amps_final = torch.sqrt(a_real**2 + a_imag**2).detach()
+    
+    return get_top_unique_frequencies(f_final, amps_final, max_components)
+
+def compute_batched_cirl(t, y, valid_mask, f_init, max_spec, min_f, max_f, max_atoms=20, max_components=3):
+    N, T = y.shape
+    
+    freqs = f_init.clone().detach().requires_grad_(True)
+    a_real = torch.randn((N, max_atoms), dtype=torch.float32, device=DEVICE, requires_grad=True)
+    a_imag = torch.randn((N, max_atoms), dtype=torch.float32, device=DEVICE, requires_grad=True)
+    
+    optimizer = torch.optim.Adam([freqs, a_real, a_imag], lr=0.05)
+    
+    for step in range(800):
+        optimizer.zero_grad()
+        omega = 2 * math.pi * torch.clamp(freqs, min=min_f, max=max_f)
+        
+        wt = omega.unsqueeze(2) * t.view(1, 1, T)
+        A_real = torch.cos(wt)
+        A_imag = torch.sin(wt)
+        
+        pred_real = torch.bmm(a_real.unsqueeze(1), A_real).squeeze(1)
+        pred_imag = torch.bmm(a_imag.unsqueeze(1), A_imag).squeeze(1)
+        
+        y_pred = pred_real - pred_imag
+        mse = torch.sum(valid_mask * (y - y_pred)**2, dim=1)
+        
+        eps = 1e-3 if step < 400 else 1e-4
+        amps = torch.sqrt(a_real**2 + a_imag**2 + 1e-8)
+        gls_penalty = torch.sum(torch.log(amps + eps), dim=1) * 0.5 * max_spec
+        
+        loss = torch.sum(mse + gls_penalty)
+        loss.backward()
+        optimizer.step()
+        
+    f_final = torch.clamp(freqs, min=min_f, max=max_f).detach()
+    amps_final = torch.sqrt(a_real**2 + a_imag**2).detach()
+    
+    return get_top_unique_frequencies(f_final, amps_final, max_components)
+
 def main():
     _term_str = f"K{K_FREQUENCIES}"
     _win_str = f"W{int(MAX_WINDOW_YEARS)}"
     _mask_str = "_unmasked" if IGNORE_COMMON_MASK else ""
-    output_h5 = f"C:/satelliteImagery/HLST30/DHR/{LOCATION}_DHR_Change_Detection_{_term_str}_{_win_str}{_mask_str}.h5"
+    output_h5 = f"C:/satelliteImagery/HLST30/DHR/{LOCATION}_DHR_Change_Detection_{FREQUENCY_ESTIMATOR}_{START_DATE}_{END_DATE}_{_term_str}_{_win_str}{_mask_str}.h5"
 
     print(f"Loading data from {H5_PATH}...")
     with h5py.File(H5_PATH, 'r') as f:
@@ -72,6 +290,18 @@ def main():
     y_data = y_data[sort_idx, ...]
     valid_mask = valid_mask[sort_idx, ...]
 
+    # Filter by date range
+    start_ts = datetime.datetime.strptime(START_DATE, "%Y-%m-%d").replace(tzinfo=datetime.timezone.utc).timestamp()
+    end_ts = datetime.datetime.strptime(END_DATE, "%Y-%m-%d").replace(tzinfo=datetime.timezone.utc).timestamp()
+    
+    date_mask = (acq_times >= start_ts) & (acq_times <= end_ts)
+    acq_times = acq_times[date_mask]
+    frac_years = frac_years[date_mask]
+    y_data = y_data[date_mask, ...]
+    valid_mask = valid_mask[date_mask, ...]
+    
+    num_frames = len(acq_times)
+    
     print(f"Dataset shape: {num_frames} frames, {height}x{width} pixels")
     print(f"Using device: {DEVICE}")
 
@@ -100,7 +330,7 @@ def main():
     x_chunks = list(range(0, width, CHUNK_SIZE))
     total_chunks = len(y_chunks) * len(x_chunks)
     
-    pbar = tqdm(total=total_chunks, desc="Spatial Chunks")
+    pbar = tqdm(total=total_chunks, desc="Spatial Chunks", position=0)
     
     for y_start in y_chunks:
         y_end = min(y_start + CHUNK_SIZE, height)
@@ -132,6 +362,7 @@ def main():
             c_amp = torch.full((num_frames, K_FREQUENCIES, P), np.nan, dtype=torch.float32, device=DEVICE)
             c_flags = torch.zeros((num_frames, P), dtype=torch.uint8, device=DEVICE)
 
+            frame_pbar = tqdm(total=num_frames, desc="Frames", position=1, leave=False)
             for t in range(num_frames):
                 target_time = frac_years_torch[t]
                 
@@ -167,41 +398,73 @@ def main():
                 Y_active_mean = Y_active_sum / M_active_sum
                 Y_active_centered = (Y_active - Y_active_mean.unsqueeze(0)) * M_active
                 
-                # 1 & 2. Iterative Frequency Extraction (ALFT/OMP)
-                Y_residual = Y_active_centered.clone()
-                Omega_active_list = []
-                
-                for k in range(K_FREQUENCIES):
-                    Spectrum = torch.abs(torch.matmul(E, Y_residual.to(torch.complex64))) # [K_grid, P_active]
-                    top1_indices = torch.argmax(Spectrum, dim=0) # [P_active]
-                    Omega_k = Omega[top1_indices] # [P_active]
-                    Omega_active_list.append(Omega_k)
+                # 1 & 2. Frequency Extraction based on configured estimator
+                if FREQUENCY_ESTIMATOR == 'ALFT':
+                    Y_residual = Y_active_centered.clone()
+                    Omega_active_list = []
                     
-                    if k < K_FREQUENCIES - 1:
-                        Omega_so_far = torch.stack(Omega_active_list, dim=0) # [k+1, P_active]
-                        angles_so_far = T_win.unsqueeze(1).unsqueeze(2) * Omega_so_far.unsqueeze(0) # [W, k+1, P_active]
-                        X_cos_so_far = torch.cos(angles_so_far)
-                        X_sin_so_far = torch.sin(angles_so_far)
-                        X_const_so_far = torch.ones(len(T_win), 1, P_active, device=DEVICE)
-                        X_active_so_far = torch.cat([X_const_so_far, X_cos_so_far, X_sin_so_far], dim=1)
-                        X_active_so_far = X_active_so_far.permute(2, 0, 1)
+                    for k in range(K_FREQUENCIES):
+                        Spectrum = torch.abs(torch.matmul(E, Y_residual.to(torch.complex64))) # [K_grid, P_active]
+                        top1_indices = torch.argmax(Spectrum, dim=0) # [P_active]
+                        Omega_k = Omega[top1_indices] # [P_active]
+                        Omega_active_list.append(Omega_k)
                         
-                        M_active_expanded = M_active.transpose(0, 1).unsqueeze(-1)
-                        X_masked_so_far = X_active_so_far * M_active_expanded
-                        
-                        F_so_far = 2 * (k + 1) + 1
-                        XtX_so_far = torch.bmm(X_masked_so_far.transpose(1, 2), X_masked_so_far)
-                        XtX_so_far += torch.eye(F_so_far, device=DEVICE) * 1e-5
-                        
-                        Y_orig_expanded = Y_active_centered.transpose(0, 1).unsqueeze(-1)
-                        Xty_so_far = torch.bmm(X_masked_so_far.transpose(1, 2), Y_orig_expanded * M_active_expanded)
-                        
-                        beta_so_far = torch.linalg.solve(XtX_so_far, Xty_so_far)
-                        
-                        Y_pred_so_far = torch.bmm(X_active_so_far, beta_so_far).squeeze(-1).transpose(0, 1)
-                        Y_residual = (Y_active_centered - Y_pred_so_far) * M_active
+                        if k < K_FREQUENCIES - 1:
+                            Omega_so_far = torch.stack(Omega_active_list, dim=0) # [k+1, P_active]
+                            angles_so_far = T_win.unsqueeze(1).unsqueeze(2) * Omega_so_far.unsqueeze(0) # [W, k+1, P_active]
+                            X_cos_so_far = torch.cos(angles_so_far)
+                            X_sin_so_far = torch.sin(angles_so_far)
+                            X_const_so_far = torch.ones(len(T_win), 1, P_active, device=DEVICE)
+                            X_active_so_far = torch.cat([X_const_so_far, X_cos_so_far, X_sin_so_far], dim=1)
+                            X_active_so_far = X_active_so_far.permute(2, 0, 1)
+                            
+                            M_active_expanded = M_active.transpose(0, 1).unsqueeze(-1)
+                            X_masked_so_far = X_active_so_far * M_active_expanded
+                            
+                            F_so_far = 2 * (k + 1) + 1
+                            XtX_so_far = torch.bmm(X_masked_so_far.transpose(1, 2), X_masked_so_far)
+                            XtX_so_far += torch.eye(F_so_far, device=DEVICE) * 1e-5
+                            
+                            Y_orig_expanded = Y_active_centered.transpose(0, 1).unsqueeze(-1)
+                            Xty_so_far = torch.bmm(X_masked_so_far.transpose(1, 2), Y_orig_expanded * M_active_expanded)
+                            
+                            beta_so_far = torch.linalg.solve(XtX_so_far, Xty_so_far)
+                            
+                            Y_pred_so_far = torch.bmm(X_active_so_far, beta_so_far).squeeze(-1).transpose(0, 1)
+                            Y_residual = (Y_active_centered - Y_pred_so_far) * M_active
+                    
+                    Omega_active = torch.stack(Omega_active_list, dim=0) # [K, P_active]
                 
-                Omega_active = torch.stack(Omega_active_list, dim=0) # [K, P_active]
+                elif FREQUENCY_ESTIMATOR == 'NDFT':
+                    # NDFT extracts K frequencies dynamically from the single grid spectrum
+                    Spectrum = torch.abs(torch.matmul(E, Y_active_centered.to(torch.complex64)))
+                    top_amps, top_indices = torch.topk(Spectrum, K_FREQUENCIES, dim=0)
+                    Omega_active = Omega[top_indices] # [K, P_active]
+                    
+                elif FREQUENCY_ESTIMATOR == 'NOMP':
+                    # Y_active is [W, P_active]. The batched functions expect [B, T].
+                    # So we pass Y_active.T and M_active.T
+                    f_nomp = compute_batched_nomp(T_win, Y_active_centered.transpose(0, 1), M_active.transpose(0, 1), 
+                                                min_f=NDFT_MIN_CPY, max_f=NDFT_MAX_CPY, 
+                                                bins=NDFT_GRID_BINS, max_components=K_FREQUENCIES)
+                    Omega_active = 2 * math.pi * f_nomp # [K, P_active]
+                    
+                elif FREQUENCY_ESTIMATOR in ['CBPDN', 'CIRL']:
+                    # First seed with NDFT
+                    f_init, max_spec, _ = batched_ndft_init(T_win, Y_active_centered.transpose(0, 1), M_active.transpose(0, 1),
+                                                            min_f=NDFT_MIN_CPY, max_f=NDFT_MAX_CPY, 
+                                                            bins=NDFT_GRID_BINS, max_atoms=20)
+                                                            
+                    if FREQUENCY_ESTIMATOR == 'CBPDN':
+                        f_continuous = compute_batched_cbpdn(T_win, Y_active_centered.transpose(0, 1), M_active.transpose(0, 1),
+                                                             f_init, max_spec, min_f=NDFT_MIN_CPY, max_f=NDFT_MAX_CPY,
+                                                             max_atoms=20, max_components=K_FREQUENCIES)
+                    else: # CIRL
+                        f_continuous = compute_batched_cirl(T_win, Y_active_centered.transpose(0, 1), M_active.transpose(0, 1),
+                                                            f_init, max_spec, min_f=NDFT_MIN_CPY, max_f=NDFT_MAX_CPY,
+                                                            max_atoms=20, max_components=K_FREQUENCIES)
+                                                            
+                    Omega_active = 2 * math.pi * f_continuous # [K, P_active]
                 
                 # 3. Design Matrix
                 T_win_expanded = T_win.unsqueeze(1).unsqueeze(2) # [W, 1, 1]
@@ -305,6 +568,9 @@ def main():
                     first_time_indices = trigger_indices[first_time_mask]
                     if len(first_time_indices) > 0:
                         chunk_date[first_time_indices] = acq_times_torch[streak_start[first_time_indices]]
+                        
+                frame_pbar.update(1)
+            frame_pbar.close()
                         
             # Write chunk back to CPU output arrays
             c_pred_cpu = c_pred.cpu().numpy().reshape(num_frames, chunk_h, chunk_w)

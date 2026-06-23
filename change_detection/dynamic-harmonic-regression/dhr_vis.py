@@ -23,10 +23,13 @@ LOCATION = "Tait"
 IGNORE_COMMON_MASK = False
 H5_PATH = f"C:/satelliteImagery/HLST30/HLST_{LOCATION}_Harmonized_SC_EM-7_Norm-bandCount.h5"
 
+# 'ALFT', 'NDFT', 'NOMP', 'CBPDN', 'CIRL'
+FREQUENCY_ESTIMATOR = "NOMP"
+
 import glob
 
-def get_inference_h5(location, ignore_common_mask=True):
-    search_pattern = f"C:/satelliteImagery/HLST30/DHR/{location}_DHR_Change_Detection_*.h5"
+def get_inference_h5(location, estimator, ignore_common_mask=True):
+    search_pattern = f"C:/satelliteImagery/HLST30/DHR/{location}_DHR_Change_Detection_{estimator}_*.h5"
     files = glob.glob(search_pattern)
     if not files:
         return None
@@ -80,6 +83,28 @@ def plot_pixel_sits(pixel_y, pixel_x, source_h5_path, inference_results_h5, ax_t
             except Exception as e:
                 pass
         
+    import re
+    basename = os.path.basename(inference_results_h5)
+    match = re.search(r'_(\d{4}-\d{2}-\d{2})_(\d{4}-\d{2}-\d{2})_', basename)
+    
+    # 1. Sort chronologically
+    sort_idx = np.argsort(acq_time)
+    acq_time = acq_time[sort_idx]
+    z_score = z_score[sort_idx]
+    is_invalid = is_invalid[sort_idx]
+    spacecrafts = [spacecrafts[i] for i in sort_idx]
+    
+    # 2. Filter by date if present in filename
+    if match:
+        start_ts = datetime.strptime(match.group(1), "%Y-%m-%d").replace(tzinfo=timezone.utc).timestamp()
+        end_ts = datetime.strptime(match.group(2), "%Y-%m-%d").replace(tzinfo=timezone.utc).timestamp()
+        date_mask = (acq_time >= start_ts) & (acq_time <= end_ts)
+        
+        acq_time = acq_time[date_mask]
+        z_score = z_score[date_mask]
+        is_invalid = is_invalid[date_mask]
+        spacecrafts = [spacecrafts[i] for i, m in enumerate(date_mask) if m]
+
     dates = [datetime.fromtimestamp(ts, timezone.utc) for ts in acq_time]
     
     with h5py.File(inference_results_h5, 'r') as f:
@@ -496,7 +521,7 @@ def plot_spatial_anomaly_overlay(source_h5_path, inference_results_h5):
     fig2.canvas.mpl_connect('button_press_event', onclick)
 
 if __name__ == "__main__":
-    inference_h5 = get_inference_h5(LOCATION, IGNORE_COMMON_MASK)
+    inference_h5 = get_inference_h5(LOCATION, FREQUENCY_ESTIMATOR, IGNORE_COMMON_MASK)
     if inference_h5 and os.path.exists(inference_h5):
         print(f"Loading latest inference results: {inference_h5}")
         plot_spatial_anomaly_overlay(H5_PATH, inference_h5)

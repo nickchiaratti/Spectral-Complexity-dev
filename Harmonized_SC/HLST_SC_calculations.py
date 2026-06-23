@@ -20,7 +20,7 @@ script_dir = Path(__file__).resolve().parent
 if str(script_dir.parent) not in sys.path:
     sys.path.insert(0, str(script_dir.parent))
 import SpecComplex as sc
-import SpecComplexEfficient as scQR
+import SpecComplexTorch as scTorch
 import warnings
 import time
 from datetime import datetime, timezone
@@ -111,7 +111,7 @@ def compute_frame_metrics(payload):
         if flags['volume']:
             t0 = time.perf_counter()
             # Note: process_volume_sliding_tile prunes invalid pixels internally
-            slide_map = scQR.process_volume_sliding_tile(frame_sr, TILE_SIZE, SLIDING_STRIDE, NUM_ENDMEMBERS, 'minEndmember', NORM_PARAM)
+            slide_map = scTorch.process_volume_sliding_tile(frame_sr, TILE_SIZE, SLIDING_STRIDE, NUM_ENDMEMBERS, 'minEndmember', NORM_PARAM)
             telemetry['Sliding_Volume_Map'] = time.perf_counter() - t0
     
         # --- 5. Mean Spectral Distance ---
@@ -182,8 +182,8 @@ def main(target_location=None, tile_size=3, num_endmembers=7, norm_param='bandCo
     # --- ANALYTICAL FEATURE TOGGLES ---
     # Set to True to calculate and overwrite. Set to False to skip processing and 
     # retain existing datasets in the ARD cube.
-    CALC_NDVI = False
-    CALC_NDBI = False
+    CALC_NDVI = True
+    CALC_NDBI = True
     CALC_MSD = False
     CALC_GLOBAL_ENDMEMBERS = True
     CALC_SLIDING_VOLUME = True
@@ -390,45 +390,44 @@ def main(target_location=None, tile_size=3, num_endmembers=7, norm_param='bandCo
         completed_frames = 0
         max_workers = 2
     
-        print(f"Spooling {total_frames} frames into Compute Cluster (Max Workers: {max_workers})...")
+        print(f"Spooling {total_frames} frames into PyTorch Unified Compute Engine...")
         t_start_pipeline = time.perf_counter()
     
-        with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
-            future_to_idx = {executor.submit(compute_frame_metrics, p): p['global_idx'] for p in payloads}
+        # Process Iteratively: PyTorch naturally handles highly-optimized SIMD multi-threading 
+        # on the CPU and parallel execution on the GPU. Wrapping PyTorch in Python's 
+        # ProcessPoolExecutor leads to massive lock contention and WMI OS deadlocks.
+        for global_idx, p in enumerate(payloads):
+            result = compute_frame_metrics(p)
+            
+            grid_name = result['grid_name']
+            t_local = result['t_local']
         
-            for future in concurrent.futures.as_completed(future_to_idx):
-                global_idx = future_to_idx[future]
-                result = future.result() 
-            
-                grid_name = result['grid_name']
-                t_local = result['t_local']
-            
-                # Dynamically aggregate telemetry
-                for key, val in result['telemetry'].items():
-                    if key not in agg_telemetry: agg_telemetry[key] = []
-                    agg_telemetry[key].append(val)
-            
-                # Write selectively based on configuration
-                ds_harm_mask[global_idx, ...] = result['mask']
-                ds_harm_ortho[global_idx, ...] = result['ortho']
-                if CALC_NDVI: 
-                    ds_harm_ndvi[global_idx, ...] = result['ndvi']
-                if CALC_NDBI: 
-                    ds_harm_ndbi[global_idx, ...] = result['ndbi']
-                if CALC_MSD: 
-                    ds_harm_msd[global_idx, ...] = result['msd']
-                if CALC_SLIDING_VOLUME: 
-                    ds_harm_slide[global_idx, ...] = result['slide']
-                if CALC_Z_SCORE: 
-                    ds_harm_z[global_idx, ...] = result['z_map']
-            
-                if CALC_GLOBAL_ENDMEMBERS:
-                    sensor_dsets[grid_name]['em'][t_local, ...] = result['em']
-                    sensor_dsets[grid_name]['idx'][t_local, ...] = result['em_idx']
-                    sensor_dsets[grid_name]['vol'][t_local, ...] = result['vol']
-            
-                completed_frames += 1
-                print(f"  [{completed_frames}/{total_frames}] {grid_name} (Global Index {global_idx}) processed in {result['telemetry']['Total_Worker_Time']:.2f}s")
+            # Dynamically aggregate telemetry
+            for key, val in result['telemetry'].items():
+                if key not in agg_telemetry: agg_telemetry[key] = []
+                agg_telemetry[key].append(val)
+        
+            # Write selectively based on configuration
+            ds_harm_mask[global_idx, ...] = result['mask']
+            ds_harm_ortho[global_idx, ...] = result['ortho']
+            if CALC_NDVI: 
+                ds_harm_ndvi[global_idx, ...] = result['ndvi']
+            if CALC_NDBI: 
+                ds_harm_ndbi[global_idx, ...] = result['ndbi']
+            if CALC_MSD: 
+                ds_harm_msd[global_idx, ...] = result['msd']
+            if CALC_SLIDING_VOLUME: 
+                ds_harm_slide[global_idx, ...] = result['slide']
+            if CALC_Z_SCORE: 
+                ds_harm_z[global_idx, ...] = result['z_map']
+        
+            if CALC_GLOBAL_ENDMEMBERS:
+                sensor_dsets[grid_name]['em'][t_local, ...] = result['em']
+                sensor_dsets[grid_name]['idx'][t_local, ...] = result['em_idx']
+                sensor_dsets[grid_name]['vol'][t_local, ...] = result['vol']
+        
+            completed_frames += 1
+            print(f"  [{completed_frames}/{total_frames}] {grid_name} (Global Index {global_idx}) processed in {result['telemetry']['Total_Worker_Time']:.2f}s")
 
         t_end_pipeline = time.perf_counter()
 

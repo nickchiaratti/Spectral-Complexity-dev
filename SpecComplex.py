@@ -154,7 +154,7 @@ def get_hls_mask(data_grp, t, sun_elevation_threshold, cloud_dilation, qa_reject
         
     return invalid_mask
 
-def maximumDistance(data, num_endmembers, chunk_size=50000):
+def maximumDistance(data, num_endmembers, chunk_size=50000, strict_nan=False):
     '''
     Memory-optimized MaxD geometric simplex extraction.
     Utilizes strict float32 typing and chunked vector broadcasting to 
@@ -175,6 +175,10 @@ def maximumDistance(data, num_endmembers, chunk_size=50000):
 
     valid_mask = ~np.isnan(image2D).any(axis=1)
     
+    # Strict NaN Enforcement: Reject entirely if ANY pixels are missing
+    if strict_nan and not valid_mask.all():
+        return np.full((image2D.shape[1], num_endmembers), np.nan), np.full((1, num_endmembers), np.nan)
+        
     if np.sum(valid_mask) < num_endmembers:
         return np.full((image2D.shape[1], num_endmembers), np.nan), np.full((1, num_endmembers), np.nan)
 
@@ -395,10 +399,16 @@ def process_volume_tiles(frame_data, tile_size, num_endmembers, gram_type, norm_
         for x in range(0, width, tile_size):
             y_end, x_end = min(y + tile_size, height), min(x + tile_size, width)
             tile = img[y:y_end, x:x_end, :]
+            
+            # Pre-emptive validity check to save compute
+            if np.isnan(tile).any():
+                continue
+                
             if tile[:,:,0].size >= num_endmembers:
                 meanVector = tile.mean(axis=(0, 1))
                 volume = np.zeros(num_endmembers)
-                endmembers, _ = maximumDistance(tile, num_endmembers)
+                # Pass strict_nan=True as an additional safeguard
+                endmembers, _ = maximumDistance(tile, num_endmembers, strict_nan=True)
                 if np.isnan(endmembers).any():
                     continue
                 localizationVec = endmembers[:,1]
@@ -449,8 +459,14 @@ def process_volume_sliding_tile(frame_data, tile_size, stride, num_endmembers, g
             y_end, x_end = y_start + tile_size, x_start + tile_size
             
             tile = img[y_start:y_end, x_start:x_end, :]
+            
+            # Pre-emptive validity check to prevent inpainting/smearing
+            if np.isnan(tile).any():
+                continue
+                
             meanVector = tile.mean(axis=(0, 1))
-            endmembers, _ = maximumDistance(tile, num_endmembers)
+            # Pass strict_nan=True as an additional safeguard
+            endmembers, _ = maximumDistance(tile, num_endmembers, strict_nan=True)
             if np.isnan(endmembers).any():
                     continue
             localizationVec = endmembers[:,1]
@@ -592,11 +608,11 @@ def calculate_global_z_score(volume_array, valid_pixel_mask):
         raise ValueError("calculate_global_z_score failed: Global standard deviation of the radiometrically valid subset is exactly zero.")
         
     # Evaluate ALL geometrically valid pixels using the pure background model
-    apply_vols = volume_array[global_valid_mask]
+    apply_vols = volume_array[stats_mask]
     log_apply_vols = np.log(apply_vols)
     
     # Apply standard Z-score equation
-    z_scores[global_valid_mask] = (log_apply_vols - global_mean) / global_std
+    z_scores[stats_mask] = (log_apply_vols - global_mean) / global_std
     
     return z_scores
 

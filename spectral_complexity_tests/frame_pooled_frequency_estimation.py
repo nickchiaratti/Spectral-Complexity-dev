@@ -9,12 +9,19 @@ import warnings
 import time
 import os
 
-LOCATION = "Rochesterv2"
+import argparse
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--location", type=str, default="Rochesterv2", help="Location name (e.g. Rochesterv2, Tait)")
+args = parser.parse_args()
+
+LOCATION = args.location
 H5_PATH = f"C:/satelliteImagery/HLST30/HLST_{LOCATION}_Harmonized_SC_EM-7_Norm-bandCount.h5"
 TARGET_METRIC = "sliding_volume_z_score"
-START_DATE = "2015-01-01"
+START_DATE = "2022-01-01"
 END_DATE = "2026-06-01"
 OUTPUT_H5_PATH = f"C:/satelliteImagery/HLST30/Frequency Estimation Maps/{LOCATION}_Frequency_Estimation_{START_DATE}_{END_DATE}.h5"
+LOAD_EXISTING_RESULTS = True
 
 NDFT_MIN_CPY = 0.25
 NDFT_MAX_CPY = 4.0
@@ -232,6 +239,50 @@ def compute_batched_cirl(t, y, valid_mask, f_init, max_spec, min_f, max_f, max_a
     return get_top_unique_frequencies(f_final, amps_final)
 
 def main():
+    if LOAD_EXISTING_RESULTS and os.path.exists(OUTPUT_H5_PATH):
+        print(f"Loading existing results from {OUTPUT_H5_PATH}...")
+        with h5py.File(OUTPUT_H5_PATH, 'r') as in_f:
+            maps_grp = in_f['Spatial_Maps']
+            top_f_ndft = maps_grp['NDFT_Frequency_CPY'][:]
+            top_f_nomp = maps_grp['NOMP_Frequency_CPY'][:]
+            top_f_cbpdn = maps_grp['CBPDN_Frequency_CPY'][:]
+            top_f_cirl = maps_grp['CIRL_Frequency_CPY'][:]
+
+            period_ndft = maps_grp['NDFT_Period_Days'][:]
+            period_nomp = maps_grp['NOMP_Period_Days'][:]
+            period_cbpdn = maps_grp['CBPDN_Period_Days'][:]
+            period_cirl = maps_grp['CIRL_Period_Days'][:]
+            
+            stats_grp = in_f['Statistics']
+            ndft_mean = stats_grp.attrs['NDFT_Mean_CPY']
+            ndft_median = stats_grp.attrs['NDFT_Median_CPY']
+            time_ndft = stats_grp.attrs['NDFT_Compute_s']
+
+            nomp_mean = stats_grp.attrs['NOMP_Mean_CPY']
+            nomp_median = stats_grp.attrs['NOMP_Median_CPY']
+            time_nomp = stats_grp.attrs['NOMP_Compute_s']
+
+            cbpdn_mean = stats_grp.attrs['CBPDN_Mean_CPY']
+            cbpdn_median = stats_grp.attrs['CBPDN_Median_CPY']
+            time_cbpdn = stats_grp.attrs['CBPDN_Compute_s']
+
+            cirl_mean = stats_grp.attrs['CIRL_Mean_CPY']
+            cirl_median = stats_grp.attrs['CIRL_Median_CPY']
+            time_cirl = stats_grp.attrs['CIRL_Compute_s']
+
+            num_pixels = np.sum(~np.isnan(top_f_ndft))
+
+        _do_plotting(
+            top_f_ndft, top_f_nomp, top_f_cbpdn, top_f_cirl,
+            period_ndft, period_nomp, period_cbpdn, period_cirl,
+            ndft_mean, ndft_median, time_ndft,
+            nomp_mean, nomp_median, time_nomp,
+            cbpdn_mean, cbpdn_median, time_cbpdn,
+            cirl_mean, cirl_median, time_cirl,
+            num_pixels
+        )
+        return
+
     print(f"Loading data from {H5_PATH}...")
     with h5py.File(H5_PATH, 'r') as f:
         data_grp = f['/HDFEOS/GRIDS/HARMONIZED/Data Fields']
@@ -404,64 +455,74 @@ def main():
 
     print("HDF5 Save Complete!")
 
-    # --- Plotting ---
-    fig, axes = plt.subplots(2, 4, figsize=(24, 12))
-    fig.canvas.manager.set_window_title(f"Per-Pixel Batched Frequency Estimation - {LOCATION}")
+    num_pixels = len(process_pixels_idx)
+    _do_plotting(
+        top_f_ndft, top_f_nomp, top_f_cbpdn, top_f_cirl,
+        period_ndft, period_nomp, period_cbpdn, period_cirl,
+        ndft_mean, ndft_median, time_ndft,
+        nomp_mean, nomp_median, time_nomp,
+        cbpdn_mean, cbpdn_median, time_cbpdn,
+        cirl_mean, cirl_median, time_cirl,
+        num_pixels
+    )
 
-    maps = [
-        (top_f_ndft, "NDFT Top Freq (CPY)"), (top_f_nomp, "NOMP Top Freq (CPY)"),
-        (top_f_cbpdn, "C-BPDN Top Freq (CPY)"), (top_f_cirl, "CIRL Top Freq (CPY)")
+def _do_plotting(
+    top_f_ndft, top_f_nomp, top_f_cbpdn, top_f_cirl,
+    period_ndft, period_nomp, period_cbpdn, period_cirl,
+    ndft_mean, ndft_median, time_ndft,
+    nomp_mean, nomp_median, time_nomp,
+    cbpdn_mean, cbpdn_median, time_cbpdn,
+    cirl_mean, cirl_median, time_cirl,
+    num_pixels
+):
+    # --- Plotting ---
+    fig1, axes1 = plt.subplots(1, 4, figsize=(24, 6))
+    fig1.canvas.manager.set_window_title(f"Per-Pixel Batched Frequency Estimation (CPY) - {LOCATION}")
+
+    fig2, axes2 = plt.subplots(1, 4, figsize=(24, 6))
+    fig2.canvas.manager.set_window_title(f"Per-Pixel Batched Period Estimation (Days) - {LOCATION}")
+
+    def format_stat(mean, median):
+        mean_d = 365.25/mean if not np.isnan(mean) else 0
+        med_d = 365.25/median if not np.isnan(median) else 0
+        return f"\nMean: {mean:.3f} cpy ({mean_d:.1f} d)\nMedian: {median:.3f} cpy ({med_d:.1f} d)"
+
+    # Maps for Figure 1 (CPY)
+    maps_cpy = [
+        (top_f_ndft, "NDFT Top Freq (CPY)" + format_stat(ndft_mean, ndft_median)),
+        (top_f_nomp, "NOMP Top Freq (CPY)" + format_stat(nomp_mean, nomp_median)),
+        (top_f_cbpdn, "C-BPDN Top Freq (CPY)" + format_stat(cbpdn_mean, cbpdn_median)),
+        (top_f_cirl, "CIRL Top Freq (CPY)" + format_stat(cirl_mean, cirl_median))
     ]
 
-    # Top Frequencies (CPY)
-    for i, (m, title) in enumerate(maps):
-        ax = axes[0, i]
+    for i, (m, title) in enumerate(maps_cpy):
+        ax = axes1[i]
         im = ax.imshow(m, cmap='jet', vmin=NDFT_MIN_CPY, vmax=NDFT_MAX_CPY)
         ax.set_title(title, fontsize=12, fontweight='bold')
-        plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+        fig1.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
         ax.set_xticks([]); ax.set_yticks([])
 
-    p_maps = [
-        (period_ndft, "NDFT Period (Days)"), (period_nomp, "NOMP Period (Days)"),
-        (period_cbpdn, "C-BPDN Period (Days)"), (period_cirl, "CIRL Period (Days)")
+    # Maps for Figure 2 (Days)
+    maps_days = [
+        (period_ndft, "NDFT Period (Days)" + format_stat(ndft_mean, ndft_median)),
+        (period_nomp, "NOMP Period (Days)" + format_stat(nomp_mean, nomp_median)),
+        (period_cbpdn, "C-BPDN Period (Days)" + format_stat(cbpdn_mean, cbpdn_median)),
+        (period_cirl, "CIRL Period (Days)" + format_stat(cirl_mean, cirl_median))
     ]
 
-    for i, (m, title) in enumerate(p_maps):
-        ax = axes[1, i]
+    for i, (m, title) in enumerate(maps_days):
+        ax = axes2[i]
         im = ax.imshow(m, cmap='jet', vmin=365.25/NDFT_MAX_CPY, vmax=365.25/NDFT_MIN_CPY)
         ax.set_title(title, fontsize=12, fontweight='bold')
-        plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+        fig2.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
         ax.set_xticks([]); ax.set_yticks([])
 
-    # Text Box Statistics
-    text_str = f"Batched Per-Pixel Statistics ({len(process_pixels_idx):,} pixels)\n"
-    text_str += "-" * 55 + "\n\n"
-    
-    text_str += f"NDFT (Fixed Grid Baseline):\n"
-    text_str += f"  Mean Freq: {ndft_mean:.3f} cpy ({365.25/ndft_mean if not np.isnan(ndft_mean) else 0:.1f} d)\n"
-    text_str += f"  Med Freq:  {ndft_median:.3f} cpy ({365.25/ndft_median if not np.isnan(ndft_median) else 0:.1f} d)\n"
-    text_str += f"  Compute:   {time_ndft:.2f} s\n\n"
-    
-    text_str += f"NOMP (Greedy OMP + Refinement):\n"
-    text_str += f"  Mean Freq: {nomp_mean:.3f} cpy ({365.25/nomp_mean if not np.isnan(nomp_mean) else 0:.1f} d)\n"
-    text_str += f"  Med Freq:  {nomp_median:.3f} cpy ({365.25/nomp_median if not np.isnan(nomp_median) else 0:.1f} d)\n"
-    text_str += f"  Compute:   {time_nomp:.2f} s\n\n"
-    
-    text_str += "C-BPDN (Continuous L1 Norm):\n"
-    text_str += f"  Mean Freq: {cbpdn_mean:.3f} cpy ({365.25/cbpdn_mean if not np.isnan(cbpdn_mean) else 0:.1f} d)\n"
-    text_str += f"  Med Freq:  {cbpdn_median:.3f} cpy ({365.25/cbpdn_median if not np.isnan(cbpdn_median) else 0:.1f} d)\n"
-    text_str += f"  Compute:   {time_cbpdn:.2f} s\n\n"
-    
-    text_str += "CIRL (Continuous Reweighted L1):\n"
-    text_str += f"  Mean Freq: {cirl_mean:.3f} cpy ({365.25/cirl_mean if not np.isnan(cirl_mean) else 0:.1f} d)\n"
-    text_str += f"  Med Freq:  {cirl_median:.3f} cpy ({365.25/cirl_median if not np.isnan(cirl_median) else 0:.1f} d)\n"
-    text_str += f"  Compute:   {time_cirl:.2f} s\n"
-
-    props = dict(boxstyle='round', facecolor='whitesmoke', alpha=0.9, edgecolor='gray')
-    fig.text(0.5, 0.05, text_str, fontsize=12, fontfamily='monospace',
-             horizontalalignment='center', verticalalignment='bottom', bbox=props)
+    suptitle_text = f"Batched Per-Pixel Statistics ({num_pixels:,} pixels) | Span: {START_DATE} to {END_DATE}"
+    fig1.suptitle(suptitle_text, fontsize=14, fontweight='bold')
+    fig2.suptitle(suptitle_text, fontsize=14, fontweight='bold')
              
-    plt.subplots_adjust(left=0.03, right=0.97, top=0.93, bottom=0.25, wspace=0.15, hspace=0.15)
+    fig1.subplots_adjust(left=0.03, right=0.97, top=0.75, bottom=0.05, wspace=0.15)
+    fig2.subplots_adjust(left=0.03, right=0.97, top=0.75, bottom=0.05, wspace=0.15)
     plt.show()
 
 if __name__ == "__main__":
