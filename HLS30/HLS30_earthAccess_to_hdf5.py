@@ -34,7 +34,7 @@ def main(target_location=None):
     # ==========================================
     # 1. CONFIGURATION & AUTHENTICATION
     # ==========================================
-    cloud_threshold = 80
+    cloud_threshold = 85
 
     print("Authenticating with NASA Earthdata...")
     earthaccess.login(strategy="all", persist=True)

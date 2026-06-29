@@ -44,8 +44,8 @@ def main(target_location=None):
     # ==========================================
     TARGET_RESOLUTION = 30.0
     # --- Pixel Mask Configuration ---
-    MIN_ROI_COVERAGE_PERCENT = 25.0 
-    SUN_ELEVATION_THRESHOLD = 30
+    MIN_ROI_COVERAGE_PERCENT = 20.0 
+    SUN_ELEVATION_THRESHOLD = 20
     # HLS Specific Configuration (Unified Fmask for both S30 and L30)
     # Bits 0-5: cirrus, cloud, adj cloud/shadow, cloud shadow, snow/ice, water
     HLS_CLOUD_DILATION =0

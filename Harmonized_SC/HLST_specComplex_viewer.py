@@ -36,20 +36,21 @@ except Exception:
 
 # --- Configuration ---
 complexity_type = 'sliding_volume_z_score' # or 'sliding_volume_map'
-HULL_BANDS_LANDSAT = (6, 5, 4) 
-HULL_BANDS_TANAGER = (100, 50, 20) 
+complexity_type_comparison = 'pixel_temporal_z_score'
 
 COMPLEXITY_DICT = {
     'sliding_volume_map': 'Spectral Complexity',
-    'sliding_volume_z_score': 'Spectral Complexity Z-Score',
+    'pixel_temporal_z_score': 'Spectral Complexity Pixel Temporal Z-Score',
+    'temporal_z_score': 'Spectral Complexity Global Temporal Z-Score',
+    'sliding_volume_z_score': 'Spectral Complexity Frame-based Z-Score',
     'sliding_volume_z_score_masked': 'Spectral Complexity Z-Score',
     'sliding_volume_local_z_score': 'Spectral Complexity Local Z-Score',
     'sliding_volume_map_5x5': 'Spectral Complexity 5x5 window',
     'sliding_volume_map_7x7': 'Spectral Complexity 7x7 window',
 }
 LOG_SCALE = ('map' in complexity_type)
-START_YEAR = 2025
-END_YEAR = 2025
+START_YEAR = 2015
+END_YEAR = 2027
 TS_START_DATE = datetime(START_YEAR, 1, 1, tzinfo=timezone.utc)
 TS_END_DATE = datetime(END_YEAR, 12, 31, tzinfo=timezone.utc)
 TWIN_Y_AXIS_DEFAULT = False
@@ -105,7 +106,7 @@ TS_LOCATIONS_MAP = {
 # Time Series Locations (Latitude, Longitude)
 TS_LOCATIONS = TS_LOCATIONS_MAP["Tait"]
 
-DISPLAY_NORMALIZATION = True
+DISPLAY_NORMALIZATION = False
 DISPLAY_REDUNDANT_FIGURE = True 
 
 class HarmonizedComplexityViewer:
@@ -116,10 +117,15 @@ class HarmonizedComplexityViewer:
         self.harm_grp = self.h5['/HDFEOS/GRIDS/HARMONIZED/Data Fields']
         
         # Determine base array dataset to extract timeline
-        if complexity_type in self.harm_grp:
-            self.base_dset = self.harm_grp[complexity_type]
-        else:
-            self.base_dset = self.harm_grp['sliding_volume_map']
+        if complexity_type not in self.harm_grp:
+            available_keys = list(self.harm_grp.keys())
+            raise KeyError(f"Available datasets: {available_keys}")
+        self.base_dset = self.harm_grp[complexity_type]
+        
+        if complexity_type_comparison not in self.harm_grp:
+            available_keys = list(self.harm_grp.keys())
+            raise KeyError(f"Comparison metric '{complexity_type_comparison}' not found. Available datasets: {available_keys}")
+        self.base_dset_comp = self.harm_grp[complexity_type_comparison]
             
         self.common_mask_dset = self.harm_grp['common_mask']
             
@@ -212,36 +218,32 @@ class HarmonizedComplexityViewer:
         self.cbar_slide_redundant = None
         self.ax_ts_twin = None
         self.ax_ts_redundant_twin = None
+        self.ax_comp_top_twin = None
+        self.ax_comp_bot_twin = None
 
         self._recompute_time_series()
         self._init_control_ui()
         self._init_combined_ui()
+        self._init_comparison_ui()
         if DISPLAY_REDUNDANT_FIGURE:
             self._init_redundant_ui()
             self._init_transect_ui()
-        self._init_hull_ui()
         
         self.update_display()
 
-    def _recompute_time_series(self):
-        print(f"Loading pre-computed spatial masks for time series data...")
-        self.ts_data = {
+    def _extract_ts_dict(self, target_dset):
+        ts_res = {
             'LANDSAT': {loc['label']: {'t': [], 'v': []} for loc in TS_LOCATIONS},
             'SENTINEL': {loc['label']: {'t': [], 'v': []} for loc in TS_LOCATIONS},
             'TANAGER': {loc['label']: {'t': [], 'v': []} for loc in TS_LOCATIONS}
         }
-        
-        # Load entirely into memory for fast extraction
-        all_comp = self.base_dset[:]
+        all_comp = target_dset[:]
         all_mask = self.common_mask_dset[:] if MASKING else np.ones_like(all_comp, dtype=bool)
-        
         for loc in TS_LOCATIONS:
             y, x = loc['yx']
             if 0 <= y < self.height and 0 <= x < self.width:
-                # Extract 1D array over time
                 vals = all_comp[:, y, x]
                 masks = all_mask[:, y, x] == 0
-                
                 for i in range(self.total_frames):
                     if masks[i] and not np.isnan(vals[i]):
                         dt = datetime.fromtimestamp(self.prov_time[i], tz=timezone.utc)
@@ -249,8 +251,14 @@ class HarmonizedComplexityViewer:
                         if 'HLSL30' in grid_upper: key = 'LANDSAT'
                         elif 'HLSS30' in grid_upper: key = 'SENTINEL'
                         else: key = 'TANAGER'
-                        self.ts_data[key][loc['label']]['t'].append(dt)
-                        self.ts_data[key][loc['label']]['v'].append(vals[i])
+                        ts_res[key][loc['label']]['t'].append(dt)
+                        ts_res[key][loc['label']]['v'].append(vals[i])
+        return ts_res
+
+    def _recompute_time_series(self):
+        print(f"Loading pre-computed spatial masks for time series data...")
+        self.ts_data = self._extract_ts_dict(self.base_dset)
+        self.ts_data_comp = self._extract_ts_dict(self.base_dset_comp)
         print("Time series processing complete.")
 
     def _init_control_ui(self):
@@ -335,6 +343,14 @@ class HarmonizedComplexityViewer:
         self.ax_slide_map = self.fig_combined.add_subplot(234)
         self.ax_ts_main = self.fig_combined.add_subplot(2, 3, (5, 6))
 
+    def _init_comparison_ui(self):
+        self.fig_comparison = plt.figure(figsize=(12, 10))
+        self.fig_comparison.canvas.manager.set_window_title("Time Series Complexity Comparison")
+        self.fig_comparison.subplots_adjust(top=0.92, bottom=0.08, left=0.08, right=0.92, hspace=0.35)
+        self.fig_comparison.text(0.5, 0.96, "Time Series Metric Comparison", ha='center', va='top', fontsize=12, fontweight='bold')
+        self.ax_comp_top = self.fig_comparison.add_subplot(211)
+        self.ax_comp_bot = self.fig_comparison.add_subplot(212)
+
     def _init_redundant_ui(self):
         self.fig_redundant = plt.figure(figsize=(14, 10))
         self.fig_redundant.canvas.manager.set_window_title("Spatial and Complexity Details")
@@ -356,11 +372,6 @@ class HarmonizedComplexityViewer:
         self.ax_chip_comp = self.fig_transect.add_subplot(gs[1, 1])
         self.ax_transect_t = self.fig_transect.add_subplot(gs[1, 2:])
         self.ax_transect_t_twin = None
-
-    def _init_hull_ui(self):
-        self.fig_hull = plt.figure(figsize=(8, 7))
-        self.fig_hull.canvas.manager.set_window_title("3D Parallelotope Projection")
-        self.ax_hull = self.fig_hull.add_subplot(111, projection='3d')
 
     def update_display(self):
         idx = self.current_idx
@@ -425,7 +436,6 @@ class HarmonizedComplexityViewer:
             rgba[..., 3] = np.where(rgba[..., 3] > 0, 1.0, 0.0)
         rgb = np.clip(rgba, 0.0, 1.0)
         
-        hull_bands = HULL_BANDS_LANDSAT if 'HLS' in grid_name.upper() else HULL_BANDS_TANAGER
         h, w = self.height, self.width
 
         # Row 1
@@ -463,7 +473,7 @@ class HarmonizedComplexityViewer:
         self.ax_spectral.set_title("Spectral Signatures")
         self.ax_spectral.set_xlabel("Wavelength (μm)") 
         self.ax_spectral.set_ylabel("Reflectance")
-        self.ax_spectral.set_ylim(0, 1.05)
+        #self.ax_spectral.set_ylim(0, 1.05)
         
         all_wl = np.concatenate(list(self.wavelengths.values()))
         self.ax_spectral.set_xlim(np.nanmin(all_wl) - 0.05, np.nanmax(all_wl) + 0.05)
@@ -664,23 +674,24 @@ class HarmonizedComplexityViewer:
                 self.ax_transect_t.legend(loc='best', fontsize=10)
 
         # Plot Time Series helper
-        def plot_time_series(ax_main, ax_twin=None):
+        def plot_time_series(ax_main, ax_twin=None, source_dict=None, title_label=None):
             t_ax = ax_twin if ax_twin is not None else ax_main
+            src = source_dict if source_dict is not None else self.ts_data
             for loc in TS_LOCATIONS:
                 label = loc['label']
-                l_d = self.ts_data['LANDSAT'][label]
+                l_d = src['LANDSAT'][label]
                 if l_d['t']:
                     filt_t, filt_v = [t for t in l_d['t'] if self.ts_start_date <= t <= self.ts_end_date], [v for i, v in enumerate(l_d['v']) if self.ts_start_date <= l_d['t'][i] <= self.ts_end_date]
                     if filt_t:
                         ax_main.plot(filt_t, filt_v, marker='^', color=loc['color'], label=f"L: {label}", markersize=4, linestyle='--', linewidth=1, alpha=0.6)
                         
-                s_d = self.ts_data['SENTINEL'][label]
+                s_d = src['SENTINEL'][label]
                 if s_d['t']:
                     filt_t, filt_v = [t for t in s_d['t'] if self.ts_start_date <= t <= self.ts_end_date], [v for i, v in enumerate(s_d['v']) if self.ts_start_date <= s_d['t'][i] <= self.ts_end_date]
                     if filt_t:
                         ax_main.plot(filt_t, filt_v, marker='o', color=loc['color'], label=f"S: {label}", markersize=4, linestyle=':', linewidth=1.2, alpha=0.6)
                 
-                t_d = self.ts_data['TANAGER'][label]
+                t_d = src['TANAGER'][label]
                 if t_d['t']:
                     filt_t, filt_v = [t for t in t_d['t'] if self.ts_start_date <= t <= self.ts_end_date], [v for i, v in enumerate(t_d['v']) if self.ts_start_date <= t_d['t'][i] <= self.ts_end_date]
                     if filt_t:
@@ -691,6 +702,8 @@ class HarmonizedComplexityViewer:
             ax_main.tick_params(axis='x', rotation=45, labelsize=8)
             ax_main.axvline(curr_dt, color='black', linestyle='--', alpha=0.8, linewidth=1.5)
             ax_main.set_xlim(self.ts_start_date, self.ts_end_date)
+            if title_label:
+                ax_main.set_title(title_label, fontsize=10, fontweight='bold')
             
             lines_1, labels_1 = ax_main.get_legend_handles_labels()
             if self.use_twin_axis and ax_twin is not None:
@@ -698,9 +711,11 @@ class HarmonizedComplexityViewer:
                     ax_main.set_yscale('log')
                     ax_twin.set_yscale('log')
                 lines_2, labels_2 = ax_twin.get_legend_handles_labels()
-                ax_main.legend(lines_1 + lines_2, labels_1 + labels_2, loc='upper left', fontsize=8, ncol=2)
+                if lines_1 + lines_2:
+                    ax_main.legend(lines_1 + lines_2, labels_1 + labels_2, loc='upper left', fontsize=8, ncol=2)
             else:
-                ax_main.legend(loc='upper left', fontsize=8, ncol=2)
+                if lines_1:
+                    ax_main.legend(loc='upper left', fontsize=8, ncol=2)
 
         self.ax_ts_main.clear()
         if self.ax_ts_twin is not None:
@@ -708,7 +723,7 @@ class HarmonizedComplexityViewer:
             except Exception: pass
             self.ax_ts_twin = None
         if self.use_twin_axis: self.ax_ts_twin = self.ax_ts_main.twinx()
-        plot_time_series(self.ax_ts_main, self.ax_ts_twin)
+        plot_time_series(self.ax_ts_main, self.ax_ts_twin, self.ts_data)
 
         if DISPLAY_REDUNDANT_FIGURE:
             self.ax_ts_redundant_main.clear()
@@ -717,17 +732,28 @@ class HarmonizedComplexityViewer:
                 except Exception: pass
                 self.ax_ts_redundant_twin = None
             if self.use_twin_axis: self.ax_ts_redundant_twin = self.ax_ts_redundant_main.twinx()
-            plot_time_series(self.ax_ts_redundant_main, self.ax_ts_redundant_twin)
+            plot_time_series(self.ax_ts_redundant_main, self.ax_ts_redundant_twin, self.ts_data)
 
-        # 3D Hull
-        self.ax_hull.clear()
-        
-        self.ax_hull.text2D(0.5, 0.5, "3D Hull Disabled\n(surface_reflectance removed to save storage space)", 
-                            ha='center', va='center', transform=self.ax_hull.transAxes, fontsize=12)
-        self.ax_hull.set_axis_off()
-        
-        figs_to_draw = [self.fig_controls, self.fig_combined, self.fig_hull]
+        if hasattr(self, 'fig_comparison') and self.fig_comparison is not None:
+            self.ax_comp_top.clear()
+            if self.ax_comp_top_twin is not None:
+                try: self.ax_comp_top_twin.remove()
+                except Exception: pass
+                self.ax_comp_top_twin = None
+            if self.use_twin_axis: self.ax_comp_top_twin = self.ax_comp_top.twinx()
+            plot_time_series(self.ax_comp_top, self.ax_comp_top_twin, self.ts_data, COMPLEXITY_DICT.get(complexity_type, complexity_type))
+
+            self.ax_comp_bot.clear()
+            if self.ax_comp_bot_twin is not None:
+                try: self.ax_comp_bot_twin.remove()
+                except Exception: pass
+                self.ax_comp_bot_twin = None
+            if self.use_twin_axis: self.ax_comp_bot_twin = self.ax_comp_bot.twinx()
+            plot_time_series(self.ax_comp_bot, self.ax_comp_bot_twin, self.ts_data_comp, COMPLEXITY_DICT.get(complexity_type_comparison, complexity_type_comparison))
+
+        figs_to_draw = [self.fig_controls, self.fig_combined]
         if DISPLAY_REDUNDANT_FIGURE: figs_to_draw.extend([self.fig_redundant, self.fig_transect])
+        if hasattr(self, 'fig_comparison') and self.fig_comparison is not None: figs_to_draw.append(self.fig_comparison)
         for f in figs_to_draw: f.canvas.draw_idle()
 
     def _on_localization_change(self, label):

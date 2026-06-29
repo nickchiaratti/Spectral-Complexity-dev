@@ -489,7 +489,9 @@ def main(target_location=None, tile_size=3, num_endmembers=7, norm_param='bandCo
                 sensor_masks = np.empty((len(indices), height, width), dtype=np.bool_)
                 for i, idx in enumerate(indices):
                     sensor_volumes[i] = ds_harm_slide[idx, :, :]
-                    sensor_masks[i] = ds_harm_mask[idx, :, :]
+                    # common_mask convention: 0 = Valid/Clear, 1 = Invalid/Masked.
+                    # SpecComplex temporal Z-score functions strictly expect True = Valid Pixel.
+                    sensor_masks[i] = (ds_harm_mask[idx, :, :] == 0)
                 
                 # Calculate temporal z-score using SpecComplex
                 if CALC_TEMPORAL_Z_SCORE:

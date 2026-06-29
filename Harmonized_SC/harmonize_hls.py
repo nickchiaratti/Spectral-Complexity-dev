@@ -30,18 +30,56 @@ def process_hls_master_stack(
 ):
     """Harmonizes unprojected native arrays into the Master Grid directly in-memory."""
     sorted_dates = sorted(daily_groups.keys())
-    num_frames = len(sorted_dates)
-    if num_frames == 0: return None
+    if len(sorted_dates) == 0: return None
 
-    stk_sr = np.full((num_frames, expected_sr, master_height, master_width), np.nan, dtype=np.float32)
-    stk_fm = np.full((num_frames, 1, master_height, master_width), 255, dtype=np.uint8)
-    stk_ag = np.full((num_frames, 4, master_height, master_width), np.nan, dtype=np.float32)
-    stk_mask = np.ones((num_frames, master_height, master_width), dtype=bool)
-    vis_data = np.zeros((num_frames, 4, master_height, master_width), dtype=np.uint8)
+    # ---- PASS 1: Identify Valid Dates ----
+    valid_dates = []
+    with h5py.File(native_h5_path, 'r') as h5f:
+        print("    [Pass 1] Evaluating ROI coverage...", flush=True)
+        for date_str in sorted_dates:
+            entries = daily_groups[date_str]
+            accum_sr_band0 = np.full((1, master_height, master_width), np.nan, dtype=np.float32)
+            
+            for entry in entries:
+                fidx = entry['frame_idx']
+                grid_id = entry['grid_id']
+                df_path = f'HDFEOS/GRIDS/{grid_id}/Data Fields'
+                
+                sr_node = h5f[f'{df_path}/surface_reflectance']
+                src_tf = Affine.from_gdal(*sr_node.attrs['GeoTransform'])
+                src_crs = CRS.from_wkt(sr_node.attrs['spatial_ref'])
+                
+                # Load only the first band
+                src_sr = sr_node[fidx, 0:1, :, :]
+                
+                tmp_sr_band0 = np.full((1, master_height, master_width), np.nan, dtype=np.float32)
+                reproject(source=src_sr, destination=tmp_sr_band0, src_transform=src_tf, src_crs=src_crs, dst_transform=master_transform, dst_crs=master_crs, resampling=Resampling.cubic, src_nodata=np.nan, dst_nodata=np.nan)
+                
+                mask_sr = ~np.isnan(tmp_sr_band0)
+                accum_sr_band0[mask_sr] = tmp_sr_band0[mask_sr]
+            
+            valid_pixels = np.sum(~np.isnan(accum_sr_band0[0]))
+            coverage = (valid_pixels / (master_height * master_width)) * 100
+            if coverage >= min_roi_coverage:
+                valid_dates.append(date_str)
+            else:
+                print(f"    Skipping HLS frame {date_str} (Coverage: {coverage:.1f}% < {min_roi_coverage}%)", flush=True)
+
+    num_valid = len(valid_dates)
+    if num_valid == 0:
+        return None
+
+    # ---- PASS 2: Extract and process ONLY valid frames ----
+    print(f"    [Pass 2] Allocating memory for {num_valid} valid frames...", flush=True)
+    stk_sr = np.full((num_valid, expected_sr, master_height, master_width), np.nan, dtype=np.float32)
+    stk_fm = np.full((num_valid, 1, master_height, master_width), 255, dtype=np.uint8)
+    stk_ag = np.full((num_valid, 4, master_height, master_width), np.nan, dtype=np.float32)
+    stk_mask = np.ones((num_valid, master_height, master_width), dtype=bool)
+    vis_data = np.zeros((num_valid, 4, master_height, master_width), dtype=np.uint8)
     meta_arrays = {'acq': [], 'space': [], 'saz': [], 'sel': [], 'cc': []}
 
     with h5py.File(native_h5_path, 'r') as h5f:
-        for idx, date_str in enumerate(sorted_dates):
+        for idx, date_str in enumerate(valid_dates):
             entries = daily_groups[date_str]
         
             base_grid = entries[0]['grid_id']
@@ -82,7 +120,6 @@ def process_hls_master_stack(
                 mask_ag = ~np.isnan(tmp_ag)
                 stk_ag[idx][mask_ag] = tmp_ag[mask_ag]
 
-
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore", category=RuntimeWarning)
                 mean_sza = np.nanmean(stk_ag[idx, 0])
@@ -100,30 +137,5 @@ def process_hls_master_stack(
         
             rgba_img = sc.generate_rgba_image(r_band = stk_sr[idx, 3, :, :], g_band = stk_sr[idx, 2, :, :], b_band = stk_sr[idx, 1, :, :])
             vis_data[idx, ...] = np.transpose(rgba_img, (2, 0, 1))
-
-    valid_indices = []
-    for idx, date_str in enumerate(sorted_dates):
-        valid_pixels = np.sum(~np.isnan(stk_sr[idx, 0]))
-        coverage = (valid_pixels / (master_height * master_width)) * 100
-        if coverage >= min_roi_coverage:
-            valid_indices.append(idx)
-        else:
-            print(f"    Skipping HLS frame {date_str} (Coverage: {coverage:.1f}% < {min_roi_coverage}%)")
-
-    if not valid_indices:
-        return None
-    
-    num_valid = len(valid_indices)
-    stk_sr = stk_sr[valid_indices]
-    stk_fm = stk_fm[valid_indices]
-    stk_ag = stk_ag[valid_indices]
-    stk_mask = stk_mask[valid_indices]
-    vis_data = vis_data[valid_indices]
-
-    meta_arrays['acq'] = [meta_arrays['acq'][i] for i in valid_indices]
-    meta_arrays['space'] = [meta_arrays['space'][i] for i in valid_indices]
-    meta_arrays['saz'] = [meta_arrays['saz'][i] for i in valid_indices]
-    meta_arrays['sel'] = [meta_arrays['sel'][i] for i in valid_indices]
-    meta_arrays['cc'] = [meta_arrays['cc'][i] for i in valid_indices]
 
     return {'sr': stk_sr, 'fm': stk_fm, 'ag': stk_ag, 'vis': vis_data, 'mask': stk_mask, 'meta': meta_arrays, 'count': num_valid}
