@@ -57,7 +57,7 @@ locations:
     ROI_LON_MAX: -58.531107
     ROI_LAT_MIN: -34.703334
     ROI_LAT_MAX: -34.504881
-    START_DATE: '2018-01-01'
+    START_DATE: '2015-01-01'
     END_DATE: '2026-06-01'
     TANAGER_AVAILABLE: true
     TANAGER_STAC_URL: https://www.planet.com/data/stac/tanager-core-imagery/urban/collection.json

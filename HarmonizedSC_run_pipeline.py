@@ -21,6 +21,7 @@ import Harmonized_SC.HLST_SC_calculations as HLST_SC_calculations
 import Harmonized_SC.HLST_specComplex_viewer as HLST_specComplex_viewer
 import Harmonized_SC.plot_sampling_rate as plot_sampling_rate
 import Harmonized_SC.plot_water_mask as plot_water_mask
+import Harmonized_SC.plot_sliding_volume_global_stats as plot_sliding_volume_global_stats
 
 # ==========================================
 # PIPELINE CONFIGURATION
@@ -75,6 +76,7 @@ def main():
         ("HLST_SC_calculations", HLST_SC_calculations.main),
         ("plot_sampling_rate", plot_sampling_rate.analyze_sampling_rate),
         ("plot_water_mask", plot_water_mask.main),
+        ("plot_sliding_volume_global_stats", plot_sliding_volume_global_stats.plot_global_stats),
         ("HLST_specComplex_viewer", HLST_specComplex_viewer.main)
     ]
 
@@ -98,6 +100,11 @@ def main():
             continue
         elif name == "plot_sampling_rate":
             print(f"Plotting sampling rate for {location_name}...")
+            file_path = f"{SATELLITE_DATA_DIR}/HLST_{location_name}_Harmonized_SC_EM-{args.num_endmembers}_Norm-{args.norm_param}.h5"
+            func(h5_path=file_path)
+            continue
+        elif name == "plot_sliding_volume_global_stats":
+            print(f"Plotting sliding volume global stats for {location_name}...")
             file_path = f"{SATELLITE_DATA_DIR}/HLST_{location_name}_Harmonized_SC_EM-{args.num_endmembers}_Norm-{args.norm_param}.h5"
             func(h5_path=file_path)
             continue

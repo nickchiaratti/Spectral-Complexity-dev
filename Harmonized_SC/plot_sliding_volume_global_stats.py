@@ -1,4 +1,6 @@
 import os
+import glob
+import argparse
 import h5py
 import numpy as np
 import matplotlib.pyplot as plt
@@ -46,9 +48,20 @@ def apply_seasonal_underlay(axes, dates):
                 ax.axvspan(t0, t1, color=color, alpha=0.15, zorder=0, label='_nolegend_')
         ax.set_xlim(xlim)
 
-def plot_global_stats(location):
-    h5_path = f"C:/satelliteImagery/HLST30/HLST_{location}_Harmonized_SC_EM-7_Norm-None.h5"
-    local_out_dir = f"C:/satelliteImagery/MultiSensor_Analysis_{location}_Harmonized"
+def get_file_path(location):
+    matches = glob.glob(os.path.join("C:/satelliteImagery/HLST30", f"HLST_{location}_Harmonized*SC_EM*.h5"))
+    if matches:
+        matches.sort(key=lambda x: os.path.getmtime(x), reverse=True)
+        return matches[0]
+    return f"C:/satelliteImagery/HLST30/HLST_{location}_Harmonized_SC_EM-7_Norm-bandCount.h5"
+
+def plot_global_stats(target_location=None, h5_path=None, location=None):
+    if target_location is None and location is not None:
+        target_location = location
+    if h5_path is None:
+        if target_location is None:
+            raise ValueError("Either target_location or h5_path must be specified.")
+        h5_path = get_file_path(target_location)
 
     if not os.path.exists(h5_path):
         raise FileNotFoundError(f"Critical Data Integrity Error: Target HDF5 file not found at {h5_path}")
@@ -335,35 +348,41 @@ def plot_global_stats(location):
     fig3.subplots_adjust(top=0.90, bottom=0.08, left=0.06, right=0.98, hspace=0.32, wspace=0.18)
 
     # Ensure output directories exist
-    os.makedirs(local_out_dir, exist_ok=True)
+    output_dir = os.path.dirname(h5_path)
+    os.makedirs(output_dir, exist_ok=True)
+    base_name = os.path.splitext(os.path.basename(h5_path))[0]
 
-    out_local_path1 = os.path.join(local_out_dir, "sliding_volume_zscore_global_stats.png")
-
+    out_local_path1 = os.path.join(output_dir, f"{base_name}_zscore_global_stats.png")
     fig.savefig(out_local_path1, dpi=500, bbox_inches='tight')
-    
 
-    out_local_path2 = os.path.join(local_out_dir, "sliding_volume_zscore_series_bounding_bars.png")
-
+    out_local_path2 = os.path.join(output_dir, f"{base_name}_zscore_series_bounding_bars.png")
     fig2.savefig(out_local_path2, dpi=500, bbox_inches='tight')
 
-    out_local_path3 = os.path.join(local_out_dir, "sliding_volume_lognormal_distribution_validation.png")
-
+    out_local_path3 = os.path.join(output_dir, f"{base_name}_lognormal_distributions.png")
     fig3.savefig(out_local_path3, dpi=500, bbox_inches='tight')
-    #plt.show()
+
     plt.close(fig)
     plt.close(fig2)
     plt.close(fig3)
 
     print(
-        f"Successfully created global statistics plots for '{location}' at:\n"
+        f"Successfully created global statistics plots for '{base_name}' at:\n"
         f" [Plot 1 - Global Stats Panel]: {out_local_path1}\n"
         f" [Plot 2 - Series & Bounding Bars]: {out_local_path2}\n"
         f" [Plot 3 - Log-Normal Validation]: {out_local_path3}\n"
     )
 
 if __name__ == "__main__":
-    print(f"Starting batch processing across {len(LOCATIONS)} locations: {LOCATIONS}")
-    for loc in LOCATIONS:
-        print(f"\n========================================\nProcessing location: {loc} ...")
-        plot_global_stats(loc)
-    print("\n========================================\nBatch processing completed successfully.")
+    parser = argparse.ArgumentParser(description="Plot sliding volume global stats")
+    parser.add_argument('--file', '-f', type=str, default=None, help="Path to specific HDF5 file")
+    parser.add_argument('--location', '-l', type=str, default=None, help="Target location name")
+    args = parser.parse_args()
+
+    if args.file or args.location:
+        plot_global_stats(target_location=args.location, h5_path=args.file)
+    else:
+        print(f"Starting batch processing across {len(LOCATIONS)} locations: {LOCATIONS}")
+        for loc in LOCATIONS:
+            print(f"\n========================================\nProcessing location: {loc} ...")
+            plot_global_stats(target_location=loc)
+        print("\n========================================\nBatch processing completed successfully.")

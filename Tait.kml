@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<kml xmlns="http://www.opengis.net/kml/2.2">
+  <Document>
+    <name>Tait Location</name>
+    <Placemark>
+      <name>Tait ROI</name>
+      <Polygon>
+        <extrude>1</extrude>
+        <altitudeMode>clampToGround</altitudeMode>
+        <outerBoundaryIs>
+          <LinearRing>
+            <coordinates>
+              -77.516127,43.127698,0
+              -77.461968,43.127698,0
+              -77.461968,43.159168,0
+              -77.516127,43.159168,0
+              -77.516127,43.127698,0
+            </coordinates>
+          </LinearRing>
+        </outerBoundaryIs>
+      </Polygon>
+    </Placemark>
+  </Document>
+</kml>

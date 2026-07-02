@@ -169,7 +169,7 @@ def compute_frame_metrics(payload):
             'telemetry': telemetry
         }
 
-def main(target_location=None, tile_size=3, num_endmembers=7, norm_param='bandCount'):
+def main(target_location=None, tile_size=3, num_endmembers=7, norm_param=None):
 
     # ==========================================
     # 1. CONFIGURATION & FEATURE TOGGLES
@@ -348,6 +348,7 @@ def main(target_location=None, tile_size=3, num_endmembers=7, norm_param='bandCo
                 
                     data_grp = h5_out[f"/HDFEOS/GRIDS/{grid}/Data Fields"]
                     em_ds = overwrite_dset(data_grp, 'frame_endmembers', (n_frames, n_bands, NUM_ENDMEMBERS), spatial_ref=spatial_ref, geo_transform=geo_transform, chunks=(1, n_bands, NUM_ENDMEMBERS))
+                    em_ds.attrs['wavelengths'] = orig_data_grp["surface_reflectance"].attrs['wavelengths']
                     idx_ds = overwrite_dset(data_grp, 'frame_endmember_indices', (n_frames, NUM_ENDMEMBERS), dtype='int32', chunks=(1, NUM_ENDMEMBERS))
                     vol_ds = overwrite_dset(data_grp, 'frame_endmember_volumes', (n_frames, NUM_ENDMEMBERS), chunks=(1, NUM_ENDMEMBERS))
                 
