@@ -29,9 +29,9 @@ def tqdm_joblib(tqdm_object):
 # 1. CONFIGURATION
 # ==========================================
 LOCATION = "Tait"
-H5_PATH = f"C:/satelliteImagery/HLST30/HLST_{LOCATION}_Harmonized_SC_EM-7_Norm-bandCount.h5"
+H5_PATH = f"C:/satelliteImagery/HLST30/HLST_{LOCATION}_Harmonized_SC_EM-7_Norm-None.h5"
 
-TARGET_METRIC = 'sliding_volume_z_score'
+TARGET_METRIC = 'pixel_temporal_z_score'#'pixel_temporal_z_score'  'sliding_volume_z_score' 'temporal_z_score' 'ndvi_map'
 RMSE_MULTIPLIER = 3.0
 CONSECUTIVE_ANOMALIES = 4
 TIME_WINDOW_YEARS = 3.0
@@ -42,7 +42,7 @@ MAX_ELASTIC_WINDOW_YEARS = TIME_WINDOW_YEARS + 2.0  # Maximum span to expand bac
 ENABLE_CONSTANT = True
 ENABLE_LINEAR = True
 ENABLE_QUADRATIC = False
-TEMPORAL_PERIODS = [1.19, 1.499, 1]
+TEMPORAL_PERIODS = [0.66, 1]
 
 
 
@@ -174,6 +174,7 @@ def main(enable_const=ENABLE_CONSTANT,
          enable_quad=ENABLE_QUADRATIC, 
          temporal_periods=None,
          enable_elastic_window=ENABLE_ELASTIC_WINDOW,
+         target_metric=TARGET_METRIC,
          launch_vis=True):
     if temporal_periods is None:
         temporal_periods = TEMPORAL_PERIODS
@@ -184,12 +185,12 @@ def main(enable_const=ENABLE_CONSTANT,
     _term_str = f"C{int(enable_const)}L{int(enable_lin)}Q{int(enable_quad)}"
     _period_str = f"P{len(temporal_periods)}"
     _elastic_str = f"E{int(enable_elastic_window)}"
-    output_h5 = f"C:/satelliteImagery/HLST30/CCD/{LOCATION}_CCD_Harmonized_Change_Detection_{_term_str}_{_period_str}_{_elastic_str}.h5"
+    output_h5 = f"C:/satelliteImagery/HLST30/CCD/{LOCATION}_CCD_Harmonized_Change_Detection_{target_metric}_{_term_str}_{_period_str}_{_elastic_str}.h5"
 
     print(f"Loading data from {H5_PATH}...")
     with h5py.File(H5_PATH, 'r') as f:
         data_grp = f['/HDFEOS/GRIDS/HARMONIZED/Data Fields']
-        metric_ds = data_grp[TARGET_METRIC]
+        metric_ds = data_grp[target_metric]
         
         acq_times = metric_ds.attrs['acquisition_time'][:]
         y_data = metric_ds[...]
@@ -274,7 +275,7 @@ def main(enable_const=ENABLE_CONSTANT,
         out_file.attrs['ENABLE_CONSTANT'] = enable_const
         out_file.attrs['ENABLE_LINEAR'] = enable_lin
         out_file.attrs['ENABLE_QUADRATIC'] = enable_quad
-        out_file.attrs['TARGET_METRIC'] = TARGET_METRIC
+        out_file.attrs['TARGET_METRIC'] = target_metric
         out_file.attrs['SOURCE_DATA'] = H5_PATH
         
         out_file.create_dataset('predicted_series', data=predicted_series, compression='gzip')

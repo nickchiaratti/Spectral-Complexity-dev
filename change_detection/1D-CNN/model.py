@@ -2,21 +2,21 @@ import torch
 import torch.nn as nn
 
 class MultiScaleSITSNet(nn.Module):
-    def __init__(self, spatial_dim=40, in_channels=15, out_features=3, target_features_dim=56):
+    def __init__(self, spatial_dim, in_channels, out_features, target_features_dim):
         super(MultiScaleSITSNet, self).__init__()
         self.target_features_dim = target_features_dim
         self.in_channels = in_channels
         
         # Inception Block (Parallel Branches)
-        self.branch1 = nn.Conv1d(in_channels=self.in_channels, out_channels=16, kernel_size=3, padding='same')
-        self.branch2 = nn.Conv1d(in_channels=self.in_channels, out_channels=16, kernel_size=5, padding='same')
-        self.branch3 = nn.Conv1d(in_channels=self.in_channels, out_channels=16, kernel_size=7, padding='same')
+        self.branch1 = nn.Conv1d(in_channels=self.in_channels, out_channels=16, kernel_size=5, padding='same')
+        self.branch2 = nn.Conv1d(in_channels=self.in_channels, out_channels=16, kernel_size=7, padding='same')
+        self.branch3 = nn.Conv1d(in_channels=self.in_channels, out_channels=16, kernel_size=9, padding='same')
         
         self.relu = nn.ReLU()
         self.maxpool1 = nn.MaxPool1d(kernel_size=2)
         
         # Secondary Extractor. Input channels = 16 * 3 = 48
-        self.conv_sec = nn.Conv1d(in_channels=48, out_channels=64, kernel_size=3, padding='same')
+        self.conv_sec = nn.Conv1d(in_channels=48, out_channels=64, kernel_size=7, padding='same')
         self.maxpool2 = nn.MaxPool1d(kernel_size=2)
         
         # Regression Head

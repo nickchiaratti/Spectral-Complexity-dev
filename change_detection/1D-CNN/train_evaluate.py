@@ -28,9 +28,9 @@ def train_and_evaluate(h5_path, output_h5='inference_results.h5', weights_path='
         
     cal_loader = DataLoader(cal_dataset, batch_size=4096, shuffle=True, num_workers=16, pin_memory=True)
     
-    in_channels = len(cal_dataset.temporal_periods) * 2 + 6
+    in_channels = cal_dataset[0]['X_seq'].shape[-1]
     target_features_dim = cal_dataset[0]['X_targets'].shape[-1]
-    model = MultiScaleSITSNet(spatial_dim=cal_dataset.h, in_channels=in_channels, out_features=1, target_features_dim=target_features_dim).to(device)
+    model = MultiScaleSITSNet(spatial_dim=cal_dataset.spatial_dim, in_channels=in_channels, out_features=1, target_features_dim=target_features_dim).to(device)
     
     if skip_training and os.path.exists(weights_path):
         print(f"Skipping training. Loading existing weights from {weights_path}...")
@@ -260,7 +260,7 @@ def train_and_evaluate(h5_path, output_h5='inference_results.h5', weights_path='
                             return self.base_model(x_seq, x_spatial, t, m)
                             
                     wrapped_model = PnPXAIWrapperSpatial(model, X_targets_anom, seq_mask_anom)
-                    explainer = IntegratedGradients(wrapped_model)
+                    explainer = IntegratedGradients(wrapped_model, baseline_fn=('zeros', 'zeros'))
                     
                     # Compute Attributions using Integrated Gradients (Full Batch)
                     eval_targets = torch.zeros(X_seq_anom.size(0), dtype=torch.long, device=device)
@@ -268,6 +268,26 @@ def train_and_evaluate(h5_path, output_h5='inference_results.h5', weights_path='
                         inputs=(X_seq_anom, X_spatial_anom),
                         targets=eval_targets
                     )
+                    
+                    class PnPXAIWrapperSeqOnly(nn.Module):
+                        def __init__(self, base_model, spatial_context, targets, mask):
+                            super().__init__()
+                            self.base_model = base_model
+                            self.spatial_context = spatial_context
+                            self.targets = targets
+                            self.mask = mask
+                            
+                        def forward(self, x_seq):
+                            batch_ratio = x_seq.size(0) // self.targets.size(0)
+                            if batch_ratio > 1:
+                                t = self.targets.repeat(batch_ratio, *([1] * (self.targets.dim() - 1)))
+                                m = self.mask.repeat(batch_ratio, *([1] * (self.mask.dim() - 1)))
+                                s = self.spatial_context.repeat(batch_ratio, *([1] * (self.spatial_context.dim() - 1)))
+                            else:
+                                t = self.targets
+                                m = self.mask
+                                s = self.spatial_context
+                            return self.base_model(x_seq, s, t, m)
                     
                     # Compute Evaluations (Element-by-Element due to Sensitivity's internal batching)
                     sens_scores_list = []
@@ -283,14 +303,14 @@ def train_and_evaluate(h5_path, output_h5='inference_results.h5', weights_path='
                         a_i = (attr_X[0][i:i+1], attr_X[1][i:i+1])
                         tgt_i = eval_targets[i:i+1]
                         
-                        w_single = PnPXAIWrapperSpatial(model, t_i, m_i)
+                        w_single = PnPXAIWrapperSeqOnly(model, x_spat_i, t_i, m_i)
                         expl_single = IntegratedGradients(w_single)
                         
                         metric_sens = Sensitivity(model=w_single, explainer=expl_single)
                         metric_comp = Complexity(model=w_single, explainer=expl_single)
                         
-                        sens_scores_list.append(metric_sens.evaluate((x_seq_i, x_spat_i), targets=tgt_i, attributions=a_i))
-                        comp_scores_list.append(metric_comp.evaluate((x_seq_i, x_spat_i), targets=tgt_i, attributions=a_i))
+                        sens_scores_list.append(metric_sens.evaluate(x_seq_i, targets=tgt_i, attributions=a_i[0]))
+                        comp_scores_list.append(metric_comp.evaluate(x_seq_i, targets=tgt_i, attributions=a_i[0]))
                         
                     sens_scores = torch.cat(sens_scores_list)
                     comp_scores = torch.cat(comp_scores_list)
@@ -330,6 +350,8 @@ def train_and_evaluate(h5_path, output_h5='inference_results.h5', weights_path='
                 batch_results['Attr_dt'] = attr_dt
                 batch_results['Attr_ZScore'] = attr_zscore
                 batch_results['Attr_Spatial'] = attr_spatial
+                batch_results['Explainer_Sensitivity'] = explainer_sensitivity
+                batch_results['Explainer_Complexity'] = explainer_complexity
                 
                 dset[curr_idx:curr_idx + batch_size] = batch_results
                 curr_idx += batch_size

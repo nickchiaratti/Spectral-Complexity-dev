@@ -8,7 +8,7 @@ import math
 class SITSDataset(Dataset):
     def __init__(self, h5_path, mode='calibration', train_end_date="2024-01-01", 
                  consecutive_anomalies=3, time_window_years=3.0, 
-                 enable_elastic_window=True, max_elastic_window_years=5.0, 
+                 enable_elastic_window=False, max_elastic_window_years=5.0, 
                  min_samples=38):
         """
         mode: 'calibration' (pre-train_end_date) or 'monitoring' (post-train_end_date) or 'all' (for inference context)
@@ -22,10 +22,8 @@ class SITSDataset(Dataset):
         self.max_elastic_window_years = max_elastic_window_years
         self.min_samples = min_samples
         
-        # Explicit temporal periods (in years) to capture sub-harmonics and multi-year patterns
-        self.temporal_periods = [1.0, 0.5, 0.33, 0.25]
-        
         self.L_freqs = 10 # 20 features for X (10 sin, 10 cos), 20 for Y
+        self.spatial_dim = self.L_freqs * 4
         
         self.samples = None # Will be a PyTorch Shared Memory Tensor
         
@@ -181,19 +179,17 @@ class SITSDataset(Dataset):
         delta_t = (ts21 - history_times) / 86400.0
         dt_years = delta_t / 365.25
         
-        # Harmonic Features (Dynamic Multi-Year Periods)
-        dt_features = []
-        for period in self.temporal_periods:
-            dt_features.append(torch.sin(2 * math.pi * dt_years / period).to(torch.float32))
-            dt_features.append(torch.cos(2 * math.pi * dt_years / period).to(torch.float32))
+        # Apply Fourier encoding methodology for dt_years instead of a linear range
+        dt_years_encoded = (torch.sin(2 * math.pi * dt_years) + torch.cos(2 * math.pi * dt_years)).to(torch.float32)
         
         feature_list = [
             pixel_doy_sin, 
             pixel_doy_cos, 
             pixel_tod_sin,
             pixel_tod_cos,
-            dt_years.to(torch.float32)
-        ] + dt_features + [pixel_z]
+            dt_years_encoded,
+            pixel_z
+        ]
         
         history = torch.stack(feature_list, dim=-1)
         
@@ -215,29 +211,25 @@ class SITSDataset(Dataset):
         spatial_feats = torch.tensor(sf_x + sf_y, dtype=torch.float32)
 
         # Targets Temporal Features
-        dt_years_max = self.time_window_years
         target_acq_times = self.acq_time[target_idx]
         delta_t_targets = (target_acq_times - ts21) / 86400.0
         dt_target_years = delta_t_targets / 365.25
-        dt_target_norm = dt_target_years / dt_years_max
+        
+        # Apply Fourier encoding methodology for target dt_years instead of a linear range
+        dt_target_encoded = (torch.sin(2 * math.pi * dt_target_years) + torch.cos(2 * math.pi * dt_target_years)).to(torch.float32)
         
         target_doy_sin = self.doy_sin[target_idx]
         target_doy_cos = self.doy_cos[target_idx]
         target_tod_sin = self.tod_sin[target_idx]
         target_tod_cos = self.tod_cos[target_idx]
         
-        target_dt_features = []
-        for period in self.temporal_periods:
-            target_dt_features.append(torch.sin(2 * math.pi * dt_target_years / period).to(torch.float32))
-            target_dt_features.append(torch.cos(2 * math.pi * dt_target_years / period).to(torch.float32))
-            
         target_feature_list = [
             target_doy_sin,
             target_doy_cos,
             target_tod_sin,
             target_tod_cos,
-            dt_target_norm.to(torch.float32)
-        ] + target_dt_features
+            dt_target_encoded
+        ]
         
         X_targets = torch.stack(target_feature_list, dim=-1).flatten()
         

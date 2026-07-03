@@ -8,13 +8,33 @@ import pyproj
 plt.style.use(['science','no-latex'])
 
 LOCATION = "Tait"
-TRAIN_END_YEAR = "2025"
+TRAIN_END_YEAR = "2023"
 OUTPUT_DIR = f"C:/satelliteImagery/HLST30/1D-CNN-{LOCATION}-TrainEnd{TRAIN_END_YEAR}"
 H5_PATH = f"C:/satelliteImagery/HLST30/HLST_{LOCATION}_Harmonized_SC_EM-7_Norm-bandCount.h5"
-INFERENCE_H5 = os.path.join(OUTPUT_DIR, 'inference_results.h5')
+INFERENCE_H5 = os.path.join(OUTPUT_DIR, f'CNN_{LOCATION}_baseline_weights_pre{TRAIN_END_YEAR}.h5')
 
 
-def plot_pixel_sits(pixel_y, pixel_x, source_h5_path, inference_results_h5, ax=None, current_date=None):
+def validate_inference_results_schema(f, file_path):
+    if 'inference_results' not in f:
+        raise ValueError(f"No inference_results dataset found in {file_path}")
+    ds = f['inference_results']
+    if 'train_end_date' not in ds.attrs or 'confidence_multiplier' not in ds.attrs:
+        raise ValueError("Inference results are missing required metadata (train_end_date or confidence_multiplier). Please re-run the CNN pipeline, as the results were generated with an out-of-date codebase.")
+    
+    names = ds.dtype.names
+    required_cols = ['Pixel_X', 'Pixel_Y', 'Timestamp_T21', 'Timestamp_T_Last', 'Pred_1', 'Std_1', 'Anomaly_Flag', 'Confirmed_Change']
+    missing_cols = [c for c in required_cols if c not in names]
+    if missing_cols:
+        raise ValueError(f"Inference results dataset is missing required columns: {missing_cols}. Please re-run the CNN pipeline, as the results were generated with an out-of-date codebase.")
+        
+    if 'Attr_DoY' in names:
+        expected_attrs = ['Attr_DoY', 'Attr_ToD', 'Attr_dt', 'Attr_ZScore', 'Attr_Spatial']
+        missing_attrs = [c for c in expected_attrs if c not in names]
+        if missing_attrs:
+            raise ValueError(f"Inference results dataset has partial attribution data but is missing required attribution columns: {missing_attrs}. Please re-run the CNN pipeline (`change_detection/1D-CNN/train_evaluate.py`), as the results were generated with an out-of-date codebase.")
+
+
+def plot_pixel_sits(pixel_y, pixel_x, source_h5_path, inference_results_h5, ax=None, ax_rob=None, current_date=None):
     # This visualizes the 1D time series for a pixel
     lat, lon = None, None
     with h5py.File(source_h5_path, 'r') as f:
@@ -52,30 +72,29 @@ def plot_pixel_sits(pixel_y, pixel_x, source_h5_path, inference_results_h5, ax=N
     
     # Load inference results for this pixel
     with h5py.File(inference_results_h5, 'r') as f:
-        if 'inference_results' not in f:
-            raise ValueError(f"No inference_results dataset found in {inference_results_h5}")
+        validate_inference_results_schema(f, inference_results_h5)
             
         res = f['inference_results'][:]
         
         aleatoric_val = 0
         if 'baseline_aleatoric_map' in f:
-            aleatoric_val = f['baseline_aleatoric_map'][pixel_y, pixel_x]
+            aleatoric_val = float(f['baseline_aleatoric_map'][pixel_y, pixel_x])
             
-        if 'train_end_date' not in f['inference_results'].attrs or 'confidence_multiplier' not in f['inference_results'].attrs:
-            raise ValueError("Inference results are missing required metadata (train_end_date or confidence_multiplier). Please re-run the CNN pipeline, as the results were generated with an out-of-date codebase.")
-            
-        val = f['inference_results'].attrs['train_end_date']
-        train_end_date = val.decode('utf-8') if isinstance(val, bytes) else str(val)
+        train_end_date = f['inference_results'].attrs['train_end_date']
         conf_mult = float(f['inference_results'].attrs['confidence_multiplier'])
         
     mask = (res['Pixel_X'] == pixel_x) & (res['Pixel_Y'] == pixel_y)
     pixel_res = res[mask]
     
     if ax is None:
-        fig, ax = plt.subplots(figsize=(12, 6))
+        fig, (ax, ax_rob) = plt.subplots(2, 1, figsize=(14, 8), sharex=True, gridspec_kw={'height_ratios': [2.5, 1]})
         show_plot = True
     else:
         show_plot = False
+        if ax_rob is None:
+            from mpl_toolkits.axes_grid1 import make_axes_locatable
+            divider = make_axes_locatable(ax)
+            ax_rob = divider.append_axes("bottom", size="35%", pad=0.3, sharex=ax)
     
     # Separate valid vs interpolated (invalid)
     valid_mask = ~is_invalid
@@ -116,6 +135,8 @@ def plot_pixel_sits(pixel_y, pixel_x, source_h5_path, inference_results_h5, ax=N
         attr_dt = []
         attr_zscore = []
         attr_spatial = []
+        explainer_sens = []
+        explainer_comp = []
         
         # Determine number of predictions
         pred_cols = [c for c in pixel_res.dtype.names if c.startswith('Pred_')]
@@ -142,6 +163,9 @@ def plot_pixel_sits(pixel_y, pixel_x, source_h5_path, inference_results_h5, ax=N
                 attr_dt.append(row['Attr_dt'])
                 attr_zscore.append(row['Attr_ZScore'])
                 attr_spatial.append(row['Attr_Spatial'])
+            if 'Explainer_Sensitivity' in pixel_res.dtype.names and 'Explainer_Complexity' in pixel_res.dtype.names:
+                explainer_sens.append(row['Explainer_Sensitivity'])
+                explainer_comp.append(row['Explainer_Complexity'])
                 
             for k in range(1, num_preds + 1):
                 preds[k].append(row[f'Pred_{k}'])
@@ -151,6 +175,9 @@ def plot_pixel_sits(pixel_y, pixel_x, source_h5_path, inference_results_h5, ax=N
         pred_dates = np.array(pred_dates)[srt]
         anomaly_flags = np.array(anomaly_flags)[srt]
         confirmed_flags = np.array(confirmed_flags)[srt]
+        if len(explainer_sens) > 0:
+            explainer_sens = np.array(explainer_sens)[srt]
+            explainer_comp = np.array(explainer_comp)[srt]
         
         for k in range(1, num_preds + 1):
             preds[k] = np.array(preds[k])[srt]
@@ -205,7 +232,13 @@ def plot_pixel_sits(pixel_y, pixel_x, source_h5_path, inference_results_h5, ax=N
                 p_z = a_zscore / tot * 100
                 p_s = a_spat / tot * 100
                 
-                ax2 = ax.twinx()
+                if hasattr(ax, '_twin_attr'):
+                    ax2 = ax._twin_attr
+                    ax2.clear()
+                else:
+                    ax2 = ax.twinx()
+                    ax._twin_attr = ax2
+                    
                 ax2.set_ylim(0, 400) # Max 100%, squishes bars to bottom 25% of chart
                 ax2.set_ylabel('Attribution %', color='purple')
                 ax2.tick_params(axis='y', labelcolor='purple')
@@ -218,6 +251,41 @@ def plot_pixel_sits(pixel_y, pixel_x, source_h5_path, inference_results_h5, ax=N
                 ax2.bar(anom_dates, p_z, w, bottom=p_doy+p_tod+p_dt, label='Z-Score', color='tab:red', alpha=0.6)
                 ax2.bar(anom_dates, p_s, w, bottom=p_doy+p_tod+p_dt+p_z, label='Spatial', color='tab:purple', alpha=0.6)
                 ax2.legend(loc='lower left', fontsize='small')
+
+        # Explainer Robustness Linked Time Series (Bottom Panel)
+        if ax_rob is not None and len(explainer_sens) > 0:
+            valid_mask = ~np.isnan(explainer_sens) & ~np.isnan(explainer_comp)
+            if np.any(valid_mask):
+                v_dates = pred_dates[valid_mask]
+                v_sens = explainer_sens[valid_mask]
+                v_comp = explainer_comp[valid_mask]
+                
+                v_srt = np.argsort(v_dates)
+                v_dates = v_dates[v_srt]
+                v_sens = v_sens[v_srt]
+                v_comp = v_comp[v_srt]
+                
+                ax_rob.plot(v_dates, v_sens, color='tab:red', marker='o', markersize=4, linestyle='-', linewidth=1.5, label='Sensitivity')
+                if hasattr(ax_rob, '_twin_comp'):
+                    ax_rob_twin = ax_rob._twin_comp
+                    ax_rob_twin.clear()
+                else:
+                    ax_rob_twin = ax_rob.twinx()
+                    ax_rob._twin_comp = ax_rob_twin
+                    
+                ax_rob_twin.plot(v_dates, v_comp, color='tab:brown', marker='s', markersize=4, linestyle='--', linewidth=1.5, label='Complexity')
+                
+                ax_rob.set_ylabel('Sensitivity', color='tab:red', fontsize=9)
+                ax_rob.tick_params(axis='y', labelcolor='tab:red', labelsize=8)
+                ax_rob_twin.set_ylabel('Complexity', color='tab:brown', fontsize=9)
+                ax_rob_twin.tick_params(axis='y', labelcolor='tab:brown', labelsize=8)
+                
+                lines1, labels1 = ax_rob.get_legend_handles_labels()
+                lines2, labels2 = ax_rob_twin.get_legend_handles_labels()
+                ax_rob.legend(lines1 + lines2, labels1 + labels2, loc='upper left', fontsize='x-small')
+            ax_rob.set_title("XAI Explanation Robustness (Sensitivity & Complexity)", fontsize=9)
+            ax_rob.grid(True, linestyle=':', alpha=0.6)
+            plt.setp(ax.get_xticklabels(), visible=False)
         
         # Missing/Insufficient Baseline
         missing_dates = pred_dates[anomaly_flags == 255]
@@ -229,13 +297,22 @@ def plot_pixel_sits(pixel_y, pixel_x, source_h5_path, inference_results_h5, ax=N
     if current_date is not None:
         ax.axvline(x=current_date, color='orange', linestyle='--', label='Displayed Frame')
 
+    if ax_rob is not None:
+        ax_rob.axvline(x=split_date, color='grey', linestyle='--')
+        if current_date is not None:
+            ax_rob.axvline(x=current_date, color='orange', linestyle='--')
+        ax_rob.set_xlabel('Date')
+        import matplotlib.dates as mdates
+        ax_rob.xaxis.set_major_locator(mdates.YearLocator())
+    else:
+        ax.set_xlabel('Date')
+        import matplotlib.dates as mdates
+        ax.xaxis.set_major_locator(mdates.YearLocator())
+
     if lat is not None and lon is not None:
         ax.set_title(f"Pixel Location: ({pixel_x}, {pixel_y}) | Lat: {lat:.5f}, Lon: {lon:.5f}")
     else:
         ax.set_title(f"Pixel Location: ({pixel_x}, {pixel_y})")
-    ax.set_xlabel('Date')
-    import matplotlib.dates as mdates
-    ax.xaxis.set_major_locator(mdates.YearLocator())
     ax.set_ylabel('Spectral Complexity (Z-Score)')
     ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left', borderaxespad=0.)
     ax.grid(True)
@@ -277,6 +354,7 @@ def plot_spatial_anomaly_overlay(source_h5_path, inference_results_h5):
         
     # Load inference results
     with h5py.File(inference_results_h5, 'r') as f:
+        validate_inference_results_schema(f, inference_results_h5)
         res = f['inference_results'][:]
         
     H, W = full_valid_mask.shape[1], full_valid_mask.shape[2]
@@ -297,7 +375,12 @@ def plot_spatial_anomaly_overlay(source_h5_path, inference_results_h5):
                 anomaly_map[y, x] = row['Timestamp_T_Last']
                 
     import matplotlib.patches as patches
-    fig, (ax_img, ax_ts) = plt.subplots(1, 2, figsize=(18, 8))
+    from matplotlib.gridspec import GridSpec
+    fig = plt.figure(figsize=(18, 9))
+    gs = GridSpec(2, 2, width_ratios=[1, 1.3], height_ratios=[2.5, 1], hspace=0.15)
+    ax_img = fig.add_subplot(gs[:, 0])
+    ax_ts = fig.add_subplot(gs[0, 1])
+    ax_rob = fig.add_subplot(gs[1, 1], sharex=ax_ts)
     ax_img.imshow(base_frame)
     ax_img.set_title(f"{base_sg} Acquisition: {base_date.strftime('%Y-%m-%d %H:%M:%S')} UTC")
     
@@ -395,8 +478,9 @@ def plot_spatial_anomaly_overlay(source_h5_path, inference_results_h5):
         current_date = datetime.fromtimestamp(current_date_ts, timezone.utc)
         ax_img.set_title(f"{current_sg} Acquisition: {current_date.strftime('%Y-%m-%d %H:%M:%S')} UTC")
         ax_ts.clear()
-        plot_pixel_sits(y, x, source_h5_path, inference_results_h5, ax=ax_ts, current_date=current_date)
-        ax_ts.set_ylim([-5, 5])
+        ax_rob.clear()
+        plot_pixel_sits(y, x, source_h5_path, inference_results_h5, ax=ax_ts, ax_rob=ax_rob, current_date=current_date)
+        ax_ts.set_ylim([-7, 7])
         fig.canvas.draw()
 
     fig.canvas.mpl_connect('button_press_event', onclick)

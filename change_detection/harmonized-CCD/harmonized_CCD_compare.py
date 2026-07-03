@@ -3,9 +3,7 @@ import h5py
 import numpy as np
 import itertools
 import csv
-from harmonized_CCD_main import main as run_pipeline
-
-LOCATION = "Hurlingham"
+from harmonized_CCD_main import main as run_pipeline, LOCATION
 
 def main():
     base_periods = [1.0, 0.5, 0.33, 0.25, 0.1]#0.75, 0.66, 0.1]
@@ -21,36 +19,39 @@ def main():
     
     print("Starting Comparative Analysis Orchestrator...")
     
+    target_metrics = ['pixel_temporal_z_score', 'sliding_volume_z_score', 'temporal_z_score', 'ndvi_map']
+
     configs = []
-    for c in booleans:
-        for l in booleans:
-            for q in booleans:
-                for e in [True]:
-                    for periods in period_subsets:
-                        periods = list(periods)
-                        num_trend_terms = int(c) + int(l) + int(q)
-                        total_terms = num_trend_terms + len(periods) * 2
-                        if 6 <= total_terms <= 10:
-                            config_name = f"C{int(c)}L{int(l)}Q{int(q)}_P{len(periods)}_E{int(e)}"
-                            configs.append((c, l, q, e, periods, total_terms, config_name))
+    for tm in target_metrics:
+        for c in booleans:
+            for l in booleans:
+                for q in [False]:
+                    for e in [True]:
+                        for periods in period_subsets:
+                            periods = list(periods)
+                            num_trend_terms = int(c) + int(l) + int(q)
+                            total_terms = num_trend_terms + len(periods) * 2
+                            if 2 <= total_terms <= 10:
+                                config_name = f"{tm}_C{int(c)}L{int(l)}Q{int(q)}_P{len(periods)}_E{int(e)}"
+                                configs.append((tm, c, l, q, e, periods, total_terms, config_name))
                             
     print(f"Total configurations to evaluate: {len(configs)}")
     
     # Phase 1: Execution
     print("\n--- Phase 1: Pipeline Execution ---")
-    for c, l, q, e, periods, total_terms, config_name in configs:
+    for tm, c, l, q, e, periods, total_terms, config_name in configs:
         expected_h5 = f"C:/satelliteImagery/HLST30/CCD/{LOCATION}_CCD_Harmonized_Change_Detection_{config_name}.h5"
         if not os.path.exists(expected_h5):
             print(f"\nExecuting Configuration: {config_name} (Terms: {total_terms})")
-            print(f"Periods: {periods}")
+            print(f"Target Metric: {tm} | Periods: {periods}")
             run_pipeline(enable_const=c, enable_lin=l, enable_quad=q, 
-                         temporal_periods=periods, enable_elastic_window=e, launch_vis=False)
+                         temporal_periods=periods, enable_elastic_window=e, target_metric=tm, launch_vis=False)
         else:
             print(f"File {expected_h5} already exists. Skipping pipeline execution.")
 
     # Phase 2: Metric Extraction
     print("\n--- Phase 2: Metric Extraction ---")
-    for c, l, q, e, periods, total_terms, config_name in configs:
+    for tm, c, l, q, e, periods, total_terms, config_name in configs:
         output_h5 = f"C:/satelliteImagery/HLST30/CCD/{LOCATION}_CCD_Harmonized_Change_Detection_{config_name}.h5"
         if os.path.exists(output_h5):
             print(f"Extracting metrics for {config_name}...")
@@ -81,6 +82,7 @@ def main():
                     
                     row_data = {
                         'Config': config_name,
+                        'Target_Metric': tm,
                         'Constant': c,
                         'Linear': l,
                         'Quadratic': q,
@@ -129,16 +131,15 @@ def main():
         
         # Print summary table
         print(f"\n=== Top 15 Configurations by Lowest Global Median Bound ===")
-        print(f"{'Config':<20} | {'Terms':<6} | {'Glob Med':<10} | {'Glob Mean':<10} | {'Anom Pct':<10} | {'P(78,28) Med':<12}")
-        print("-" * 81)
+        print(f"{'Config':<35} | {'Metric':<22} | {'Terms':<6} | {'Glob Med':<10} | {'Anom Pct':<10} | {'P(78,28) Med':<12}")
+        print("-" * 110)
         # Sort by global median bound ascending
         results.sort(key=lambda x: x['Global_Median_Bound'] if not np.isnan(x['Global_Median_Bound']) else float('inf'))
         for r in results[:15]:
             gm = r.get('Global_Median_Bound', np.nan)
-            gmean = r.get('Global_Mean_Bound', np.nan)
             apct = r.get('Spatial_Anomaly_Pct', np.nan)
             p78 = r.get('Px_78_28_Median', np.nan)
-            print(f"{r['Config']:<20} | {r['Total_Terms']:<6} | {gm:<10.5f} | {gmean:<10.5f} | {apct:<10.2f} | {p78:<12.5f}")
+            print(f"{r['Config']:<35} | {r['Target_Metric']:<22} | {r['Total_Terms']:<6} | {gm:<10.5f} | {apct:<10.2f} | {p78:<12.5f}")
             
         if len(results) > 15:
             print(f"... and {len(results) - 15} more.")

@@ -8,19 +8,19 @@ os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
 # IDE CONFIGURATION
 # ==========================================
 LOCATION = "Tait"
-TRAIN_END_YEAR = "2025"
+TRAIN_END_YEAR = "2023"
 H5_PATH = f"C:/satelliteImagery/HLST30/HLST_{LOCATION}_Harmonized_SC_EM-7_Norm-bandCount.h5"
 OUTPUT_DIR = f"C:/satelliteImagery/HLST30/1D-CNN-{LOCATION}-TrainEnd{TRAIN_END_YEAR}"
 TRAIN_END_DATE = f"{TRAIN_END_YEAR}-01-01"
 SKIP_TRAIN = False
-MC_SAMPLES = 4
+MC_SAMPLES = 5
 CONFIDENCE_MULTIPLIER = 3.0
 
 CONSECUTIVE_ANOMALIES = 4
 TIME_WINDOW_YEARS = 3.0
 ENABLE_ELASTIC_WINDOW = False  # Allows window to expand backwards to meet MIN_SAMPLES
 MAX_ELASTIC_WINDOW_YEARS = TIME_WINDOW_YEARS + 2.0  # Maximum span to expand backwards
-MIN_SAMPLES = 38
+MIN_SAMPLES = 20
 
 def main():
     if not os.path.exists(OUTPUT_DIR):

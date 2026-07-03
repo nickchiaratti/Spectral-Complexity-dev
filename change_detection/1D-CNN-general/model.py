@@ -8,15 +8,15 @@ class MultiScaleSITSNet(nn.Module):
         self.target_features_dim = target_features_dim
         
         # Inception Block
-        self.branch1 = nn.Conv1d(in_channels=in_channels, out_channels=32, kernel_size=3, padding='same')
-        self.branch2 = nn.Conv1d(in_channels=in_channels, out_channels=32, kernel_size=5, padding='same')
-        self.branch3 = nn.Conv1d(in_channels=in_channels, out_channels=32, kernel_size=7, padding='same')
+        self.branch1 = nn.Conv1d(in_channels=in_channels, out_channels=32, kernel_size=5, padding='same')
+        self.branch2 = nn.Conv1d(in_channels=in_channels, out_channels=32, kernel_size=7, padding='same')
+        self.branch3 = nn.Conv1d(in_channels=in_channels, out_channels=32, kernel_size=9, padding='same')
         
         self.relu = nn.ReLU()
         self.maxpool1 = nn.MaxPool1d(kernel_size=2)
         
         # Secondary Extractor
-        self.conv_sec = nn.Conv1d(in_channels=96, out_channels=64, kernel_size=3, padding='same')
+        self.conv_sec = nn.Conv1d(in_channels=96, out_channels=64, kernel_size=7, padding='same')
         self.maxpool2 = nn.MaxPool1d(kernel_size=2)
         
         self.dropout1d = nn.Dropout1d(0.2)

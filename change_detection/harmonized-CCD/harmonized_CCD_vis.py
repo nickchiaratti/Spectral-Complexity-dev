@@ -8,14 +8,13 @@ import matplotlib.patches as patches
 import scienceplots
 plt.style.use(['science','no-latex'])
 
-LOCATION = "Malibu"
-H5_PATH = f"C:/satelliteImagery/HLST30/HLST_{LOCATION}_Harmonized_SC_EM-7_Norm-bandCount.h5"
-CONFIG = 'C0L1Q1_P4_E1'
+from harmonized_CCD_main import LOCATION, H5_PATH
+CONFIG = 'C1L1Q0_P2_E0'
 
 import glob
 
 def get_inference_h5(location, config):
-    search_pattern = f"C:/satelliteImagery/HLST30/CCD/{location}_CCD_Harmonized_Change_Detection_{config}.h5"
+    search_pattern = f"C:/satelliteImagery/HLST30/CCD/{location}_CCD_Harmonized_Change_Detection_*{config}.h5"
     files = glob.glob(search_pattern)
     if not files:
         return None
@@ -25,19 +24,22 @@ def get_inference_h5(location, config):
 
 def plot_pixel_sits(pixel_y, pixel_x, source_h5_path, inference_results_h5, ax=None, current_date=None):
     lat, lon = None, None
+    with h5py.File(inference_results_h5, 'r') as f:
+        target_metric = f.attrs.get('TARGET_METRIC', 'sliding_volume_z_score')
+
     with h5py.File(source_h5_path, 'r') as f:
         harm_grp = f['/HDFEOS/GRIDS/HARMONIZED/Data Fields']
-        acq_time = harm_grp['sliding_volume_z_score'].attrs['acquisition_time'][:]
-        z_score = harm_grp['sliding_volume_z_score'][:, pixel_y, pixel_x]
+        acq_time = harm_grp[target_metric].attrs['acquisition_time'][:]
+        z_score = harm_grp[target_metric][:, pixel_y, pixel_x]
         
         unified_masks = harm_grp['common_mask'][:, pixel_y, pixel_x]
         is_invalid = unified_masks.astype(bool)
         
-        spacecraft_bytes = harm_grp['sliding_volume_z_score'].attrs['source_spacecraft'][:]
+        spacecraft_bytes = harm_grp[target_metric].attrs['source_spacecraft'][:]
         spacecrafts = [s.decode('utf-8') if isinstance(s, bytes) else str(s) for s in spacecraft_bytes]
         
-        geo_transform = harm_grp['sliding_volume_z_score'].attrs.get('GeoTransform')
-        spatial_ref = harm_grp['sliding_volume_z_score'].attrs.get('spatial_ref')
+        geo_transform = harm_grp[target_metric].attrs.get('GeoTransform')
+        spatial_ref = harm_grp[target_metric].attrs.get('spatial_ref')
         if geo_transform is not None and spatial_ref is not None:
             try:
                 gt = geo_transform
@@ -108,9 +110,9 @@ def plot_pixel_sits(pixel_y, pixel_x, source_h5_path, inference_results_h5, ax=N
         ax.axvline(x=current_date, color='orange', linestyle='--', label='Displayed Frame')
 
     if lat is not None and lon is not None:
-        ax.set_title(f"Pixel Location: ({pixel_x}, {pixel_y}) | Lat: {lat:.5f}, Lon: {lon:.5f}")
+        ax.set_title(f"{target_metric} | Pixel Location: ({pixel_x}, {pixel_y}) | Lat: {lat:.5f}, Lon: {lon:.5f}")
     else:
-        ax.set_title(f"Pixel Location: ({pixel_x}, {pixel_y})")
+        ax.set_title(f"{target_metric} | Pixel Location: ({pixel_x}, {pixel_y})")
     ax.set_xlabel('Date')
     import matplotlib.dates as mdates
     ax.xaxis.set_major_locator(mdates.YearLocator())
@@ -121,16 +123,19 @@ def plot_pixel_sits(pixel_y, pixel_x, source_h5_path, inference_results_h5, ax=N
         plt.show()
 
 def plot_spatial_anomaly_overlay(source_h5_path, inference_results_h5):
+    with h5py.File(inference_results_h5, 'r') as f:
+        target_metric = f.attrs.get('TARGET_METRIC', 'sliding_volume_z_score')
+
     with h5py.File(source_h5_path, 'r') as f:
         harm_grp = f['/HDFEOS/GRIDS/HARMONIZED/Data Fields']
-        acq_time = harm_grp['sliding_volume_z_score'].attrs['acquisition_time'][:]
+        acq_time = harm_grp[target_metric].attrs['acquisition_time'][:]
         unified_masks = harm_grp['common_mask'][:]
         full_valid_mask = ~unified_masks.astype(bool)
         
     def get_ortho(idx):
         with h5py.File(source_h5_path, 'r') as f:
             harm_grp = f['/HDFEOS/GRIDS/HARMONIZED/Data Fields']
-            spc = harm_grp['sliding_volume_z_score'].attrs['source_spacecraft'][idx]
+            spc = harm_grp[target_metric].attrs['source_spacecraft'][idx]
             spc = spc.decode('utf-8') if isinstance(spc, bytes) else str(spc)
             
             o = harm_grp['ortho_visual'][idx]
