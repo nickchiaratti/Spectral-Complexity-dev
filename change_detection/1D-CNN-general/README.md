@@ -5,7 +5,7 @@ This directory contains a generalized 1D Convolutional Neural Network (CNN) pipe
 ## Pipeline Overview (`.CNN_generalized_main.py`)
 
 The pipeline script defines the execution flow and configures hyper-parameters:
-1. **Configuration:** Sets the target location, training end date, and paths for input/output data. It defines specific SITS windowing parameters like `TIME_WINDOW_YEARS`, `MIN_SAMPLES`, and a `TEMPORAL_DECAY_RATE`.
+1. **Configuration:** Sets the target location, training end date, and paths for input/output data. It defines specific SITS windowing parameters like `TIME_WINDOW_YEARS` and `MIN_SAMPLES`.
 2. **Train and Evaluate:** Invokes `train_and_evaluate` to handle model training and testing. It applies Monte Carlo (MC) sampling to estimate uncertainty and generates an inference HDF5 file containing the anomaly detections.
 3. **Visualization:** If the inference results are generated successfully, it calls `plot_spatial_anomaly_overlay` to map the detected anomalies.
 
@@ -41,11 +41,10 @@ Here is the detailed layer-by-layer breakdown:
 
 ## Encoded Dataset Values (`dataset.py`)
 
-The `SITSDataset` prepares a rich set of temporal and harmonic features for each valid observation in the sequence, making up the `in_channels` for the model. The encoded values include:
+The `SITSDataset` prepares a rich set of temporal and cyclical features for each valid observation in the sequence, making up the `in_channels` for the model. The encoded values include:
 
 *   **Pixel Value**: The actual standardized observation (`pixel_z`).
 *   **Cyclical Time-of-Day (TOD)**: `sin` and `cos` encoded continuous hour of acquisition (`pixel_tod_sin`, `pixel_tod_cos`).
 *   **Cyclical Day-of-Year (DOY)**: `sin` and `cos` encoded day of the year (`pixel_doy_sin`, `pixel_doy_cos`).
-*   **Elapsed Time**: Normalized time difference in years between the historical observation and the target forecast date (`dt_years_norm`).
-*   **Multi-Scale Harmonic Features**: Dynamic sine and cosine pairs representing elapsed time wrapped over different predefined temporal periods (1.0, 0.5, 0.33, and 0.25 years). This yields 8 distinct harmonic features.
-*   **Temporal Decay Masking**: Instead of a strict binary padding mask, the sequence mask incorporates a temporal decay weight (`1.0 - exp(-temporal_decay_rate * delta_t)`). This allows the model to naturally down-weight older observations in the temporal aggregation steps.
+*   **Fourier-Encoded Elapsed Time Delta**: The elapsed time in years between the historical observation and the target forecast date (`dt_years`) is Fourier-encoded into orthogonal sine and cosine components (`dt_years_sin`, `dt_years_cos`). This avoids injecting rigid multi-year periodicity assumptions.
+*   **Sequence Masking**: A standard binary padding mask (0 for padding, 1 for valid historical frames).

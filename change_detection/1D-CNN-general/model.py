@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 
 class MultiScaleSITSNet(nn.Module):
-    def __init__(self, in_channels=15, out_features=3, target_features_dim=56):
+    def __init__(self, in_channels=15, out_features=1, target_features_dim=56):
         super(MultiScaleSITSNet, self).__init__()
         self.target_features_dim = target_features_dim
         

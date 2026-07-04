@@ -15,13 +15,13 @@ def enable_mc_dropout(m):
     if type(m) == nn.Dropout:
         m.train()
 
-def train_and_evaluate(h5_path, output_h5='inference_results.h5', weights_path='sits_baseline_weights_pre2024.pth', train_end_date="2024-01-01", skip_training=False, mc_samples=50, confidence_multiplier=3.0, consecutive_anomalies=3, time_window_years=3.0, enable_elastic_window=True, max_elastic_window_years=5.0, min_samples=25, temporal_decay_rate=0.05):
+def train_and_evaluate(h5_path, output_h5='inference_results.h5', weights_path='sits_baseline_weights_pre2024.pth', train_end_date="2024-01-01", skip_training=False, mc_samples=50, confidence_multiplier=3.0, consecutive_anomalies=3, time_window_years=3.0, enable_elastic_window=True, max_elastic_window_years=5.0, min_samples=25):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print("Loading Calibration Dataset...")
     cal_dataset = SITSDataset(h5_path, mode='calibration', train_end_date=train_end_date,
                               consecutive_anomalies=consecutive_anomalies, time_window_years=time_window_years,
                               enable_elastic_window=enable_elastic_window, max_elastic_window_years=max_elastic_window_years,
-                              min_samples=min_samples, temporal_decay_rate=temporal_decay_rate)
+                              min_samples=min_samples)
     
     if len(cal_dataset) == 0:
         print("No valid calibration data found.")
@@ -29,7 +29,7 @@ def train_and_evaluate(h5_path, output_h5='inference_results.h5', weights_path='
         
     cal_loader = DataLoader(cal_dataset, batch_size=4096, shuffle=True, num_workers=16, pin_memory=True)
     
-    in_channels = len(cal_dataset.temporal_periods) * 2 + 6
+    in_channels = cal_dataset[0]['X_seq'].shape[-1]
     target_features_dim = cal_dataset[0]['X_targets'].shape[-1]
     model = MultiScaleSITSNet(in_channels=in_channels, out_features=1, target_features_dim=target_features_dim).to(device)
     
@@ -37,8 +37,20 @@ def train_and_evaluate(h5_path, output_h5='inference_results.h5', weights_path='
         print(f"Skipping training. Loading existing weights from {weights_path}...")
         model.load_state_dict(torch.load(weights_path, map_location=device, weights_only=True))
     else:
-        optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
-        criterion = nn.HuberLoss(delta=1.0)
+        decay_params = []
+        no_decay_params = []
+        for name, param in model.named_parameters():
+            if not param.requires_grad:
+                continue
+            if param.ndim <= 1 or 'linear' in name:
+                no_decay_params.append(param)
+            else:
+                decay_params.append(param)
+        optimizer = torch.optim.AdamW([
+            {'params': decay_params, 'weight_decay': 1e-2},
+            {'params': no_decay_params, 'weight_decay': 0.0}
+        ], lr=1e-3)
+        criterion = nn.HuberLoss(delta=3.0)
         
         print(f"Training on {len(cal_dataset)} sequences...")
         model.train()

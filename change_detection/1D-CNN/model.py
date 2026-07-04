@@ -2,22 +2,24 @@ import torch
 import torch.nn as nn
 
 class MultiScaleSITSNet(nn.Module):
-    def __init__(self, spatial_dim, in_channels, out_features, target_features_dim):
+    def __init__(self, spatial_dim=40, in_channels=7, out_features=1, target_features_dim=6):
         super(MultiScaleSITSNet, self).__init__()
         self.target_features_dim = target_features_dim
         self.in_channels = in_channels
         
         # Inception Block (Parallel Branches)
-        self.branch1 = nn.Conv1d(in_channels=self.in_channels, out_channels=16, kernel_size=5, padding='same')
-        self.branch2 = nn.Conv1d(in_channels=self.in_channels, out_channels=16, kernel_size=7, padding='same')
-        self.branch3 = nn.Conv1d(in_channels=self.in_channels, out_channels=16, kernel_size=9, padding='same')
+        self.branch1 = nn.Conv1d(in_channels=self.in_channels, out_channels=32, kernel_size=5, padding='same')
+        self.branch2 = nn.Conv1d(in_channels=self.in_channels, out_channels=32, kernel_size=7, padding='same')
+        self.branch3 = nn.Conv1d(in_channels=self.in_channels, out_channels=32, kernel_size=9, padding='same')
         
         self.relu = nn.ReLU()
         self.maxpool1 = nn.MaxPool1d(kernel_size=2)
         
-        # Secondary Extractor. Input channels = 16 * 3 = 48
-        self.conv_sec = nn.Conv1d(in_channels=48, out_channels=64, kernel_size=7, padding='same')
+        # Secondary Extractor. Input channels = 32 * 3 = 96
+        self.conv_sec = nn.Conv1d(in_channels=96, out_channels=64, kernel_size=7, padding='same')
         self.maxpool2 = nn.MaxPool1d(kernel_size=2)
+        
+        self.dropout1d = nn.Dropout1d(0.2)
         
         # Regression Head
         # Sequence length is now dynamic, so we use Global Average Pooling
@@ -42,12 +44,13 @@ class MultiScaleSITSNet(nn.Module):
         out3 = self.branch3(x)
         
         # Concatenate along channel dimension (dim=1)
-        x = torch.cat([out1, out2, out3], dim=1) # (Batch, 48, SeqLen)
+        x = torch.cat([out1, out2, out3], dim=1) # (Batch, 96, SeqLen)
         x = self.relu(x)
         x = x * m # Apply mask before pooling
         
         x = self.maxpool1(x) 
         m = self.maxpool1(m) # Shrink the mask identically
+        x = self.dropout1d(x)
         
         # Secondary Extractor
         x = self.conv_sec(x)
@@ -56,6 +59,7 @@ class MultiScaleSITSNet(nn.Module):
         
         x = self.maxpool2(x) 
         m = self.maxpool2(m)
+        x = self.dropout1d(x)
         
         # Global Average Pooling (masked)
         sum_x = torch.sum(x * m, dim=2)

@@ -35,8 +35,20 @@ def train_and_evaluate(h5_path, output_h5='inference_results.h5', weights_path='
         print(f"Skipping training. Loading existing weights from {weights_path}...")
         model.load_state_dict(torch.load(weights_path, map_location=device, weights_only=True))
     else:
-        optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
-        criterion = nn.HuberLoss(delta=1.0)
+        decay_params = []
+        no_decay_params = []
+        for name, param in model.named_parameters():
+            if not param.requires_grad:
+                continue
+            if param.ndim <= 1 or 'linear' in name:
+                no_decay_params.append(param)
+            else:
+                decay_params.append(param)
+        optimizer = torch.optim.AdamW([
+            {'params': decay_params, 'weight_decay': 1e-2},
+            {'params': no_decay_params, 'weight_decay': 0.0}
+        ], lr=1e-3)
+        criterion = nn.HuberLoss(delta=3.0)
         
         print(f"Training on {len(cal_dataset)} sequences...")
         model.train()

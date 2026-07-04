@@ -20,7 +20,7 @@ CONSECUTIVE_ANOMALIES = 4
 TIME_WINDOW_YEARS = 3.0
 ENABLE_ELASTIC_WINDOW = False  # Allows window to expand backwards to meet MIN_SAMPLES
 MAX_ELASTIC_WINDOW_YEARS = TIME_WINDOW_YEARS + 2.0  # Maximum span to expand backwards
-MIN_SAMPLES = 20
+MIN_SAMPLES = 30
 
 def main():
     if not os.path.exists(OUTPUT_DIR):

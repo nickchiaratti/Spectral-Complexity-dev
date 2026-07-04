@@ -31,20 +31,19 @@ Here is the detailed layer-by-layer breakdown:
 6. **Global Average Pooling (GAP)**:
    - A masked Global Average Pooling operation sums the remaining temporal features and divides by the sum of the mask, compressing the sequence into a flat `(Batch, 64)` vector.
 7. **Regression Head**:
-   - The pooled 64-dimensional feature vector is concatenated with the encoded spatial features (`spatial_dim=40`) and the target features (`target_features_dim=56`).
-   - `Linear(64 + 40 + 56 = 160, 128)`
+   - The pooled 64-dimensional feature vector is concatenated with the encoded spatial features (`spatial_dim=40`) and the target features (`target_features_dim=6`).
+   - `Linear(64 + 40 + 6 = 110, 128)`
    - `ReLU` activation
    - `Dropout(0.2)`
-   - `Linear(128, out_features)` (where `out_features=3`) to output the final predictions.
+   - `Linear(128, out_features)` (where `out_features=1`) to output the final predictions.
 
 ## Encoded Dataset Values (`dataset.py`)
 
-The `SITSDataset` prepares a rich set of temporal, spatial, and harmonic features for each valid observation in the sequence, making up the `in_channels` for the model. The encoded values include:
+The `SITSDataset` prepares a rich set of temporal, spatial, and cyclical features for each valid observation in the sequence, making up the `in_channels` for the model. The encoded values include:
 
 *   **Pixel Value**: The actual standardized observation (`pixel_z`).
 *   **Cyclical Time-of-Day (TOD)**: `sin` and `cos` encoded continuous hour of acquisition (`pixel_tod_sin`, `pixel_tod_cos`).
 *   **Cyclical Day-of-Year (DOY)**: `sin` and `cos` encoded day of the year (`pixel_doy_sin`, `pixel_doy_cos`).
-*   **Elapsed Time**: Time difference in years between the historical observation and the target forecast date (`dt_years`).
-*   **Multi-Scale Harmonic Features**: Dynamic sine and cosine pairs representing elapsed time wrapped over different predefined temporal periods (1.0, 0.5, 0.33, and 0.25 years). This yields 8 distinct harmonic features.
+*   **Fourier-Encoded Elapsed Time Delta**: The elapsed time in years between the historical observation and the target forecast date (`dt_years`) is Fourier-encoded into orthogonal sine and cosine components (`dt_years_sin`, `dt_years_cos`). This avoids injecting rigid multi-year periodicity assumptions while providing continuous phase metrics.
 *   **Spatial Features**: Multi-frequency Fourier features capturing the normalized spatial coordinates (X and Y).
 *   **Elastic Windowing**: An advanced sequence slicing logic that looks back up to `max_elastic_window_years` if the static `time_window_years` does not meet the minimum required sample count (`MIN_SAMPLES`).

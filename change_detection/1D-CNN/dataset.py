@@ -9,7 +9,7 @@ class SITSDataset(Dataset):
     def __init__(self, h5_path, mode='calibration', train_end_date="2024-01-01", 
                  consecutive_anomalies=3, time_window_years=3.0, 
                  enable_elastic_window=False, max_elastic_window_years=5.0, 
-                 min_samples=38):
+                 min_samples=38, max_allowed_seq_len=150):
         """
         mode: 'calibration' (pre-train_end_date) or 'monitoring' (post-train_end_date) or 'all' (for inference context)
         """
@@ -21,6 +21,8 @@ class SITSDataset(Dataset):
         self.enable_elastic_window = enable_elastic_window
         self.max_elastic_window_years = max_elastic_window_years
         self.min_samples = min_samples
+        self.max_allowed_seq_len = max_allowed_seq_len
+        self.max_seq_len = 0
         
         self.L_freqs = 10 # 20 features for X (10 sin, 10 cos), 20 for Y
         self.spatial_dim = self.L_freqs * 4
@@ -43,7 +45,7 @@ class SITSDataset(Dataset):
             harm_grp = f['/HDFEOS/GRIDS/HARMONIZED/Data Fields']
             
             z_score = harm_grp['sliding_volume_z_score'][:]
-            np.clip(z_score, -5.0, 5.0, out=z_score)
+            np.clip(z_score, -10.0, 10.0, out=z_score)
             self.num_frames, self.h, self.w = z_score.shape
             
             # Read and transpose arrays to (h, w, frames) for CPU cache-friendly contiguous memory
@@ -84,6 +86,7 @@ class SITSDataset(Dataset):
             max_samples = self.h * self.w * self.num_frames
             samples_buf = np.zeros((max_samples, 3), dtype=np.int32)
             sample_count = 0
+            observed_max_seq_len = 0
             
             # Identify valid windows
             for y in range(self.h):
@@ -120,6 +123,12 @@ class SITSDataset(Dataset):
                             if in_elastic_count < self.min_samples:
                                 continue
                                 
+                            history_len = self.min_samples
+                        else:
+                            history_len = in_window_count
+                            
+                        observed_max_seq_len = max(observed_max_seq_len, history_len)
+                                
                         samples_buf[sample_count, 0] = y
                         samples_buf[sample_count, 1] = x
                         samples_buf[sample_count, 2] = t_idx
@@ -127,6 +136,11 @@ class SITSDataset(Dataset):
                         
             print(f"[{self.mode}] Converting {sample_count} samples to Shared Memory...")
             self.samples = torch.from_numpy(samples_buf[:sample_count]).share_memory_()
+            
+            if observed_max_seq_len > self.max_allowed_seq_len:
+                raise RuntimeError(f"[{self.mode}] Observed maximum sequence length ({observed_max_seq_len}) exceeds configured maximum allowed length ({self.max_allowed_seq_len}).")
+            self.max_seq_len = observed_max_seq_len
+            print(f"[{self.mode}] Dynamically set MAX_SEQ_LEN to {self.max_seq_len} based on maximum observed valid history in time window.")
 
     def __len__(self):
         return len(self.samples)
@@ -145,7 +159,7 @@ class SITSDataset(Dataset):
         
         # History (Temporal Subset + Elastic Fallback)
         TIME_WINDOW_SEC = self.time_window_years * 365.25 * 86400.0
-        MAX_SEQ_LEN = 350
+        MAX_SEQ_LEN = self.max_seq_len
         
         past_idx = valid_idx[:t_idx]
         past_times = valid_acq_time[:t_idx]
@@ -180,14 +194,16 @@ class SITSDataset(Dataset):
         dt_years = delta_t / 365.25
         
         # Apply Fourier encoding methodology for dt_years instead of a linear range
-        dt_years_encoded = (torch.sin(2 * math.pi * dt_years) + torch.cos(2 * math.pi * dt_years)).to(torch.float32)
+        dt_years_sin = torch.sin(2 * math.pi * dt_years).to(torch.float32)
+        dt_years_cos = torch.cos(2 * math.pi * dt_years).to(torch.float32)
         
         feature_list = [
             pixel_doy_sin, 
             pixel_doy_cos, 
             pixel_tod_sin,
             pixel_tod_cos,
-            dt_years_encoded,
+            dt_years_sin,
+            dt_years_cos,
             pixel_z
         ]
         
@@ -216,7 +232,8 @@ class SITSDataset(Dataset):
         dt_target_years = delta_t_targets / 365.25
         
         # Apply Fourier encoding methodology for target dt_years instead of a linear range
-        dt_target_encoded = (torch.sin(2 * math.pi * dt_target_years) + torch.cos(2 * math.pi * dt_target_years)).to(torch.float32)
+        dt_target_sin = torch.sin(2 * math.pi * dt_target_years).to(torch.float32)
+        dt_target_cos = torch.cos(2 * math.pi * dt_target_years).to(torch.float32)
         
         target_doy_sin = self.doy_sin[target_idx]
         target_doy_cos = self.doy_cos[target_idx]
@@ -228,7 +245,8 @@ class SITSDataset(Dataset):
             target_doy_cos,
             target_tod_sin,
             target_tod_cos,
-            dt_target_encoded
+            dt_target_sin,
+            dt_target_cos
         ]
         
         X_targets = torch.stack(target_feature_list, dim=-1).flatten()
