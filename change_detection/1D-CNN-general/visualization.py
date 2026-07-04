@@ -8,7 +8,7 @@ import pyproj
 plt.style.use(['science','no-latex'])
 
 LOCATION = "Tait"
-TRAIN_END_YEAR = "2025"
+TRAIN_END_YEAR = "2023"
 OUTPUT_DIR = f"C:/satelliteImagery/HLST30/1D-CNN-general-{LOCATION}-TrainEnd{TRAIN_END_YEAR}"
 H5_PATH = f"C:/satelliteImagery/HLST30/HLST_{LOCATION}_Harmonized_SC_EM-7_Norm-bandCount.h5"
 INFERENCE_H5 = os.path.join(OUTPUT_DIR, f'CNN_{LOCATION}_baseline_weights_pre{TRAIN_END_YEAR}.h5')
@@ -21,7 +21,7 @@ def plot_pixel_sits(pixel_y, pixel_x, source_h5_path, inference_results_h5, ax=N
         harm_grp = f['/HDFEOS/GRIDS/HARMONIZED/Data Fields']
         acq_time = harm_grp['sliding_volume_z_score'].attrs['acquisition_time'][:]
         z_score = harm_grp['sliding_volume_z_score'][:, pixel_y, pixel_x]
-        z_score = np.clip(z_score, -5.0, 5.0)
+        #z_score = np.clip(z_score, -5.0, 5.0)
         
         unified_masks = harm_grp['common_mask'][:, pixel_y, pixel_x]
         is_invalid = unified_masks.astype(bool)
@@ -129,6 +129,7 @@ def plot_pixel_sits(pixel_y, pixel_x, source_h5_path, inference_results_h5, ax=N
         
         preds = {k: [] for k in range(1, num_preds + 1)}
         stds = {k: [] for k in range(1, num_preds + 1)}
+        actuals = []
         
         valid_idx = np.where(~is_invalid)[0]
         valid_acq_time = acq_time[valid_idx]
@@ -158,6 +159,7 @@ def plot_pixel_sits(pixel_y, pixel_x, source_h5_path, inference_results_h5, ax=N
             for k in range(1, num_preds + 1):
                 preds[k].append(row[f'Pred_{k}'])
                 stds[k].append(row[f'Std_{k}'])
+            actuals.append(row['Actual_1'])
                 
         srt = np.argsort(pred_dates)
         pred_dates = np.array(pred_dates)[srt]
@@ -170,6 +172,7 @@ def plot_pixel_sits(pixel_y, pixel_x, source_h5_path, inference_results_h5, ax=N
         for k in range(1, num_preds + 1):
             preds[k] = np.array(preds[k])[srt]
             stds[k] = np.array(stds[k])[srt]
+        actuals = np.array(actuals)[srt]
             
         tot_upper = preds[1] + conf_mult * stds[1]
         tot_lower = preds[1] - conf_mult * stds[1]
@@ -191,12 +194,12 @@ def plot_pixel_sits(pixel_y, pixel_x, source_h5_path, inference_results_h5, ax=N
         
         # Anomalies
         anom_dates = pred_dates[anomaly_flags == 1]
-        anom_vals = preds[1][anomaly_flags == 1]
+        anom_vals = actuals[anomaly_flags == 1]
         ax.scatter(anom_dates, anom_vals, color='red', s=30, zorder=4, label='Anomaly (Unconfirmed)')
         
         # Confirmed Anomalies
         conf_dates = pred_dates[confirmed_flags == 1]
-        conf_vals = preds[1][confirmed_flags == 1]
+        conf_vals = actuals[confirmed_flags == 1]
         if len(conf_dates) > 0:
             ax.scatter(conf_dates, conf_vals, color='darkred', marker='*', s=150, zorder=6, label='Confirmed Structural Change')
         
@@ -232,6 +235,7 @@ def plot_pixel_sits(pixel_y, pixel_x, source_h5_path, inference_results_h5, ax=N
                     
                 ax2.set_ylim(0, 400) # Max 100%, squishes bars to bottom 25% of chart
                 ax2.set_ylabel('Attribution %', color='purple')
+                ax2.yaxis.set_label_position("right")
                 ax2.tick_params(axis='y', labelcolor='purple')
                 ax2.set_yticks([0, 25, 50, 75, 100])
                 
@@ -272,6 +276,7 @@ def plot_pixel_sits(pixel_y, pixel_x, source_h5_path, inference_results_h5, ax=N
                 ax_rob.set_ylabel('Sensitivity', color='tab:red', fontsize=9)
                 ax_rob.tick_params(axis='y', labelcolor='tab:red', labelsize=8)
                 ax_rob_twin.set_ylabel('Complexity', color='tab:brown', fontsize=9)
+                ax_rob_twin.yaxis.set_label_position("right")
                 ax_rob_twin.tick_params(axis='y', labelcolor='tab:brown', labelsize=8)
                 
                 lines1, labels1 = ax_rob.get_legend_handles_labels()
@@ -388,10 +393,11 @@ def plot_spatial_anomaly_overlay(source_h5_path, inference_results_h5):
     
     # Overlay anomalies
     if not np.all(np.isnan(anomaly_map)):
-        from matplotlib.cm import viridis
+        from matplotlib.cm import hsv
+        import copy
         # mask anomaly map
         masked_anom = np.ma.masked_invalid(anomaly_map)
-        cmap = viridis
+        cmap = copy.copy(hsv)
         cmap.set_bad(color='white', alpha=0)
         im = ax_img.imshow(masked_anom, cmap=cmap, alpha=0.7)
         
