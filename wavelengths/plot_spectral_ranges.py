@@ -99,36 +99,8 @@ def plot_spectral_ranges():
             # Add label above the band
             ax_landsat.text(lower + width/2, 1.02, band, ha='center', va='bottom', fontsize=9, color=color, fontweight='bold')
 
-    # 2. Plot Real TIRS Bands from Attached Excel files (Bands 10-11)
-    if os.path.exists(tirs_b10_path):
-        try:
-            import warnings
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore", category=UserWarning)
-                df_b10 = pd.read_excel(tirs_b10_path, sheet_name='TIRS Band 10 BA RSR')
-                df_b11 = pd.read_excel(tirs_b11_path, sheet_name='TIRS Band 11 BA RSR')
-            
-            # Extract arrays
-            wl_10 = df_b10.iloc[:, 0].dropna().values
-            rsr_10 = df_b10.iloc[:, 1].dropna().values
-            wl_11 = df_b11.iloc[:, 0].dropna().values
-            rsr_11 = df_b11.iloc[:, 1].dropna().values
-            
-            # Plot the TIRS curves
-            ax_landsat.plot(wl_10, rsr_10, color=tirs_color, linewidth=2, label='TIRS (B10/B11)')
-            ax_landsat.fill_between(wl_10, rsr_10, color=tirs_color, alpha=0.5)
-            ax_landsat.text(np.mean(wl_10), max(rsr_10) + 0.02, 'B10', ha='center', va='bottom', fontsize=9, color=tirs_color, fontweight='bold')
-            
-            ax_landsat.plot(wl_11, rsr_11, color=tirs_color, linewidth=2)
-            ax_landsat.fill_between(wl_11, rsr_11, color=tirs_color, alpha=0.5)
-            ax_landsat.text(np.mean(wl_11), max(rsr_11) + 0.02, 'B11', ha='center', va='bottom', fontsize=9, color=tirs_color, fontweight='bold')
-        except Exception as e:
-            print(f"Error reading TIRS Excel file: {e}")
-    else:
-        print("TIRS Excel files not found. Please ensure they are in the same directory.")
-
     # Landsat Subplot Formatting
-    ax_landsat.set_title('Landsat 8/9 (OLI & TIRS)', fontsize=14)
+    ax_landsat.set_title('Landsat 8/9 (OLI)', fontsize=14)
     ax_landsat.set_xlabel('Wavelength (µm)', fontsize=12)
     ax_landsat.set_ylabel('Relative Spectral Response (RSR)', fontsize=12)
    # ax_landsat.set_xlim(0, 13)
@@ -140,8 +112,7 @@ def plot_spectral_ranges():
     import matplotlib.lines as mlines
     l1 = patches.Patch(color=oli_1_7_color, label='OLI Bands 1-7')
     l2 = patches.Patch(color=oli_other_color, label='OLI Bands 8-9')
-    l3 = patches.Patch(color=tirs_color, label='TIRS Bands 10-11')
-    ax_landsat.legend(handles=[l1, l2, l3], loc='upper right')
+    ax_landsat.legend(handles=[l1, l2], loc='upper right')
 
 
     # ==========================================
@@ -227,17 +198,25 @@ def plot_spectral_ranges():
             for col in band_cols:
                 rsr = df_s2a[col].values
                 if np.max(rsr) > 0.01: # Only plot bands with actual response
-                    ax_sentinel.plot(wl, rsr, color=sentinel_color, linewidth=1.5)
-                    ax_sentinel.fill_between(wl, rsr, color=sentinel_color, alpha=0.5)
+                    peak_idx = np.argmax(rsr)
+                    peak_wl = wl[peak_idx]
+                    
+                    if (1.35 <= peak_wl <= 1.45) or (1.80 <= peak_wl <= 1.95):
+                        color_to_use = '#7f7f7f'
+                    else:
+                        color_to_use = sentinel_color
+
+                    ax_sentinel.plot(wl, rsr, color=color_to_use, linewidth=1.5)
+                    ax_sentinel.fill_between(wl, rsr, color=color_to_use, alpha=0.5)
                     
                     # Add text label
-                    peak_idx = np.argmax(rsr)
                     band_name = col.split('_')[-1] # e.g. B1, B8A
-                    ax_sentinel.text(wl[peak_idx], rsr[peak_idx] + 0.02, band_name, ha='center', va='bottom', fontsize=9, color=sentinel_color, fontweight='bold')
+                    ax_sentinel.text(wl[peak_idx], rsr[peak_idx] + 0.02, band_name, ha='center', va='bottom', fontsize=9, color=color_to_use, fontweight='bold')
                     
             import matplotlib.lines as mlines
             l5 = mlines.Line2D([], [], color=sentinel_color, label='Sentinel-2A MSI')
-            ax_sentinel.legend(handles=[l5], loc='upper right')
+            l_water_s2 = mlines.Line2D([], [], color='#7f7f7f', label='Water Vapor Absorption')
+            ax_sentinel.legend(handles=[l5, l_water_s2], loc='upper right')
             
         except Exception as e:
             print(f"Error reading Sentinel-2A Excel file: {e}")
@@ -253,7 +232,7 @@ def plot_spectral_ranges():
     ax_sentinel.grid(True, linestyle='--', alpha=0.6)
 
     # Final Adjustments and Show/Save
-    plt.tight_layout(rect=[0, 0, 1, 0.95])
+    plt.tight_layout(rect=[0, 0, 1, 0.96], h_pad=2.0)
     plt.savefig(os.path.join(script_dir,'spectral_ranges_comparison.png'), dpi=300)
     plt.show()
 

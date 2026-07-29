@@ -21,6 +21,19 @@ import rasterio.transform
 from pyproj import Transformer, CRS
 import yaml
 
+# IEEE Publication Plot Formatting
+plt.rcParams.update({
+    'font.family': 'serif',
+    'font.serif': ['Times New Roman'],
+    'font.size': 14,
+    'axes.labelsize': 16,
+    'axes.titlesize': 18,
+    'xtick.labelsize': 14,
+    'ytick.labelsize': 14,
+    'legend.fontsize': 12,
+    'figure.titlesize': 20
+})
+
 # Load Configuration
 try:
     from pathlib import Path
@@ -35,7 +48,7 @@ except Exception:
     Location = "Tait"
 
 # --- Configuration ---
-complexity_type = 'sliding_volume_z_score' # or 'sliding_volume_map'
+complexity_type = 'sliding_volume_map' #'sliding_volume_z_score' # or 'sliding_volume_map'
 complexity_type_comparison = 'pixel_temporal_z_score'
 
 COMPLEXITY_DICT = {
@@ -482,8 +495,9 @@ class HarmonizedComplexityViewer:
         self.ax_spectral.grid(True, alpha=0.3)
 
         self.ax_vol_curve.clear()
-        self.ax_vol_curve.plot(np.arange(1, len(vols)+1), np.pad(vols[2:], (2,0), 'constant', constant_values=0), 'o-', markersize=4, color='green')
-        self.ax_vol_curve.set_title("Complexity Curve")
+        if len(vols) >= 3:
+            self.ax_vol_curve.plot(np.arange(3, len(vols)+1), vols[2:], 'o-', markersize=4, color='green')
+        self.ax_vol_curve.set_title("Gram Volume Curve")
         self.ax_vol_curve.set_xlabel("Endmember Count")
         self.ax_vol_curve.set_ylabel("Spectral Complexity")
         self.ax_vol_curve.grid(True, alpha=0.2)

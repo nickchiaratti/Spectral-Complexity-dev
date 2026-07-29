@@ -12,6 +12,18 @@ from scipy.ndimage import distance_transform_edt
 import pyproj
 from datetime import datetime, timezone
 
+# IEEE Publication Plot Formatting
+plt.rcParams.update({
+    'font.serif': ['Calibri'],
+    'font.size': 14,
+    'axes.labelsize': 14,
+    'axes.titlesize': 14,
+    'xtick.labelsize': 12,
+    'ytick.labelsize': 12,
+    'legend.fontsize': 9,
+    'figure.titlesize': 14
+})
+
 # Ensure parent directory is accessible for SpecComplexTorch import
 parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if parent_dir not in sys.path:
@@ -72,17 +84,21 @@ def get_collection_date(sc_ds, base_ds, global_idx, local_idx):
     return f"Date Unknown (#{global_idx})"
 
 
-def find_landsat_candidates(h5_file, base_file, separation_pixels=10, chip_size=10, top_n=10):
+def find_landsat_candidates(h5_file, base_file, target_date=None, separation_pixels=10, chip_size=10, top_n=15):
     """
-    Scans all frames in the harmonized HDF5 file for LANDSAT (HLSL30) imagery.
-    Identifies valid pixels in sliding_volume_map that maintain at least
-    `separation_pixels` distance from any masked pixel in common_mask.
+    Scans harmonized HDF5 file for LANDSAT (HLSL30) imagery matching target_date (or all frames if None).
+    To ensure true endmember diversity and avoid spatial autocorrelation (selecting adjacent pixels from the
+    same feature or building), enforces Spatial Non-Maximum Suppression (NMS): selected candidate chips must
+    maintain at least `chip_size` spatial distance from one another, and `separation_pixels` from masked areas.
     
     Returns:
         top_high_candidates, top_low_candidates (lists of tuples)
     """
     print("=" * 70)
-    print("STEP 1: SCANNING LANDSAT FRAMES FOR SLIDING VOLUME EXTREMES")
+    if target_date:
+        print(f"STEP 1: SCANNING LANDSAT FRAMES FOR TARGET DATE [{target_date}] WITH SPATIAL NMS")
+    else:
+        print("STEP 1: SCANNING LANDSAT FRAMES FOR SLIDING VOLUME EXTREMES WITH SPATIAL NMS")
     print("=" * 70)
     
     harm_grp = h5_file["/HDFEOS/GRIDS/HARMONIZED/Data Fields"]
@@ -98,15 +114,7 @@ def find_landsat_candidates(h5_file, base_file, separation_pixels=10, chip_size=
     total_frames, height, width = slide_ds.shape
     print(f"Total harmonized frames: {total_frames} | Spatial dimensions: {height}x{width} | Configured Chip Size: {chip_size}x{chip_size}")
     
-    all_candidates = []
-    
-    landsat_frames_processed = 0
-    total_candidates_found = 0
-    
-    # Enforce separation from masked pixels AND image edges
-    effective_sep = max(float(separation_pixels), float(chip_size // 2))
-    edge_margin = max(int(separation_pixels), chip_size // 2)
-    
+    matching_frames = []
     for idx in range(total_frames):
         grid_str = decode_str(source_grids[idx])
         
@@ -115,11 +123,28 @@ def find_landsat_candidates(h5_file, base_file, separation_pixels=10, chip_size=
             continue
             
         local_idx = int(source_indices[idx])
-        landsat_frames_processed += 1
-        
         base_sr_ds = base_file[f"/HDFEOS/GRIDS/{grid_str}/Data Fields/surface_reflectance"]
         date_str = get_collection_date(slide_ds, base_sr_ds, idx, local_idx)
         
+        if target_date is not None and target_date not in date_str:
+            continue
+            
+        matching_frames.append((idx, grid_str, local_idx, date_str, base_sr_ds))
+        
+    if not matching_frames:
+        raise RuntimeError(
+            f"CRITICAL ERROR: No Landsat frames found matching target date '{target_date}'. "
+            f"Please verify acquisition dates and collection names in the dataset."
+        )
+        
+    print(f"Found {len(matching_frames)} Landsat frame(s) matching target date '{target_date}'.")
+    
+    effective_sep = max(float(separation_pixels), float(chip_size // 2))
+    edge_margin = max(int(separation_pixels), chip_size // 2)
+    
+    all_valid_pixels = []
+    
+    for idx, grid_str, local_idx, date_str, base_sr_ds in matching_frames:
         slide_frame = slide_ds[idx, :, :]
         mask_frame = mask_ds[idx, :, :]
         
@@ -136,63 +161,64 @@ def find_landsat_candidates(h5_file, base_file, separation_pixels=10, chip_size=
         candidate_mask[:, -edge_margin:] = False
         
         num_valid_candidates = np.sum(candidate_mask)
+        print(f"  Frame #{idx} [{date_str}] ({grid_str}): {num_valid_candidates:6d} valid candidate pixels found.")
+        
         if num_valid_candidates == 0:
             continue
             
-        total_candidates_found += num_valid_candidates
+        ys, xs = np.where(candidate_mask)
+        vals = slide_frame[ys, xs]
         
-        # Extract candidate values and locations
-        candidate_ys, candidate_xs = np.where(candidate_mask)
-        candidate_vals = slide_frame[candidate_ys, candidate_xs]
-        
-        # Keep track of local frame max and min to add to our overall lists
-        max_idx = np.argmax(candidate_vals)
-        local_max_val = candidate_vals[max_idx]
-        y_max, x_max = int(candidate_ys[max_idx]), int(candidate_xs[max_idx])
-        lat_max, lon_max = get_lat_lon(slide_ds, base_sr_ds, y_max, x_max)
-        all_candidates.append(
-            (float(local_max_val), idx, y_max, x_max, grid_str, local_idx, lat_max, lon_max, date_str)
-        )
+        for y, x, val in zip(ys, xs, vals):
+            all_valid_pixels.append((float(val), idx, int(y), int(x), grid_str, local_idx, date_str, base_sr_ds))
             
-        min_idx = np.argmin(candidate_vals)
-        local_min_val = candidate_vals[min_idx]
-        y_min, x_min = int(candidate_ys[min_idx]), int(candidate_xs[min_idx])
-        lat_min, lon_min = get_lat_lon(slide_ds, base_sr_ds, y_min, x_min)
-        all_candidates.append(
-            (float(local_min_val), idx, y_min, x_min, grid_str, local_idx, lat_min, lon_min, date_str)
-        )
-            
-        print(f"  Date [{date_str}] ({grid_str:10s}): {num_valid_candidates:6d} candidates | "
-              f"Max: {local_max_val:.6e} | Min: {local_min_val:.6e}")
-
-    print(f"\nProcessed {landsat_frames_processed} Landsat frames. Total valid candidates evaluated: {total_candidates_found}")
-    
-    if not all_candidates:
+    if not all_valid_pixels:
         raise RuntimeError(
-            f"CRITICAL ERROR: No valid candidates found in Landsat imagery with >= {effective_sep} pixel separation "
-            f"from masked pixels and image boundaries. Check masking criteria or reduce separation/chip size."
+            f"CRITICAL ERROR: No valid candidates found in Landsat frame(s) for date '{target_date}' "
+            f"with >= {effective_sep} pixel separation from masked pixels and boundaries."
         )
         
-    # Sort by sliding volume value
-    all_candidates.sort(key=lambda x: x[0])
+    print(f"\nTotal pool of valid candidates across matching frame(s): {len(all_valid_pixels)}")
+    print(f"Applying Spatial Non-Maximum Suppression (NMS) with minimum separation distance = {chip_size} pixels...")
     
-    unique_candidates = []
-    seen = set()
-    for c in all_candidates:
-        if c not in seen:
-            unique_candidates.append(c)
-            seen.add(c)
-            
-    top_low = unique_candidates[:min(top_n, len(unique_candidates))]
-    top_high = unique_candidates[-min(top_n, len(unique_candidates)):][::-1] # Reverse so highest is first
-
-    print(f"\n[TOP {len(top_high)} HIGHEST SLIDING VOLUME CANDIDATES]")
+    # 1. Select Top High Candidates with Spatial NMS
+    all_valid_pixels.sort(key=lambda item: item[0], reverse=True)
+    top_high = []
+    for val, idx, y, x, grid_str, local_idx, date_str, base_sr_ds in all_valid_pixels:
+        # Check spatial separation against already selected high candidates
+        too_close = False
+        for _, s_idx, s_y, s_x, _, _, _, _, _ in top_high:
+            if idx == s_idx and max(abs(y - s_y), abs(x - s_x)) < chip_size:
+                too_close = True
+                break
+        if not too_close:
+            lat, lon = get_lat_lon(slide_ds, base_sr_ds, y, x)
+            top_high.append((val, idx, y, x, grid_str, local_idx, lat, lon, date_str))
+            if len(top_high) == top_n:
+                break
+                
+    # 2. Select Top Low Candidates with Spatial NMS (must not overlap with each other OR with selected high candidates)
+    all_valid_pixels.sort(key=lambda item: item[0], reverse=False)
+    top_low = []
+    for val, idx, y, x, grid_str, local_idx, date_str, base_sr_ds in all_valid_pixels:
+        too_close = False
+        for _, s_idx, s_y, s_x, _, _, _, _, _ in top_low + top_high:
+            if idx == s_idx and max(abs(y - s_y), abs(x - s_x)) < chip_size:
+                too_close = True
+                break
+        if not too_close:
+            lat, lon = get_lat_lon(slide_ds, base_sr_ds, y, x)
+            top_low.append((val, idx, y, x, grid_str, local_idx, lat, lon, date_str))
+            if len(top_low) == top_n:
+                break
+                
+    print(f"\n[TOP {len(top_high)} HIGHEST SLIDING VOLUME CANDIDATES (SPATIALLY DISTINCT)]")
     for i, c in enumerate(top_high):
-        print(f"  {i+1}. Value: {c[0]:.6e} | Date: {c[8]} | Lat {c[6]:.6f}°, Lon {c[7]:.6f}°")
+        print(f"  {i+1}. Value: {c[0]:.6e} | Date: {c[8]} | Lat {c[6]:.6f}°, Lon {c[7]:.6f}° | Pos: ({c[2]}, {c[3]})")
 
-    print(f"\n[TOP {len(top_low)} LOWEST SLIDING VOLUME CANDIDATES]")
+    print(f"\n[TOP {len(top_low)} LOWEST SLIDING VOLUME CANDIDATES (SPATIALLY DISTINCT)]")
     for i, c in enumerate(top_low):
-        print(f"  {i+1}. Value: {c[0]:.6e} | Date: {c[8]} | Lat {c[6]:.6f}°, Lon {c[7]:.6f}°")
+        print(f"  {i+1}. Value: {c[0]:.6e} | Date: {c[8]} | Lat {c[6]:.6f}°, Lon {c[7]:.6f}° | Pos: ({c[2]}, {c[3]})")
         
     return top_high, top_low
 
@@ -277,7 +303,7 @@ def plot_candidate_summary(res, title_prefix, threed_bands, output_path, global_
     fig = plt.figure(figsize=(20, 5))
     
     colors = ['#d62728', '#1f77b4', '#2ca02c', '#ff7f0e', '#9467bd', '#8c564b', '#e377c2']
-    labels = ['EM 1 (Max Mag)', 'EM 2 (Min Mag)', 'EM 3', 'EM 4', 'EM 5', 'EM 6', 'EM 7']
+    labels = ['EM 1', 'EM 2', 'EM 3', 'EM 4', 'EM 5', 'EM 6', 'EM 7']
     
     chip_size = res["chip_size"]
     main_color = '#d62728' if 'High' in title_prefix else '#1f77b4'
@@ -310,8 +336,7 @@ def plot_candidate_summary(res, title_prefix, threed_bands, output_path, global_
         ax_chip.set_yticks(range(0, chip_size + 1, step))
     ax_chip.grid(True, color='white', alpha=0.3, linewidth=1)
     
-    ax_chip.set_title(f"{coord_str}\nDate: {date_str_safe}", 
-                      fontsize=11, fontweight='bold', pad=10)
+    ax_chip.set_title(f"{coord_str}\nDate: {date_str_safe}", pad=10)
     ax_chip.set_xlabel("Chip Columns (Pixels)")
     ax_chip.set_ylabel("Chip Rows (Pixels)")
     
@@ -331,14 +356,13 @@ def plot_candidate_summary(res, title_prefix, threed_bands, output_path, global_
     
     for i in range(res["endmembers"].shape[1]):
         em_curve = res["endmembers"][:, i][sort_idx]
-        ax_spec.plot(sorted_wl, em_curve, label=labels[i], color=colors[i % len(colors)], linewidth=2, marker='o', markersize=4)
+        ax_spec.plot(sorted_wl, em_curve, label=labels[i], color=colors[i % len(colors)], linewidth=2, linestyle='-', marker='o', markersize=4)
         
-    ax_spec.set_title(f"Extracted $3 \\times 3$ Endmember Signatures",#\nSpectral Complexity Value: {res['val']:.6e}", 
-                      fontsize=11, fontweight='bold', pad=10)
-    ax_spec.set_xlabel(x_label, fontsize=11)
-    ax_spec.set_ylabel("Surface Reflectance", fontsize=11)
+    ax_spec.set_title(f"Extracted $3 \\times 3$ Endmember Signatures")
+    ax_spec.set_xlabel(x_label)
+    ax_spec.set_ylabel("Surface Reflectance")
     ax_spec.grid(True, linestyle='--', alpha=0.5)
-    ax_spec.legend(loc='best', framealpha=0.9, fontsize=9)
+    ax_spec.legend(loc='upper left', framealpha=0.9)
     
     # =========================================================================
     # Subplot 3: 3D Convex Hull
@@ -378,13 +402,23 @@ def plot_candidate_summary(res, title_prefix, threed_bands, output_path, global_
         em_hull_pts.append(origin_pt + np.dot(c, basis_vectors))
     em_hull_pts = np.array(em_hull_pts)
     
-    try:
-        hull = ConvexHull(em_hull_pts)
-        hull_vol = hull.volume
-        for simplex in hull.simplices:
-            hull_faces.append(em_hull_pts[simplex])
-    except Exception as e:
-        print(f"Warning: Could not compute 3D Convex Hull (likely a 2D shape for N=3): {e}")
+    if len(basis_vectors) == 2:
+        # When K=2 basis vectors span from an origin in 3D space, the parallelotope is a 2D parallelogram.
+        # 3D Euclidean volume is mathematically 0.0. We construct the 4-vertex planar face directly.
+        v1, v2 = basis_vectors[0], basis_vectors[1]
+        p0 = origin_pt
+        p1 = origin_pt + v1
+        p2 = origin_pt + v1 + v2
+        p3 = origin_pt + v2
+        hull_faces = [[p0, p1, p2, p3]]
+    elif len(basis_vectors) >= 3:
+        try:
+            hull = ConvexHull(em_hull_pts)
+            hull_vol = hull.volume
+            for simplex in hull.simplices:
+                hull_faces.append(em_hull_pts[simplex])
+        except Exception as e:
+            print(f"Warning: Could not compute 3D Convex Hull (likely a 2D shape for N=3): {e}")
         
     if hull_faces:
         # Plot faces without triangulated edges
@@ -416,9 +450,9 @@ def plot_candidate_summary(res, title_prefix, threed_bands, output_path, global_
     
     for i in range(7):
         c = main_color if i < n else '#7f7f7f'
-        ax_3d.text(em_all[i, 0], em_all[i, 1], em_all[i, 2], f" EM{i+1}", color=c, fontweight='bold', fontsize=9)
+        ax_3d.text(em_all[i, 0], em_all[i, 1], em_all[i, 2], f" EM{i+1}", color=c)
         
-    ax_3d.set_title(f"Hypervolume 3D Slice ({n} Endmembers)")#,\n3D Hull Vol: {hull_vol:.6e}")
+    ax_3d.set_title(f"Hypervolume 3D Slice ({n} Endmembers)\n3 of 7 Bands Plotted")
     
     ax_3d.set_xlabel(fr"Band {threed_bands[0]+1} ({wl_um[0]:.3f} $\mu\mathrm{{m}}$)")
     ax_3d.set_ylabel(fr"Band {threed_bands[1]+1} ({wl_um[1]:.3f} $\mu\mathrm{{m}}$)")
@@ -429,7 +463,7 @@ def plot_candidate_summary(res, title_prefix, threed_bands, output_path, global_
         ax_3d.set_ylim(global_limits[1])
         ax_3d.set_zlim(global_limits[2])
     else:
-        loc_pts = np.vstack([em_3d, px_3d])
+        loc_pts = np.vstack([em_all, px_3d, em_hull_pts])
         l_min = loc_pts.min(axis=0)
         l_max = loc_pts.max(axis=0)
         l_span = l_max - l_min
@@ -439,7 +473,7 @@ def plot_candidate_summary(res, title_prefix, threed_bands, output_path, global_
         ax_3d.set_zlim(l_min[2] - l_pad[2], l_max[2] + l_pad[2])
     
     ax_3d.grid(True, linestyle='--', alpha=0.4)
-    ax_3d.legend(loc='best')
+    ax_3d.legend(loc='upper left')
     
     plt.tight_layout()
     fig.subplots_adjust(right=0.95, left=0.05)
@@ -494,13 +528,23 @@ def plot_encapsulation_series(res, title_prefix, threed_bands, output_path, glob
         
         hull_vol = 0.0
         hull_faces = []
-        try:
-            hull = ConvexHull(em_hull_pts)
-            hull_vol = hull.volume
-            for simplex in hull.simplices:
-                hull_faces.append(em_hull_pts[simplex])
-        except Exception as e:
-            print(f"Warning: Could not compute 3D Convex Hull for {n} endmembers: {e}")
+        if len(basis_vectors) == 2:
+            # For N=3 with an endmember origin, K=2 basis vectors define a 2D parallelogram in 3D space.
+            # 3D Euclidean volume is mathematically 0.0. We construct the 4-vertex planar face directly.
+            v1, v2 = basis_vectors[0], basis_vectors[1]
+            p0 = origin_pt
+            p1 = origin_pt + v1
+            p2 = origin_pt + v1 + v2
+            p3 = origin_pt + v2
+            hull_faces = [[p0, p1, p2, p3]]
+        elif len(basis_vectors) >= 3:
+            try:
+                hull = ConvexHull(em_hull_pts)
+                hull_vol = hull.volume
+                for simplex in hull.simplices:
+                    hull_faces.append(em_hull_pts[simplex])
+            except Exception as e:
+                print(f"Warning: Could not compute 3D Convex Hull for {n} endmembers: {e}")
             
         if hull_faces:
             # Plot faces without triangulated edges
@@ -535,12 +579,10 @@ def plot_encapsulation_series(res, title_prefix, threed_bands, output_path, glob
             
         for i in range(7):
             c = main_color if i < n else unused_color
-            ax.text(em_all[i, 0], em_all[i, 1], em_all[i, 2], f" EM{i+1}", color=c, fontweight='bold', fontsize=9)
+            ax.text(em_all[i, 0], em_all[i, 1], em_all[i, 2], f" EM{i+1}", color=c)
             
         ax.set_title(
-            f"{n} Endmember Encapsulation\n3D Hull Vol: {hull_vol:.6e}",
-            fontsize=11, fontweight='bold', pad=15
-        )
+            f"{n} Endmember Encapsulation\n3D Hull Vol: {hull_vol:.6e}")
         
         ax.set_xlabel(fr"Band {threed_bands[0]+1} ({wl_um[0]:.3f} $\mu\mathrm{{m}}$)")
         ax.set_ylabel(fr"Band {threed_bands[1]+1} ({wl_um[1]:.3f} $\mu\mathrm{{m}}$)")
@@ -562,13 +604,136 @@ def plot_encapsulation_series(res, title_prefix, threed_bands, output_path, glob
             
         ax.grid(True, linestyle='--', alpha=0.4)
         if n == 3:
-            ax.legend(loc='best', fontsize=8)
+            ax.legend(loc='upper left')
             
     plt.tight_layout()
-    fig.subplots_adjust(right=0.97, left=0.03)
+    fig.subplots_adjust(right=0.97, left=0.03, wspace=0.4)
     plt.savefig(output_path, dpi=400, bbox_inches='tight', pad_inches=0.3)
     plt.close(fig)
     print(f"  -> Saved Encapsulation Series: {os.path.abspath(output_path)}")
+
+
+def plot_lmm_convex_hull_series(res, title_prefix, threed_bands, output_path, global_limits=None):
+    """
+    Generates a 1-row by 5-column figure showing the true Linear Mixture Model (LMM) convex hull (simplex)
+    formed by 3, 4, 5, 6, and 7 endmembers under ANC (a_i >= 0) and ASC (sum(a_i) == 1) constraints.
+    Evaluates data encapsulation and volume similarity against the 3x3 sample pixels.
+    """
+    fig = plt.figure(figsize=(30, 6))
+    main_color = '#d62728' if 'High' in title_prefix else '#1f77b4'
+    unused_color = '#7f7f7f'
+    
+    wl = res["wavelengths"]
+    wl_um = wl[list(threed_bands)] / 1000.0 if np.max(wl) > 100 else wl[list(threed_bands)]
+    
+    em_all = res["endmembers"][list(threed_bands), :].T
+    px_3d = res["sr_3x3"][list(threed_bands), :, :].reshape(len(threed_bands), 9).T
+    
+    for n in range(3, 8):
+        ax = fig.add_subplot(1, 5, n - 2, projection='3d')
+        
+        em_lmm = em_all[:n, :]
+        em_unused = em_all[n:, :]
+        
+        hull_vol = 0.0
+        in_hull_count = 0
+        area = 0.0
+        
+        if n == 3:
+            # For N=3 in 3D space, 3 vertices define a 2D plane/triangle.
+            # 3D Euclidean volume is mathematically 0.0. We compute 2D triangle area.
+            v1 = em_lmm[1] - em_lmm[0]
+            v2 = em_lmm[2] - em_lmm[0]
+            area = 0.5 * np.linalg.norm(np.cross(v1, v2))
+            
+            # Plot the 2D triangle face in 3D space
+            poly = Poly3DCollection([em_lmm], alpha=0.2, facecolor=main_color, edgecolor='none')
+            ax.add_collection3d(poly)
+            
+            # Draw structural edges of the triangle
+            for i in range(3):
+                pt1 = em_lmm[i]
+                pt2 = em_lmm[(i + 1) % 3]
+                ax.plot([pt1[0], pt2[0]], [pt1[1], pt2[1]], [pt1[2], pt2[2]], color=main_color, lw=1.5, alpha=0.8)
+                
+            title_text = f"{n} Endmember LMM Simplex\n2D Area: {area:.4e}\n(3D Vol: 0.0000e+00)"
+        else:
+            # For N >= 4, compute 3D convex hull
+            hull_faces = []
+            try:
+                hull = ConvexHull(em_lmm)
+                hull_vol = hull.volume
+                for simplex in hull.simplices:
+                    hull_faces.append(em_lmm[simplex])
+                
+                # Check data encapsulation: how many sample pixels lie inside or on boundary of LMM convex hull
+                for pt in px_3d:
+                    # A point is inside/on boundary if normal @ pt + offset <= tol for all facets
+                    if np.all(hull.equations[:, :3] @ pt + hull.equations[:, 3] <= 1e-5):
+                        in_hull_count += 1
+                        
+                # Draw edges from simplices
+                edges = set()
+                for simplex in hull.simplices:
+                    for i in range(len(simplex)):
+                        u, v = simplex[i], simplex[(i + 1) % len(simplex)]
+                        edges.add(tuple(sorted((u, v))))
+                for u, v in edges:
+                    pt1, pt2 = em_lmm[u], em_lmm[v]
+                    ax.plot([pt1[0], pt2[0]], [pt1[1], pt2[1]], [pt1[2], pt2[2]], color=main_color, lw=1.5, alpha=0.8)
+                    
+            except Exception as e:
+                print(f"Warning: Could not compute 3D Convex Hull for {n} endmembers: {e}")
+                
+            if hull_faces:
+                poly = Poly3DCollection(hull_faces, alpha=0.2, facecolor=main_color, edgecolor='none')
+                ax.add_collection3d(poly)
+                
+            title_text = f"{n} Endmember LMM Simplex\n3D Hull Vol: {hull_vol:.4e}\n({in_hull_count}/9 Pixels Inside)"
+            
+        # Scatter Sample Pixels
+        ax.scatter(px_3d[:, 0], px_3d[:, 1], px_3d[:, 2], color='black', alpha=0.6, s=35, marker='o', label=r'$3 \times 3$ Sample Pixels')
+        
+        # Scatter Active Endmembers
+        ax.scatter(em_lmm[:, 0], em_lmm[:, 1], em_lmm[:, 2], color=main_color, s=140, marker='*', label='Active Endmembers')
+        
+        # Scatter Unused Endmembers
+        if len(em_unused) > 0:
+            ax.scatter(em_unused[:, 0], em_unused[:, 1], em_unused[:, 2], color=unused_color, alpha=0.6, s=40, marker='o', label='Unused Endmembers')
+            
+        for i in range(7):
+            c = main_color if i < n else unused_color
+            ax.text(em_all[i, 0], em_all[i, 1], em_all[i, 2], f" EM{i+1}", color=c)
+            
+        ax.set_title(title_text)
+        
+        ax.set_xlabel(fr"Band {threed_bands[0]+1} ({wl_um[0]:.3f} $\mu\mathrm{{m}}$)")
+        ax.set_ylabel(fr"Band {threed_bands[1]+1} ({wl_um[1]:.3f} $\mu\mathrm{{m}}$)")
+        ax.set_zlabel(fr"Band {threed_bands[2]+1} ({wl_um[2]:.3f} $\mu\mathrm{{m}}$)")
+        
+        if global_limits is not None:
+            ax.set_xlim(global_limits[0])
+            ax.set_ylim(global_limits[1])
+            ax.set_zlim(global_limits[2])
+        else:
+            loc_pts = np.vstack([em_all, px_3d])
+            l_min = loc_pts.min(axis=0)
+            l_max = loc_pts.max(axis=0)
+            l_span = l_max - l_min
+            l_pad = np.maximum(l_span * 0.1, 0.002)
+            ax.set_xlim(l_min[0] - l_pad[0], l_max[0] + l_pad[0])
+            ax.set_ylim(l_min[1] - l_pad[1], l_max[1] + l_pad[1])
+            ax.set_zlim(l_min[2] - l_pad[2], l_max[2] + l_pad[2])
+            
+        ax.grid(True, linestyle='--', alpha=0.4)
+        if n == 3:
+            ax.legend(loc='upper left')
+            
+    plt.tight_layout()
+    fig.subplots_adjust(right=0.97, left=0.03, wspace=0.4)
+    plt.savefig(output_path, dpi=400, bbox_inches='tight', pad_inches=0.3)
+    plt.close(fig)
+    print(f"  -> Saved LMM Convex Hull Series: {os.path.abspath(output_path)}")
 
 
 def main():
@@ -581,18 +746,22 @@ def main():
     CHIP_SIZE = 13           # Width and height (in pixels) of the visualization chip (e.g., 15x15)
     SEPARATION_PIXELS = 13   # Minimum distance from masked pixels (defaults to 7)
     THREED_BANDS = (3, 4, 5) # Spectral bands for 3D hypervolume vertices visualization
-    PARALLELOTOPE_ORIGIN = "ZERO" # Options: "ZERO" for (0,0,0) or "EM2" for Endmember 2
+    PARALLELOTOPE_ORIGIN = "EM2" # Options: "ZERO" for (0,0,0) or "EM2" for Endmember 2
     # Optional manual limits for the 3D plot axes, formatted as ((xmin, xmax), (ymin, ymax), (zmin, zmax))
     # If set to None, the script will automatically calculate the global min/max across all candidates.
+    # If set to 'fit', each plot calculates limits locally based on its own data without global normalization.
     #Example: MANUAL_3D_LIMITS = ((0.0, 0.4), (0.0, 0.5), (0.0, 0.6))
+    MANUAL_3D_LIMITS = 'fit'
     #MANUAL_3D_LIMITS = None
-    MANUAL_3D_LIMITS = ((-0.01, 1.4), (-0.01, 1.4), (-0.01, 1.2))
-    Location = 'Tait'
+    MANUAL_3D_LIMITS = ((-0.01, 0.4), (0.25, 0.55), (0.1, 0.7))
+    Location = 'Rochesterv2'
+    TARGET_DATE = "2025-09-12"
     
-    sc_h5_path = fr"C:\satelliteImagery\HLST30\HLST_{Location}_Harmonized_SC_EM-7_Norm-None.h5"
-    base_h5_path = fr"C:\satelliteImagery\HLST30\HLST_{Location}_Harmonized.h5"
     
-    output_dir = r"C:\satelliteImagery\HLST30\Convex Hull Visuals\Landsat"
+    sc_h5_path = f"C:/satelliteImagery/HLST30/HLST_{Location}_Harmonized_SC_EM-7_Norm-None.h5"
+    base_h5_path = f"C:/satelliteImagery/HLST30/HLST_{Location}_Harmonized.h5"
+    
+    output_dir = "C:/satelliteImagery/HLST30/Convex Hull Visuals/Landsat"
     os.makedirs(output_dir, exist_ok=True)
     
     if not os.path.exists(sc_h5_path):
@@ -605,7 +774,7 @@ def main():
     
     with h5py.File(sc_h5_path, 'r') as sc_file, h5py.File(base_h5_path, 'r') as base_file:
         top_high_cands, top_low_cands = find_landsat_candidates(
-            sc_file, base_file, separation_pixels=SEPARATION_PIXELS, chip_size=CHIP_SIZE, top_n=10
+            sc_file, base_file, target_date=TARGET_DATE, separation_pixels=SEPARATION_PIXELS, chip_size=CHIP_SIZE, top_n=20
         )
         
         print("\n" + "=" * 70)
@@ -630,8 +799,12 @@ def main():
         all_pts = np.array(all_pts)
         
         if MANUAL_3D_LIMITS is not None:
-            g_lims = MANUAL_3D_LIMITS
-            print(f"Using manual global 3D limits: {g_lims}")
+            if isinstance(MANUAL_3D_LIMITS, str) and MANUAL_3D_LIMITS.lower() == 'fit':
+                g_lims = None
+                print("Using dynamic per-visualization 3D limits ('fit' mode: no global normalization across candidates).")
+            else:
+                g_lims = MANUAL_3D_LIMITS
+                print(f"Using manual global 3D limits: {g_lims}")
         else:
             g_min = all_pts.min(axis=0)
             g_max = all_pts.max(axis=0)
@@ -656,6 +829,10 @@ def main():
             encap_path = os.path.join(output_dir, encap_name)
             plot_encapsulation_series(res, title_prefix, THREED_BANDS, encap_path, global_limits=g_lims, origin_method=PARALLELOTOPE_ORIGIN)
             
+            lmm_name = f"High_SC_Rank{rank}_Landsat_{date_str}_LMM_ConvexHull.png"
+            lmm_path = os.path.join(output_dir, lmm_name)
+            plot_lmm_convex_hull_series(res, title_prefix, THREED_BANDS, lmm_path, global_limits=g_lims)
+            
         print("\nProcessing Low Spectral Complexity Candidates...")
         for rank, res in enumerate(low_results, 1):
             title_prefix = f"Low Spectral Complexity (Rank {rank})"
@@ -667,6 +844,10 @@ def main():
             encap_name = f"Low_SC_Rank{rank}_Landsat_{date_str}_Encapsulation.png"
             encap_path = os.path.join(output_dir, encap_name)
             plot_encapsulation_series(res, title_prefix, THREED_BANDS, encap_path, global_limits=g_lims, origin_method=PARALLELOTOPE_ORIGIN)
+            
+            lmm_name = f"Low_SC_Rank{rank}_Landsat_{date_str}_LMM_ConvexHull.png"
+            lmm_path = os.path.join(output_dir, lmm_name)
+            plot_lmm_convex_hull_series(res, title_prefix, THREED_BANDS, lmm_path, global_limits=g_lims)
 
     print(f"\nAll visualizations generated successfully in {output_dir}")
 
