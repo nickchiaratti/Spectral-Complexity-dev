@@ -8,7 +8,7 @@ import matplotlib.dates as mdates
 from datetime import datetime, timezone
 from scipy import stats
 import scienceplots
-plt.style.use(['science', 'ieee'])
+plt.style.use(['science', 'ieee', 'no-latex'])
 
 # --- Configuration ---
 ADD_SEASONAL_UNDERLAY = True  # Configuration toggle for meteorological seasonal background spans

@@ -21,15 +21,14 @@ plt.style.use(['science','no-latex'])
 
 LOCATION = "Tait"
 IGNORE_COMMON_MASK = False
-H5_PATH = f"C:/satelliteImagery/HLST30/HLST_{LOCATION}_Harmonized_SC_EM-7_Norm-bandCount.h5"
+H5_PATH = f"C:/satelliteImagery/HLST30/HLST_{LOCATION}_Harmonized_SC_EM-7_Norm-None.h5"
+TARGET_METRIC = 'sliding_volume_z_score'
 
-# 'ALFT', 'NDFT', 'NOMP', 'CBPDN', 'CIRL'
-FREQUENCY_ESTIMATOR = "ALFT"
 
 import glob
 
-def get_inference_h5(location, estimator, ignore_common_mask=True):
-    search_pattern = f"C:/satelliteImagery/HLST30/DHR/{location}_DHR_Change_Detection_{estimator}_*.h5"
+def get_inference_h5(location, ignore_common_mask=True):
+    search_pattern = f"C:/satelliteImagery/HLST30/ALLSSA/{location}_ALLSSA_Change_Detection_*.h5"
     files = glob.glob(search_pattern)
     if not files:
         return None
@@ -57,17 +56,17 @@ def plot_pixel_sits(pixel_y, pixel_x, source_h5_path, inference_results_h5, ax_t
     lat, lon = None, None
     with h5py.File(source_h5_path, 'r') as f:
         harm_grp = f['/HDFEOS/GRIDS/HARMONIZED/Data Fields']
-        acq_time = harm_grp['sliding_volume_z_score'].attrs['acquisition_time'][:]
-        z_score = harm_grp['sliding_volume_z_score'][:, pixel_y, pixel_x]
+        acq_time = harm_grp[TARGET_METRIC].attrs['acquisition_time'][:]
+        z_score = harm_grp[TARGET_METRIC][:, pixel_y, pixel_x]
         
         unified_masks = harm_grp['common_mask'][:, pixel_y, pixel_x]
         is_invalid = unified_masks.astype(bool)
         
-        spacecraft_bytes = harm_grp['sliding_volume_z_score'].attrs['source_spacecraft'][:]
+        spacecraft_bytes = harm_grp[TARGET_METRIC].attrs['source_spacecraft'][:]
         spacecrafts = [s.decode('utf-8') if isinstance(s, bytes) else str(s) for s in spacecraft_bytes]
         
-        geo_transform = harm_grp['sliding_volume_z_score'].attrs.get('GeoTransform')
-        spatial_ref = harm_grp['sliding_volume_z_score'].attrs.get('spatial_ref')
+        geo_transform = harm_grp[TARGET_METRIC].attrs.get('GeoTransform')
+        spatial_ref = harm_grp[TARGET_METRIC].attrs.get('spatial_ref')
         if geo_transform is not None and spatial_ref is not None:
             try:
                 gt = geo_transform
@@ -111,7 +110,10 @@ def plot_pixel_sits(pixel_y, pixel_x, source_h5_path, inference_results_h5, ax_t
         predicted = f['predicted_series'][:, pixel_y, pixel_x]
         rmse = f['rmse_series'][:, pixel_y, pixel_x]
         anomalies = f['anomaly_flags'][:, pixel_y, pixel_x]
-        change_date_ts = f['change_date_timestamp'][pixel_y, pixel_x]
+        if 'confirmed_change_flags' in f:
+            confirmed = f['confirmed_change_flags'][:, pixel_y, pixel_x]
+        else:
+            confirmed = np.zeros_like(anomalies)
         dom_freq = f['dominant_frequencies_series'][:, :, pixel_y, pixel_x] # [N, K]
         rmse_multiplier = f.attrs.get('RMSE_MULTIPLIER', 3.0)
         max_window_years = f.attrs.get('MAX_WINDOW_YEARS', 5.0)
@@ -157,11 +159,11 @@ def plot_pixel_sits(pixel_y, pixel_x, source_h5_path, inference_results_h5, ax_t
             anom_vals = z_score[pred_mask][anom_mask]
             ax_ts_z.scatter(anom_dates, anom_vals, color='red', s=30, zorder=4, label='Anomaly (Unconfirmed)')
             
-            if not np.isnan(change_date_ts):
-                change_dt = datetime.fromtimestamp(change_date_ts, timezone.utc)
-                conf_mask = np.array([d >= change_dt for d in anom_dates])
-                if np.any(conf_mask):
-                    ax_ts_z.scatter(anom_dates[conf_mask], anom_vals[conf_mask], color='darkred', marker='*', s=150, zorder=6, label='Confirmed Structural Change')
+        conf_mask = confirmed[pred_mask] == 1
+        if np.any(conf_mask):
+            conf_dates = pred_dates[conf_mask]
+            conf_vals = z_score[pred_mask][conf_mask]
+            ax_ts_z.scatter(conf_dates, conf_vals, color='darkred', marker='*', s=150, zorder=6, label='Confirmed Structural Change')
             
     if current_date is not None:
         ax_ts_z.axvline(x=current_date, color='orange', linestyle='--', label='Displayed Frame')
@@ -173,7 +175,7 @@ def plot_pixel_sits(pixel_y, pixel_x, source_h5_path, inference_results_h5, ax_t
     ax_ts_z.set_ylabel('Z-Score')
     ax_ts_z.legend(bbox_to_anchor=(1.01, 1), loc='upper left')
     ax_ts_z.grid(True)
-    ax_ts_z.set_ylim([-4, 4])
+    #ax_ts_z.set_ylim([-4, 4])
     
     # -----------------------
     # PLOT 2: FREQUENCIES
@@ -250,14 +252,14 @@ def plot_pixel_sits(pixel_y, pixel_x, source_h5_path, inference_results_h5, ax_t
 def plot_spatial_anomaly_overlay(source_h5_path, inference_results_h5):
     with h5py.File(source_h5_path, 'r') as f:
         harm_grp = f['/HDFEOS/GRIDS/HARMONIZED/Data Fields']
-        acq_time = harm_grp['sliding_volume_z_score'].attrs['acquisition_time'][:]
+        acq_time = harm_grp[TARGET_METRIC].attrs['acquisition_time'][:]
         unified_masks = harm_grp['common_mask'][:]
         full_valid_mask = ~unified_masks.astype(bool)
         
     def get_ortho(idx):
         with h5py.File(source_h5_path, 'r') as f:
             harm_grp = f['/HDFEOS/GRIDS/HARMONIZED/Data Fields']
-            spc = harm_grp['sliding_volume_z_score'].attrs['source_spacecraft'][idx]
+            spc = harm_grp[TARGET_METRIC].attrs['source_spacecraft'][idx]
             spc = spc.decode('utf-8') if isinstance(spc, bytes) else str(spc)
             o = harm_grp['ortho_visual'][idx]
             o = np.transpose(o, (1, 2, 0)).astype(np.float32) / 255.0
@@ -322,7 +324,7 @@ def plot_spatial_anomaly_overlay(source_h5_path, inference_results_h5):
     # Setup GridSpec
     # Window 1: Main Analysis (Ortho + Time Series)
     fig1 = plt.figure(figsize=(18, 9))
-    window1_title = f'DHR Main Analysis: {os.path.basename(inference_results_h5)}'
+    window1_title = f'ALLSSA Main Analysis: {os.path.basename(inference_results_h5)}'
     fig1.canvas.manager.set_window_title(window1_title)
     
     gs1 = gridspec.GridSpec(2, 2, width_ratios=[1, 1.5], wspace=0.2, hspace=0.3)
@@ -334,7 +336,7 @@ def plot_spatial_anomaly_overlay(source_h5_path, inference_results_h5):
     
     # Window 2: Maps
     fig2 = plt.figure(figsize=(16, 12))
-    window2_title = f'DHR Parameter Maps: {os.path.basename(inference_results_h5)}'
+    window2_title = f'ALLSSA Parameter Maps: {os.path.basename(inference_results_h5)}'
     fig2.canvas.manager.set_window_title(window2_title)
     
     gs2 = gridspec.GridSpec(2, 2, wspace=0.3, hspace=0.3)
@@ -353,9 +355,9 @@ def plot_spatial_anomaly_overlay(source_h5_path, inference_results_h5):
     ax_img.imshow(gray)
     
     if not np.all(np.isnan(anomaly_map)):
-        from matplotlib.cm import viridis
+        from matplotlib.cm import gist_rainbow
         masked_anom = np.ma.masked_invalid(anomaly_map)
-        cmap = copy.copy(viridis)
+        cmap = copy.copy(gist_rainbow)
         cmap.set_bad(color='white', alpha=0)
         im1 = ax_img.imshow(masked_anom, cmap=cmap, alpha=0.7)
         cbar = plt.colorbar(im1, ax=ax_img)
@@ -393,7 +395,7 @@ def plot_spatial_anomaly_overlay(source_h5_path, inference_results_h5):
     
     # 3. Mode Dominant Period
     masked_per = np.ma.masked_invalid(mode_period_map)
-    cmap_per = copy.copy(plt.get_cmap('hsv'))
+    cmap_per = copy.copy(plt.get_cmap('gist_rainbow'))
     cmap_per.set_bad(color='gray', alpha=1.0)
     im3 = ax_per.imshow(masked_per, cmap=cmap_per, vmin=180, vmax=1100)
     ax_per.set_title("Mode Dominant Period")
@@ -531,10 +533,10 @@ def plot_spatial_anomaly_overlay(source_h5_path, inference_results_h5):
     fig2.canvas.mpl_connect('button_press_event', onclick)
 
 if __name__ == "__main__":
-    inference_h5 = get_inference_h5(LOCATION, FREQUENCY_ESTIMATOR, IGNORE_COMMON_MASK)
+    inference_h5 = get_inference_h5(LOCATION, IGNORE_COMMON_MASK)
     if inference_h5 and os.path.exists(inference_h5):
         print(f"Loading latest inference results: {inference_h5}")
         plot_spatial_anomaly_overlay(H5_PATH, inference_h5)
         plt.show()
     else:
-        print("Run dhr_main.py first to create output h5")
+        print("Run ALLSSA_main.py first to create output h5")

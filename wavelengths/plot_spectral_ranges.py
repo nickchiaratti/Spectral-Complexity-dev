@@ -8,7 +8,7 @@ import re
 import scienceplots
 
 # Set the style to be used for plotting
-plt.style.use(['science', 'no-latex'])
+plt.style.use(['science', 'ieee'])
 
 def plot_spectral_ranges():
     """
@@ -25,8 +25,7 @@ def plot_spectral_ranges():
     oli_rsr_path = os.path.join(script_dir, 'L9_OLI2_RSR.xlsx')
 
     # Create figure with 3 subplots
-    fig, axes = plt.subplots(3, 1, figsize=(18, 10))
-    fig.suptitle('Spectral Ranges Sampled: Landsat 8/9 vs Tanager vs Sentinel-2A', fontsize=16, fontweight='bold')
+    fig, axes = plt.subplots(3, 1, figsize=(7.16, 3))
     
     ax_landsat = axes[0]
     ax_tanager = axes[1]
@@ -65,12 +64,14 @@ def plot_spectral_ranges():
                         if wl[0] > 10: # Convert nm to um
                             wl = wl / 1000.0
                             
-                        color = oli_1_7_color if 1 <= band_num <= 7 else oli_other_color
-                        ax_landsat.plot(wl, rsr, color=color, linewidth=1.5)
-                        ax_landsat.fill_between(wl, rsr, color=color, alpha=0.5)
-                        peak_idx = np.argmax(rsr)
-                        ax_landsat.text(wl[peak_idx], rsr[peak_idx] + 0.02, f'B{band_num}', ha='center', va='bottom', fontsize=9, color=color, fontweight='bold')
-                        oli_plotted = True
+                        if band_num <= 7:
+                            color = oli_1_7_color
+                            ax_landsat.plot(wl, rsr, color=color, linewidth=1.5, linestyle='-')
+                            ax_landsat.fill_between(wl, rsr, color=color, alpha=0.5)
+                            peak_idx = np.argmax(rsr)
+                            text_x = wl[peak_idx]
+                            ax_landsat.text(text_x, rsr[peak_idx] + 0.02, f'B{band_num}', ha='center', va='bottom', color=color, fontsize=7)
+                            oli_plotted = True
                                 
         except Exception as e:
             print(f"Error reading OLI Excel file: {e}")
@@ -89,30 +90,26 @@ def plot_spectral_ranges():
 
         # Draw OLI bands as rectangular idealized Relative Spectral Responses
         for band, (lower, upper) in oli_bands.items():
-            width = upper - lower
-            color = oli_1_7_color if band in ['B1','B2','B3','B4','B5','B6','B7'] else oli_other_color
-            
-            # Add rectangle patch (x, y), width, height
-            rect = patches.Rectangle((lower, 0), width, 1.0, linewidth=1, edgecolor='black', facecolor=color, alpha=0.7)
-            ax_landsat.add_patch(rect)
-            
-            # Add label above the band
-            ax_landsat.text(lower + width/2, 1.02, band, ha='center', va='bottom', fontsize=9, color=color, fontweight='bold')
+            if band in ['B1','B2','B3','B4','B5','B6','B7']:
+                width = upper - lower
+                color = oli_1_7_color
+                
+                # Add rectangle patch (x, y), width, height
+                rect = patches.Rectangle((lower, 0), width, 1.0, linewidth=1, edgecolor='black', facecolor=color, alpha=0.7)
+                ax_landsat.add_patch(rect)
+                
+                # Add label above the band
+                text_x = (lower + width/2)
+                ax_landsat.text(text_x, 1.02, band, ha='center', va='bottom', color=color, fontsize=7)
 
     # Landsat Subplot Formatting
-    ax_landsat.set_title('Landsat 8/9 (OLI)', fontsize=14)
-    ax_landsat.set_xlabel('Wavelength (µm)', fontsize=12)
-    ax_landsat.set_ylabel('Relative Spectral Response (RSR)', fontsize=12)
    # ax_landsat.set_xlim(0, 13)
-    ax_landsat.set_xlim(0.3, 3) # Standard VSWIR range
-    ax_landsat.set_ylim(0, 1.15)
+    ax_landsat.set_xlim(0.37, 2.51) # Standard VSWIR range
+    ax_landsat.set_ylim(0, 1.3)
     ax_landsat.grid(True, linestyle='--', alpha=0.6)
     
-    # Custom legend
-    import matplotlib.lines as mlines
-    l1 = patches.Patch(color=oli_1_7_color, label='OLI Bands 1-7')
-    l2 = patches.Patch(color=oli_other_color, label='OLI Bands 8-9')
-    ax_landsat.legend(handles=[l1, l2], loc='upper right')
+    # Add plot label
+    ax_landsat.text(0.98, 0.90, 'Landsat', transform=ax_landsat.transAxes, ha='right', va='top', fontsize=9, fontweight='bold')
 
 
     # ==========================================
@@ -130,7 +127,6 @@ def plot_spectral_ranges():
                 print("No band data found in Tanager JSON.")
             else:
                 tanager_color = '#2ca02c' # Green for Tanager hyperspectral lines
-                water_band_color = '#7f7f7f' # Gray for water absorption bands
                 
                 # Plot each Tanager band as a Gaussian distribution
                 # FWHM = 2.355 * sigma  => sigma = FWHM / 2.355
@@ -147,20 +143,12 @@ def plot_spectral_ranges():
                         # Generate Gaussian y values (normalized to peak at 1.0 for RSR comparability)
                         y = np.exp(-0.5 * ((x - center) / sigma) ** 2)
                         
-                        # Determine color based on wavelength (water absorption)
-                        if (1.35 <= center <= 1.45) or (1.80 <= center <= 1.95):
-                            current_color = water_band_color
-                        else:
+                        # Determine if it's a water absorption band
+                        if not ((1.35 <= center <= 1.45) or (1.80 <= center <= 1.95)):
                             current_color = tanager_color
-                        
-                        # Plot the distribution
-                        ax_tanager.plot(x, y, color=current_color, alpha=0.6, linewidth=1)
-                        ax_tanager.fill_between(x, y, color=current_color, alpha=0.1)
-                
-                # Add a custom legend entry for Tanager
-                l4 = mlines.Line2D([], [], color=tanager_color, label=f'Tanager Hyperspectral ({len(bands)} bands)')
-                l_water = mlines.Line2D([], [], color=water_band_color, label='Water Vapor Absorption')
-                ax_tanager.legend(handles=[l4, l_water], loc='upper right')
+                # Plot the distribution
+                            ax_tanager.plot(x, y, color=current_color, alpha=0.6, linewidth=1, linestyle='-')
+                            ax_tanager.fill_between(x, y, color=current_color, alpha=0.1)
                 
         except Exception as e:
             print(f"Error reading Tanager JSON: {e}")
@@ -168,13 +156,13 @@ def plot_spectral_ranges():
         print("Tanager JSON file not found. Please ensure it is in the same directory.")
 
     # Tanager Subplot Formatting
-    ax_tanager.set_title('Tanager-1 (Hyperspectral)', fontsize=14)
-    ax_tanager.set_xlabel('Wavelength (µm)', fontsize=12)
-    ax_tanager.set_ylabel('Simulated Spectral Response (Scaled via FWHM)', fontsize=12)
    # ax_tanager.set_xlim(0.3, 2.6) # Standard VSWIR range for Tanager
-    ax_tanager.set_xlim(0.3, 3) # Standard VSWIR range
-    ax_tanager.set_ylim(0, 1.15)
+    ax_tanager.set_xlim(0.37, 2.51) # Standard VSWIR range
+    ax_tanager.set_ylim(0, 1.3)
     ax_tanager.grid(True, linestyle='--', alpha=0.6)
+    
+    # Add plot label
+    ax_tanager.text(0.98, 0.90, 'Tanager', transform=ax_tanager.transAxes, ha='right', va='top', fontsize=9, fontweight='bold')
 
     # ==========================================
     # Plot 3: Sentinel-2A
@@ -201,40 +189,38 @@ def plot_spectral_ranges():
                     peak_idx = np.argmax(rsr)
                     peak_wl = wl[peak_idx]
                     
-                    if (1.35 <= peak_wl <= 1.45) or (1.80 <= peak_wl <= 1.95):
-                        color_to_use = '#7f7f7f'
-                    else:
+                    band_name = col.split('_')[-1] # e.g. B1, B8A
+                    
+                    if not ((1.35 <= peak_wl <= 1.45) or (1.80 <= peak_wl <= 1.95) or band_name == 'B8'):
                         color_to_use = sentinel_color
 
-                    ax_sentinel.plot(wl, rsr, color=color_to_use, linewidth=1.5)
-                    ax_sentinel.fill_between(wl, rsr, color=color_to_use, alpha=0.5)
+                        ax_sentinel.plot(wl, rsr, color=color_to_use, linewidth=1.5, linestyle='-')
+                        ax_sentinel.fill_between(wl, rsr, color=color_to_use, alpha=0.5)
+                        
+                        # Add text label
+                        text_x = wl[peak_idx]
+                        ax_sentinel.text(text_x, rsr[peak_idx] + 0.023, band_name, ha='center', va='bottom', color=color_to_use, fontsize=7)
                     
-                    # Add text label
-                    band_name = col.split('_')[-1] # e.g. B1, B8A
-                    ax_sentinel.text(wl[peak_idx], rsr[peak_idx] + 0.02, band_name, ha='center', va='bottom', fontsize=9, color=color_to_use, fontweight='bold')
-                    
-            import matplotlib.lines as mlines
-            l5 = mlines.Line2D([], [], color=sentinel_color, label='Sentinel-2A MSI')
-            l_water_s2 = mlines.Line2D([], [], color='#7f7f7f', label='Water Vapor Absorption')
-            ax_sentinel.legend(handles=[l5, l_water_s2], loc='upper right')
-            
         except Exception as e:
             print(f"Error reading Sentinel-2A Excel file: {e}")
     else:
         print("Sentinel-2A Excel file not found. Please ensure it is in the same directory.")
 
     # Sentinel Subplot Formatting
-    ax_sentinel.set_title('Sentinel-2A (MSI)', fontsize=14)
-    ax_sentinel.set_xlabel('Wavelength (µm)', fontsize=12)
-    ax_sentinel.set_ylabel('Relative Spectral Response (RSR)', fontsize=12)
-    ax_sentinel.set_xlim(0.3, 3) # Standard VSWIR range
-    ax_sentinel.set_ylim(0, 1.15)
+    ax_sentinel.set_xlabel('Wavelength (µm)')
+    ax_sentinel.set_xlim(0.37, 2.51) # Standard VSWIR range
+    ax_sentinel.set_ylim(0, 1.3)
     ax_sentinel.grid(True, linestyle='--', alpha=0.6)
+    
+    # Add plot label
+    ax_sentinel.text(0.98, 0.90, 'Sentinel-2', transform=ax_sentinel.transAxes, ha='right', va='top', fontsize=9, fontweight='bold')
+
+    fig.supylabel('Relative Spectral Response (RSR)', fontsize=10, x=0.04)
 
     # Final Adjustments and Show/Save
-    plt.tight_layout(rect=[0, 0, 1, 0.96], h_pad=2.0)
-    plt.savefig(os.path.join(script_dir,'spectral_ranges_comparison.png'), dpi=300)
-    plt.show()
+    plt.tight_layout(rect=[0.04, 0, 1, 1], h_pad=0.2)
+    plt.savefig(os.path.join(script_dir,'spectral_ranges_comparison.png'), dpi=600, bbox_inches='tight')
+    #plt.show()
 
 if __name__ == '__main__':
     plot_spectral_ranges()

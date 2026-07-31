@@ -5,6 +5,7 @@ import warnings
 from rasterio.warp import reproject, Resampling
 from pyproj import CRS
 from rasterio.transform import Affine
+from tqdm import tqdm
 import sys
 from pathlib import Path
 
@@ -79,7 +80,7 @@ def process_hls_master_stack(
     meta_arrays = {'acq': [], 'space': [], 'saz': [], 'sel': [], 'cc': []}
 
     with h5py.File(native_h5_path, 'r') as h5f:
-        for idx, date_str in enumerate(valid_dates):
+        for idx, date_str in enumerate(tqdm(valid_dates, desc="    Reprojecting Frames", unit="frame")):
             entries = daily_groups[date_str]
         
             base_grid = entries[0]['grid_id']

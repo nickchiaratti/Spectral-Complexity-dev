@@ -75,10 +75,18 @@ def compute_frame_metrics(payload):
                 gw_mask = None
             
             # Dependency Resolution: Read existing volume map if Z-Score requires it but we aren't calculating it
-            if flags['z_score'] and not flags['volume']:
+            if flags['z_score'] and not flags['volume'] and not flags['neighborhood_volume']:
                 slide_map = h5_in["/HDFEOS/GRIDS/HARMONIZED/Data Fields/sliding_volume_map"][payload['global_idx'], ...]
             else:
                 slide_map = None
+                
+            if flags['neighborhood_z_score'] and not flags['neighborhood_volume']:
+                try:
+                    neighborhood_map = h5_in["/HDFEOS/GRIDS/HARMONIZED/Data Fields/neighborhood_volume_map"][payload['global_idx'], ...]
+                except KeyError:
+                    neighborhood_map = None
+            else:
+                neighborhood_map = None
             
         telemetry['I/O_Read'] = time.perf_counter() - t0
         valid_mask = frame_mask == 0 if MASKING else np.ones((height, width), dtype=bool)
@@ -108,10 +116,11 @@ def compute_frame_metrics(payload):
             telemetry['Global_Endmembers'] = time.perf_counter() - t0
     
         # --- 4. Sliding Window Complexity ---
-        if flags['volume']:
+        if flags['volume'] or flags['neighborhood_volume'] or flags['neighborhood_z_score']:
             t0 = time.perf_counter()
             # Note: process_volume_sliding_tile prunes invalid pixels internally
-            slide_map = scTorch.process_volume_sliding_tile(frame_sr, TILE_SIZE, SLIDING_STRIDE, NUM_ENDMEMBERS, 'minEndmember', NORM_PARAM)
+            # Returns both the spatially-averaged map and the per-center-pixel neighborhood map
+            slide_map, neighborhood_map = scTorch.process_volume_sliding_tile(frame_sr, TILE_SIZE, SLIDING_STRIDE, NUM_ENDMEMBERS, 'minEndmember', NORM_PARAM)
             telemetry['Sliding_Volume_Map'] = time.perf_counter() - t0
     
         # --- 5. Mean Spectral Distance ---
@@ -129,6 +138,14 @@ def compute_frame_metrics(payload):
             t0 = time.perf_counter()
             z_map, global_mean, global_std = sc.calculate_global_z_score(slide_map, valid_mask)
             telemetry['Z_Score'] = time.perf_counter() - t0
+            
+        neighborhood_z_map = None
+        neighborhood_global_mean = np.nan
+        neighborhood_global_std = np.nan
+        if flags['neighborhood_z_score']:
+            t0 = time.perf_counter()
+            neighborhood_z_map, neighborhood_global_mean, neighborhood_global_std = sc.calculate_global_z_score(neighborhood_map, valid_mask)
+            telemetry['Neighborhood_Z_Score'] = time.perf_counter() - t0
 
         # --- 7. Ortho Visual Consolidation ---
         t0 = time.perf_counter()
@@ -159,10 +176,14 @@ def compute_frame_metrics(payload):
             'ndvi': ndvi,
             'ndbi': ndbi,
             'slide': slide_map,
+            'neighborhood': neighborhood_map,
             'msd': msd_map,
             'z_map': z_map,
+            'neighborhood_z_map': neighborhood_z_map,
             'global_mean': global_mean,
             'global_std': global_std,
+            'neighborhood_global_mean': neighborhood_global_mean,
+            'neighborhood_global_std': neighborhood_global_std,
             'em': em_out,
             'em_idx': endmember_idx,
             'vol': vol_curve,
@@ -191,7 +212,9 @@ def main(target_location=None, tile_size=3, num_endmembers=7, norm_param=None):
     CALC_MSD = False
     CALC_GLOBAL_ENDMEMBERS = True
     CALC_SLIDING_VOLUME = True
+    CALC_NEIGHBORHOOD_VOLUME = True
     CALC_Z_SCORE = True
+    CALC_NEIGHBORHOOD_Z_SCORE = True
     CALC_TEMPORAL_Z_SCORE = True
     CALC_PIXEL_TEMPORAL_Z_SCORE = True
 
@@ -257,7 +280,7 @@ def main(target_location=None, tile_size=3, num_endmembers=7, norm_param=None):
     # 4. MASTER THREAD DISPATCHER
     # ==========================================
     def process_global_timeline(h5_out, orig_filepath):
-        nonlocal CALC_SLIDING_VOLUME
+        nonlocal CALC_SLIDING_VOLUME, CALC_NEIGHBORHOOD_VOLUME
 
         with h5py.File(orig_filepath, 'r') as h5_orig:
             grids = [g for g in h5_orig['/HDFEOS/GRIDS'].keys() if g != 'HARMONIZED']
@@ -290,9 +313,13 @@ def main(target_location=None, tile_size=3, num_endmembers=7, norm_param=None):
 
             # Mathematical Dependency Resolution
             harm_path = '/HDFEOS/GRIDS/HARMONIZED/Data Fields'
-            if CALC_Z_SCORE and not CALC_SLIDING_VOLUME:
+            if CALC_Z_SCORE and not CALC_SLIDING_VOLUME and not CALC_NEIGHBORHOOD_VOLUME:
                 print("  -> Dependency Warning: Z-score requested but 'sliding_volume_map' not found in file. Forcing CALC_SLIDING_VOLUME = True.")
                 CALC_SLIDING_VOLUME = True
+                
+            if CALC_NEIGHBORHOOD_Z_SCORE and not CALC_NEIGHBORHOOD_VOLUME:
+                print("  -> Dependency Warning: Neighborhood Z-score requested but 'neighborhood_volume_map' not found in file. Forcing CALC_NEIGHBORHOOD_VOLUME = True.")
+                CALC_NEIGHBORHOOD_VOLUME = True
 
             ref_sr = h5_orig[f"/HDFEOS/GRIDS/{grids[0]}/Data Fields/surface_reflectance"]
             _, _, height, width = ref_sr.shape
@@ -332,10 +359,12 @@ def main(target_location=None, tile_size=3, num_endmembers=7, norm_param=None):
             ds_harm_mask = overwrite_dset(harm_grp, 'common_mask', (total_frames, height, width), dtype='uint8', spatial_ref=spatial_ref, geo_transform=geo_transform, chunks=chunks_3d)
             ds_harm_ortho = overwrite_dset(harm_grp, 'ortho_visual', (total_frames, 3, height, width), dtype='uint8', spatial_ref=spatial_ref, geo_transform=geo_transform, chunks=(1, 3, chunk_h, chunk_w))
             ds_harm_slide = overwrite_dset(harm_grp, 'sliding_volume_map', (total_frames, height, width), spatial_ref=spatial_ref, geo_transform=geo_transform, chunks=chunks_3d) if CALC_SLIDING_VOLUME else None
+            ds_harm_neighborhood = overwrite_dset(harm_grp, 'neighborhood_volume_map', (total_frames, height, width), spatial_ref=spatial_ref, geo_transform=geo_transform, chunks=chunks_3d) if CALC_NEIGHBORHOOD_VOLUME else None
             ds_harm_ndvi = overwrite_dset(harm_grp, 'ndvi_map', (total_frames, height, width), spatial_ref=spatial_ref, geo_transform=geo_transform, chunks=chunks_3d) if CALC_NDVI else None
             ds_harm_ndbi = overwrite_dset(harm_grp, 'ndbi_map', (total_frames, height, width), spatial_ref=spatial_ref, geo_transform=geo_transform, chunks=chunks_3d) if CALC_NDBI else None
             ds_harm_msd = overwrite_dset(harm_grp, 'msd_map', (total_frames, height, width), spatial_ref=spatial_ref, geo_transform=geo_transform, chunks=chunks_3d) if CALC_MSD else None
             ds_harm_z = overwrite_dset(harm_grp, 'sliding_volume_z_score', (total_frames, height, width), spatial_ref=spatial_ref, geo_transform=geo_transform, chunks=chunks_3d) if CALC_Z_SCORE else None
+            ds_harm_neighborhood_z = overwrite_dset(harm_grp, 'neighborhood_volume_z_score', (total_frames, height, width), spatial_ref=spatial_ref, geo_transform=geo_transform, chunks=chunks_3d) if CALC_NEIGHBORHOOD_Z_SCORE else None
             ds_harm_temp_z = overwrite_dset(harm_grp, 'temporal_z_score', (total_frames, height, width), spatial_ref=spatial_ref, geo_transform=geo_transform, chunks=chunks_3d) if CALC_TEMPORAL_Z_SCORE else None
             ds_harm_pixel_temp_z = overwrite_dset(harm_grp, 'pixel_temporal_z_score', (total_frames, height, width), spatial_ref=spatial_ref, geo_transform=geo_transform, chunks=chunks_3d) if CALC_PIXEL_TEMPORAL_Z_SCORE else None
 
@@ -385,7 +414,9 @@ def main(target_location=None, tile_size=3, num_endmembers=7, norm_param=None):
                 'persistent_water_mask': persistent_water_mask,
                 'calc_flags': {
                     'ndvi': CALC_NDVI, 'ndbi': CALC_NDBI, 'msd': CALC_MSD,
-                    'endmembers': CALC_GLOBAL_ENDMEMBERS, 'volume': CALC_SLIDING_VOLUME, 'z_score': CALC_Z_SCORE
+                    'endmembers': CALC_GLOBAL_ENDMEMBERS, 'volume': CALC_SLIDING_VOLUME,
+                    'neighborhood_volume': CALC_NEIGHBORHOOD_VOLUME, 'z_score': CALC_Z_SCORE,
+                    'neighborhood_z_score': CALC_NEIGHBORHOOD_Z_SCORE
                 },
                 'MASKING': MASKING,
                 'NUM_ENDMEMBERS': NUM_ENDMEMBERS,
@@ -397,6 +428,8 @@ def main(target_location=None, tile_size=3, num_endmembers=7, norm_param=None):
         agg_telemetry = {'Total_Worker_Time': []}
         global_means_list = []
         global_stds_list = []
+        neighborhood_global_means_list = []
+        neighborhood_global_stds_list = []
 
         completed_frames = 0
         max_workers = 2
@@ -429,8 +462,12 @@ def main(target_location=None, tile_size=3, num_endmembers=7, norm_param=None):
                 ds_harm_msd[global_idx, ...] = result['msd']
             if CALC_SLIDING_VOLUME: 
                 ds_harm_slide[global_idx, ...] = result['slide']
+            if CALC_NEIGHBORHOOD_VOLUME:
+                ds_harm_neighborhood[global_idx, ...] = result['neighborhood']
             if CALC_Z_SCORE: 
                 ds_harm_z[global_idx, ...] = result['z_map']
+            if CALC_NEIGHBORHOOD_Z_SCORE:
+                ds_harm_neighborhood_z[global_idx, ...] = result['neighborhood_z_map']
         
             if CALC_GLOBAL_ENDMEMBERS:
                 sensor_dsets[grid_name]['em'][t_local, ...] = result['em']
@@ -439,6 +476,8 @@ def main(target_location=None, tile_size=3, num_endmembers=7, norm_param=None):
                 
             global_means_list.append(result['global_mean'])
             global_stds_list.append(result['global_std'])
+            neighborhood_global_means_list.append(result['neighborhood_global_mean'])
+            neighborhood_global_stds_list.append(result['neighborhood_global_std'])
         
             completed_frames += 1
             print(f"  [{completed_frames}/{total_frames}] {grid_name} (Global Index {global_idx}) processed in {result['telemetry']['Total_Worker_Time']:.2f}s")
@@ -519,7 +558,7 @@ def main(target_location=None, tile_size=3, num_endmembers=7, norm_param=None):
         prov_idx = np.array([m['local_idx'] for m in timeline], dtype='int32')
     
         # Only tag the datasets that were actually generated in this run
-        created_harm_dsets = [ds for ds in [ds_harm_mask, ds_harm_ortho, ds_harm_slide, ds_harm_ndvi, ds_harm_ndbi, ds_harm_msd, ds_harm_z, ds_harm_temp_z, ds_harm_pixel_temp_z] if ds is not None]
+        created_harm_dsets = [ds for ds in [ds_harm_mask, ds_harm_ortho, ds_harm_slide, ds_harm_neighborhood, ds_harm_ndvi, ds_harm_ndbi, ds_harm_msd, ds_harm_z, ds_harm_neighborhood_z, ds_harm_temp_z, ds_harm_pixel_temp_z] if ds is not None]
     
         for ds in created_harm_dsets:
             ds.attrs.create('source_grid', data=prov_grid)
@@ -531,6 +570,12 @@ def main(target_location=None, tile_size=3, num_endmembers=7, norm_param=None):
                 ds.attrs['description'] = f"Volume of convex hull within sliding {TILE_SIZE}x{TILE_SIZE} tile"
                 ds.attrs['tile_size'] = TILE_SIZE
                 ds.attrs['sliding_stride'] = SLIDING_STRIDE
+                ds.attrs['gram_type'] = 'minEndmember'
+                ds.attrs['num_endmembers'] = NUM_ENDMEMBERS
+                ds.attrs['Normalization'] = NORM_PARAM if NORM_PARAM else "None"
+            elif ds.name.endswith('neighborhood_volume_map'):
+                ds.attrs['description'] = f"Neighborhood volume assigned to center pixel of {TILE_SIZE}x{TILE_SIZE} tile (no spatial averaging)"
+                ds.attrs['tile_size'] = TILE_SIZE
                 ds.attrs['gram_type'] = 'minEndmember'
                 ds.attrs['num_endmembers'] = NUM_ENDMEMBERS
                 ds.attrs['Normalization'] = NORM_PARAM if NORM_PARAM else "None"
@@ -550,6 +595,12 @@ def main(target_location=None, tile_size=3, num_endmembers=7, norm_param=None):
                 ds.attrs['MASK_SOURCE'] = "HARMONIZED_common_mask"
                 ds.attrs['frame_global_means'] = np.array(global_means_list, dtype=np.float32)
                 ds.attrs['frame_global_stds'] = np.array(global_stds_list, dtype=np.float32)
+            elif ds.name.endswith('neighborhood_volume_z_score'):
+                ds.attrs['description'] = "Global Spectral Complexity Neighborhood Z-score. ARD Masked pixels excluded from background stats."
+                ds.attrs['MASKING_APPLIED'] = MASKING
+                ds.attrs['MASK_SOURCE'] = "HARMONIZED_common_mask"
+                ds.attrs['frame_global_means'] = np.array(neighborhood_global_means_list, dtype=np.float32)
+                ds.attrs['frame_global_stds'] = np.array(neighborhood_global_stds_list, dtype=np.float32)
 
         if CALC_GLOBAL_ENDMEMBERS:
             for grid in grids:

@@ -38,7 +38,7 @@ def main():
     _term_str = f"K{K_FREQUENCIES}"
     _win_str = f"W{int(MAX_WINDOW_YEARS)}"
     _mask_str = "_unmasked" if IGNORE_COMMON_MASK else ""
-    output_h5 = f"C:/satelliteImagery/HLST30/DHR/{LOCATION}_DHR_Change_Detection_{_term_str}_{_win_str}{_mask_str}_numpy.h5"
+    output_h5 = f"C:/satelliteImagery/HLST30/ALLSSA/{LOCATION}_ALLSSA_Change_Detection_{_term_str}_{_win_str}{_mask_str}_numpy.h5"
 
     print(f"Loading data from {H5_PATH}...")
     with h5py.File(H5_PATH, 'r') as f:
@@ -88,7 +88,7 @@ def main():
     f_grid = np.linspace(0.2, 4.0, 150)
     Omega = 2.0 * math.pi * f_grid
     
-    print("\nExecuting Batched Dynamic Harmonic Regression...")
+    print("\nExecuting Batched Adaptive Harmonic Analysis...")
     
     y_chunks = list(range(0, height, CHUNK_SIZE))
     x_chunks = list(range(0, width, CHUNK_SIZE))
@@ -349,7 +349,7 @@ def main():
         out_file.create_dataset('change_date_timestamp', data=change_date_map, compression='gzip')
         out_file.create_dataset('change_count', data=change_count_map, compression='gzip')
         
-    print("DHR Pipeline Complete!")
+    print("ALLSSA Pipeline Complete!")
 
 if __name__ == "__main__":
     main()

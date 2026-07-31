@@ -1,10 +1,10 @@
-# Dynamic Harmonic Regression (DHR) Change Detection
+# Adaptive Harmonic Analysis (ALLSSA) Change Detection
 
-This directory contains the implementation of a Dynamic Harmonic Regression (DHR) pipeline used for detecting structural anomalies in satellite image time series data. 
+This directory contains the implementation of a Adaptive Harmonic Analysis (ALLSSA) pipeline used for detecting structural anomalies in satellite image time series data. 
 
-## Overview of Processing (`dhr_main_pytorch.py`)
+## Overview of Processing (`ALLSSA_main_pytorch.py`)
 
-The `dhr_main_pytorch.py` script implements a highly-optimized, GPU-accelerated harmonic regression pipeline to detect changes in spectral indices (e.g., sliding volume z-scores) over time. Instead of relying on predefined frequencies (like annual or semi-annual cycles), this method dynamically determines the most prominent frequencies for every pixel within a rolling temporal window.
+The `ALLSSA_main_pytorch.py` script implements a highly-optimized, GPU-accelerated harmonic regression pipeline to detect changes in spectral indices (e.g., sliding volume z-scores) over time. Instead of relying on predefined frequencies (like annual or semi-annual cycles), this method dynamically determines the most prominent frequencies for every pixel within a rolling temporal window.
 
 ### Key Processing Steps:
 
@@ -27,7 +27,7 @@ The `dhr_main_pytorch.py` script implements a highly-optimized, GPU-accelerated 
      - `CBPDN`: Continuous Basis Pursuit DeNoising (using L1-regularized Adam optimization).
      - `CIRL`: Continuous Iterative Reweighted Least-Squares (using log-penalty Adam optimization).
 
-4. **Dynamic Harmonic Regression:**
+4. **Adaptive Harmonic Analysis:**
    - A design matrix is constructed dynamically using the top $K$ frequencies identified by the selected estimator. The matrix includes a constant term, along with cosine and sine terms for each frequency.
    - Ordinary Least Squares (OLS) is performed using batched matrix multiplications (`torch.linalg.solve(XtX, Xty)`) to calculate the regression coefficients (amplitudes and phases).
 
@@ -54,6 +54,6 @@ The script exposes several configurable variables directly at the top of the fil
 - `K_FREQUENCIES`: The number of dynamic harmonic components to extract.
 - `MIN_SAMPLES`: The minimum valid observations needed to prevent overfitting and ensure robust statistical bounds.
 
-## Visualization (`dhr_vis.py`)
+## Visualization (`ALLSSA_vis.py`)
 
 A supporting visualization script is included to interactively inspect the results. It plots the raw data against the dynamic harmonic predictions, highlights the confidence bounds, and visualizes the changing frequencies and amplitudes over time for selected pixels.

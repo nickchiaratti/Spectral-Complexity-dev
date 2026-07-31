@@ -48,14 +48,16 @@ except Exception:
     Location = "Tait"
 
 # --- Configuration ---
-complexity_type = 'sliding_volume_map' #'sliding_volume_z_score' # or 'sliding_volume_map'
-complexity_type_comparison = 'pixel_temporal_z_score'
+complexity_type = 'neighborhood_volume_z_score' #'sliding_volume_map' #'sliding_volume_z_score' # or 'sliding_volume_map'
+complexity_type_comparison = 'sliding_volume_map'
 
 COMPLEXITY_DICT = {
     'sliding_volume_map': 'Spectral Complexity',
+    'neighborhood_volume_map': 'Spectral Complexity Neighborhood Map',
     'pixel_temporal_z_score': 'Spectral Complexity Pixel Temporal Z-Score',
     'temporal_z_score': 'Spectral Complexity Global Temporal Z-Score',
     'sliding_volume_z_score': 'Spectral Complexity Frame-based Z-Score',
+    'neighborhood_volume_z_score': 'Spectral Complexity Neighborhood Z-Score',
     'sliding_volume_z_score_masked': 'Spectral Complexity Z-Score',
     'sliding_volume_local_z_score': 'Spectral Complexity Local Z-Score',
     'sliding_volume_map_5x5': 'Spectral Complexity 5x5 window',

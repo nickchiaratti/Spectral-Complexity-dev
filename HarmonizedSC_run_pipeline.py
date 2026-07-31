@@ -59,7 +59,7 @@ def main():
                         help='Tile size for spatial sliding window calculation')
     parser.add_argument('--num-endmembers', type=int, default=7,
                         help='Number of endmembers to extract')
-    parser.add_argument('--norm-param', type=str, default='bandCount',
+    parser.add_argument('--norm-param', type=str, default=None,
                         help='Normalization parameter (e.g. bandCount)')
     args = parser.parse_args()
 
