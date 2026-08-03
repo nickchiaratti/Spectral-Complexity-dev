@@ -16,6 +16,8 @@ Opt. Lett., vol. 33, no. 2, p. 156, Jan. 2008.
 import os
 import h5py
 import numpy as np
+import pandas as pd
+import seaborn as sns
 import matplotlib.pyplot as plt
 from matplotlib.widgets import Button, TextBox
 import matplotlib.dates as mdates
@@ -34,44 +36,66 @@ import warnings
 Location = "Rochesterv2"
 
 # Point directly to the finalized ARD Master Cube
-ARD_CUBE_PATH = f"C:/satelliteImagery/HLST30/HLST_{Location}_Harmonized_SC_EM-7_Norm-bandCount.h5"
+SOURCE_CUBE_PATH = f"C:/satelliteImagery/HLST30/HLST_{Location}_Harmonized.h5"
 
-# The Absolute Geometric Anchor (Reference Sensor)
-BASELINE_GRID = "HARMONIZED"
+# Target search window size (pixels)
+SPAN = 100
 
-# Target search window size (100x100 pixels)
-SPAN = 150 
+# Minimum required unmasked valid pixels in the search window (e.g. 0.9 = 90%)
+MIN_VALID_OVERLAP = 0.9
+
+# Maximum physically permissible translation shift (meters). 
+# Offsets beyond this are explicitly rejected as extreme georeferencing outliers.
+MAX_VALID_OFFSET = 40
 
 # ==========================================
 # 2. UTILITY FUNCTIONS
 # ==========================================
-def get_luminance_and_mask(grp, f_idx):
+def get_reflectance_and_mask(grp, f_idx):
     """
-    Extracts the full-frame ortho_visual array, converts to Luminance,
+    Extracts a single surface reflectance band (Red) from the source grid,
     and applies the strictly pre-calculated ARD common_mask.
+    Returns the reflectance array, the valid mask, and the rgb ortho_visual.
     """
-    if 'ortho_visual' not in grp or 'common_mask' not in grp:
+    if 'ortho_visual' not in grp or 'common_mask' not in grp or 'surface_reflectance' not in grp:
         raise ValueError(f"CRITICAL ERROR: Required datasets missing in grid {grp.name}")
 
+    # Extract RGB visual for plotting/display purposes
     raw_vis = grp['ortho_visual'][f_idx, ...]
-    
     if raw_vis.shape[0] in [3, 4]:
         bip_vis = np.transpose(raw_vis, (1, 2, 0))
     else:
         bip_vis = raw_vis
-        
     rgb = bip_vis[..., :3].astype(np.float32) / 255.0
-    luminance = np.dot(rgb, [0.299, 0.587, 0.114])
     
     # 1 = Valid, 0 = Invalid/Masked
     valid_mask = grp['common_mask'][f_idx, ...] != 1
-    
     if bip_vis.shape[-1] == 4:
         valid_mask &= (bip_vis[..., 3] > 0)
+        
+    # Determine source grid name from group path
+    source_grid = grp.name.split('/')[-2]
+    
+    # Select the Red band based on the sensor
+    if "HLSL30" in source_grid:
+        red_band_idx = 3 # ~655 nm
+    elif "HLSS30" in source_grid:
+        red_band_idx = 3 # ~665 nm
+    elif "TANAGER" in source_grid:
+        wavelengths = grp['surface_reflectance'].attrs.get('wavelengths')
+        if wavelengths is not None:
+            red_band_idx = np.argmin(np.abs(wavelengths - 660.0))
+        else:
+            red_band_idx = 75 # Fallback approx for Tanager if missing attr
+    else:
+        raise ValueError(f"Unknown source grid: {source_grid}")
+        
+    # Read the specific 2D band
+    reflectance = grp['surface_reflectance'][f_idx, red_band_idx, ...]
+    
+    return reflectance, valid_mask, rgb
 
-    return luminance, valid_mask, rgb
-
-def find_optimal_window(mask_ref, mask_mov, lum_ref, span=100):
+def find_optimal_window(mask_ref, mask_mov, ref_bnd, span=100):
     """
     Slides a window across the combined validity mask to find a 100x100 region 
     that is >=65% clear. Selects the one with the highest structural variance 
@@ -96,9 +120,9 @@ def find_optimal_window(mask_ref, mask_mov, lum_ref, span=100):
             valid_frac = np.sum(local_mask) / (span * span)
             
             if valid_frac >= 0.65:
-                local_lum = lum_ref[y0:y1, x0:x1]
-                valid_lum = local_lum[local_mask]
-                variance = np.var(valid_lum) if len(valid_lum) > 0 else 0
+                local_bnd = ref_bnd[y0:y1, x0:x1]
+                valid_bnd = local_bnd[local_mask]
+                variance = np.var(valid_bnd) if len(valid_bnd) > 0 else 0
                 
                 if valid_frac > best_valid_frac or (valid_frac == best_valid_frac and variance > best_variance):
                     best_valid_frac = valid_frac
@@ -111,15 +135,31 @@ def find_optimal_window(mask_ref, mask_mov, lum_ref, span=100):
 # 3. INTERACTIVE VIEWER & DASHBOARD CLASS
 # ==========================================
 class MultiSensorCoRegistrationViewer:
-    def __init__(self, h5_ard):
-        self.h5_ard = h5_ard
-        self.baseline_name = BASELINE_GRID
+    def __init__(self, h5_src):
+        self.h5_src = h5_src
         
-        if f'/HDFEOS/GRIDS/{self.baseline_name}' not in self.h5_ard:
-            raise ValueError(f"CRITICAL ERROR: Configured Baseline Grid '{self.baseline_name}' not found in ARD Cube.")
+        self.timeline = []
+        grids = [g for g in self.h5_src['/HDFEOS/GRIDS'].keys() if g in ['HLSL30', 'HLSS30', 'TANAGER']]
+        for grid_name in grids:
+            grp = self.h5_src[f"/HDFEOS/GRIDS/{grid_name}/Data Fields"]
+            if 'surface_reflectance' not in grp or 'ortho_visual' not in grp: continue
             
-        self.b_grp = self.h5_ard[f'/HDFEOS/GRIDS/{self.baseline_name}/Data Fields']
-        
+            times = grp['surface_reflectance'].attrs.get('acquisition_time')
+            if times is None: continue
+            
+            if isinstance(times, (float, int)): times = [times]
+                
+            for i in range(len(times)):
+                self.timeline.append({
+                    'time': times[i],
+                    'grid': grid_name,
+                    'local_idx': i,
+                })
+        self.timeline.sort(key=lambda x: x['time'])
+
+        if len(self.timeline) < 2:
+            raise ValueError("CRITICAL ERROR: Insufficient frames to run geometric co-registration.")
+
         self.comparisons = []
         self.current_idx = 0
         
@@ -135,8 +175,10 @@ class MultiSensorCoRegistrationViewer:
         self.update_display()
 
     def _setup_metrology(self):
-        geo_tf = self.b_grp['ortho_visual'].attrs['GeoTransform']
-        crs_wkt = self.b_grp['ortho_visual'].attrs['spatial_ref']
+        first_grid = self.timeline[0]['grid']
+        first_grp = self.h5_src[f'/HDFEOS/GRIDS/{first_grid}/Data Fields']
+        geo_tf = first_grp['ortho_visual'].attrs['GeoTransform']
+        crs_wkt = first_grp['ortho_visual'].attrs['spatial_ref']
         if isinstance(crs_wkt, bytes): crs_wkt = crs_wkt.decode('utf-8')
         
         self.affine = rasterio.transform.Affine.from_gdal(*geo_tf)
@@ -147,40 +189,38 @@ class MultiSensorCoRegistrationViewer:
         self.transformer_to_ll = Transformer.from_crs(crs, "EPSG:4326", always_xy=True)
 
     def _precalculate_all_transformations(self):
-        """Iterates sequentially frame-to-frame through the HARMONIZED grid."""
-        times = self.b_grp['ortho_visual'].attrs['acquisition_time']
-        num_frames = len(times)
+        """Iterates sequentially frame-to-frame through the dynamic timeline."""
+        num_frames = len(self.timeline)
         
-        print(f"Anchoring analysis sequentially (Frame to Frame) within {self.baseline_name}.")
-
-        print(f"\n{'='*40}\nProcessing Frame-to-Frame: {self.baseline_name}\n{'='*40}")
+        print(f"Anchoring analysis sequentially (Frame to Frame) through {num_frames} total frames.")
+        print(f"\n{'='*40}\nProcessing Frame-to-Frame Registration\n{'='*40}")
         
         for i in range(num_frames - 1):
-            b_idx = i
-            t_idx = i + 1
+            b_meta = self.timeline[i]
+            t_meta = self.timeline[i + 1]
             
-            b_time = times[b_idx]
-            t_time = times[t_idx]
+            t_dt = datetime.fromtimestamp(t_meta['time'], tz=timezone.utc)
             
-            t_dt = datetime.fromtimestamp(t_time, tz=timezone.utc)
-            
-            self._compute_and_store(self.b_grp, self.baseline_name, b_idx, t_idx, b_time, t_dt, f"Frame {b_idx} -> {t_idx}")
+            self._compute_and_store(i, i+1, b_meta, t_meta, t_dt, f"Frame {i} -> {i+1}")
 
-    def _compute_and_store(self, t_grp, t_grid, b_idx, t_idx, b_time, t_dt, bracket_label):
-        b_dt = datetime.fromtimestamp(b_time, tz=timezone.utc)
+    def _compute_and_store(self, b_idx, t_idx, b_meta, t_meta, t_dt, bracket_label):
+        b_dt = datetime.fromtimestamp(b_meta['time'], tz=timezone.utc)
         delta_days = (t_dt - b_dt).total_seconds() / (60*60*24)
         
-        print(f"  -> {t_grid} [{t_dt.strftime('%Y-%m-%d')}] vs Anchor [{b_dt.strftime('%Y-%m-%d')}] ({bracket_label})...")
+        print(f"  -> {t_meta['grid']} [{t_dt.strftime('%Y-%m-%d')}] vs Anchor {b_meta['grid']} [{b_dt.strftime('%Y-%m-%d')}] ({bracket_label})...")
         
-        lum_b, mask_b, rgb_b = get_luminance_and_mask(self.b_grp, b_idx)
-        lum_t, mask_t, rgb_t = get_luminance_and_mask(t_grp, t_idx)
+        b_grp = self.h5_src[f'/HDFEOS/GRIDS/{b_meta["grid"]}/Data Fields']
+        t_grp = self.h5_src[f'/HDFEOS/GRIDS/{t_meta["grid"]}/Data Fields']
         
-        t_y, t_x, valid_frac = find_optimal_window(mask_b, mask_t, lum_b, span=SPAN)
+        ref_b, mask_b, rgb_b = get_reflectance_and_mask(b_grp, b_meta['local_idx'])
+        ref_t, mask_t, rgb_t = get_reflectance_and_mask(t_grp, t_meta['local_idx'])
+        
+        t_y, t_x, valid_frac = find_optimal_window(mask_b, mask_t, ref_b, span=SPAN)
         
         if t_y is None:
             print("     [FAILED] No cloud-free 100x100 window overlap found.")
             self.comparisons.append({
-                'valid': False, 't_grid': t_grid, 't_idx': t_idx, 'b_idx': b_idx, 
+                'valid': False, 't_grid': t_meta['grid'], 't_idx': t_idx, 'b_idx': b_idx, 
                 't_dt': t_dt, 'b_dt': b_dt, 'label': bracket_label, 'delta_days': delta_days, 
                 'error_msg': 'Insufficient Cloud-Free Overlap',
                 'lat': 0, 'lon': 0, 't_x': 0, 't_y': 0
@@ -197,13 +237,13 @@ class MultiSensorCoRegistrationViewer:
         rel_center_y = t_y - y_start
         rel_center_x = t_x - x_start
 
-        local_lum_b = lum_b[y_start:y_end, x_start:x_end]
+        local_ref_b = ref_b[y_start:y_end, x_start:x_end]
         local_mask_b = mask_b[y_start:y_end, x_start:x_end]
-        local_lum_t = lum_t[y_start:y_end, x_start:x_end]
+        local_ref_t = ref_t[y_start:y_end, x_start:x_end]
         local_mask_t = mask_t[y_start:y_end, x_start:x_end]
 
         shift_vector, error, diffphase = phase_cross_correlation(
-            reference_image=local_lum_b, moving_image=local_lum_t, 
+            reference_image=local_ref_b, moving_image=local_ref_t, 
             reference_mask=local_mask_b, moving_mask=local_mask_t, upsample_factor=100
         )
         init_dy, init_dx = shift_vector
@@ -217,13 +257,13 @@ class MultiSensorCoRegistrationViewer:
             
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
-                warped_lum = warp(local_lum_t, tform.inverse, order=3, mode='constant', cval=np.nan)
+                warped_ref = warp(local_ref_t, tform.inverse, order=3, mode='constant', cval=np.nan)
                 warped_mask = warp(local_mask_t.astype(float), tform.inverse, order=0, mode='constant', cval=0.0).astype(bool)
             
-            current_overlap = local_mask_b & warped_mask & ~np.isnan(warped_lum)
-            if np.sum(current_overlap) < (0.15 * local_mask_b.size):
+            current_overlap = local_mask_b & warped_mask & ~np.isnan(warped_ref)
+            if np.sum(current_overlap) < (MIN_VALID_OVERLAP * local_mask_b.size):
                 return 1.0 
-            r, _ = pearsonr(local_lum_b[current_overlap], warped_lum[current_overlap])
+            r, _ = pearsonr(local_ref_b[current_overlap], warped_ref[current_overlap])
             return -r 
 
         initial_guess = [init_dy, init_dx, 0.0]
@@ -236,20 +276,31 @@ class MultiSensorCoRegistrationViewer:
         shift_meters_y = opt_dy * self.pixel_height
         magnitude_meters = np.sqrt(shift_meters_x**2 + shift_meters_y**2)
 
-        if magnitude_meters > 250.0:
-            print(f"     [FAILED] Offset {magnitude_meters:.1f}m > 250m physical limit. Tracking failure.")
+        if magnitude_meters > MAX_VALID_OFFSET:
+            print(f"     [FAILED] Offset {magnitude_meters:.1f}m > {MAX_VALID_OFFSET}m physical limit. Extreme Outlier.")
             self.comparisons.append({
-                'valid': False, 't_grid': t_grid, 't_idx': t_idx, 'b_idx': b_idx, 
+                'valid': False, 't_grid': t_meta['grid'], 't_idx': t_idx, 'b_idx': b_idx, 
                 't_dt': t_dt, 'b_dt': b_dt, 'label': bracket_label, 'delta_days': delta_days, 
                 'error_msg': f'Cloud lock failure (Calculated drift: {magnitude_meters:.1f}m)',
                 'lat': 0, 'lon': 0, 't_x': 0, 't_y': 0
             })
             return
 
-        print(f"     [SUCCESS] Offset={magnitude_meters:.2f}m, r={-result.fun:.3f} (Valid Overlap: {valid_frac*100:.0f}%)")
+        r_val = -result.fun
+        if r_val < 0.85:
+            print(f"     [FAILED] Correlation r={r_val:.3f} < 0.75. Weak fit, likely cloud/shadow.")
+            self.comparisons.append({
+                'valid': False, 't_grid': t_meta['grid'], 't_idx': t_idx, 'b_idx': b_idx, 
+                't_dt': t_dt, 'b_dt': b_dt, 'label': bracket_label, 'delta_days': delta_days, 
+                'error_msg': f'Weak correlation fit (r={r_val:.3f})',
+                'lat': 0, 'lon': 0, 't_x': 0, 't_y': 0
+            })
+            return
+
+        print(f"     [SUCCESS] Offset={magnitude_meters:.2f}m, r={r_val:.3f} (Valid Overlap: {valid_frac*100:.0f}%)")
 
         self.comparisons.append({
-            'valid': True, 't_grid': t_grid, 't_idx': t_idx, 'b_idx': b_idx, 
+            'valid': True, 't_grid': t_meta['grid'], 't_idx': t_idx, 'b_idx': b_idx, 
             't_dt': t_dt, 'b_dt': b_dt, 'label': bracket_label, 'delta_days': delta_days,
             't_y': t_y, 't_x': t_x, 'lat': lat, 'lon': lon, 'valid_frac': valid_frac,
             'y_start': y_start, 'y_end': y_end, 'x_start': x_start, 'x_end': x_end,
@@ -277,57 +328,100 @@ class MultiSensorCoRegistrationViewer:
         ax2.plot(frame_indices, rots, color='red', marker='o', linestyle='-', zorder=3)
         ax3.plot(frame_indices, corrs, color='green', marker='o', linestyle='-', zorder=3)
         
-        print(f"\n--- {self.baseline_name} Frame-to-Frame Averages ---")
+        print(f"\n--- Global Frame-to-Frame Averages ---")
         print(f"Valid Evaluations: {len(mags)}")
         print(f"Mean Translation:  {np.mean(mags):.2f}m")
         print(f"Mean Abs Rotation: {np.mean(rots):.3f}°")
         print(f"Mean Correlation:  {np.mean(corrs):.3f}")
 
         # Labeling and Formatting
-        ax1.set_ylabel("Offset Magnitude (Meters)", fontsize=10)
-        ax1.set_title("Frame-to-Frame Geometric Translation Drift", fontsize=10)
+        ax1.set_ylabel("Offset Magnitude (Meters)", fontsize=18)
+        ax1.set_title("Frame-to-Frame Geometric Translation Drift", fontsize=20)
         ax1.grid(True, alpha=0.3, linestyle='--')
+        ax1.tick_params(axis='both', which='major', labelsize=14)
         
         ax2.axhline(0, color='black', linewidth=1, alpha=0.5) 
-        ax2.set_ylabel("Rotation (Degrees)", fontsize=10)
-        ax2.set_title("Frame-to-Frame Rotational Misalignment", fontsize=10)
+        ax2.set_ylabel("Rotation (Degrees)", fontsize=18)
+        ax2.set_title("Frame-to-Frame Rotational Misalignment", fontsize=20)
         ax2.grid(True, alpha=0.3, linestyle='--')
+        ax2.tick_params(axis='both', which='major', labelsize=14)
 
-        ax3.set_ylabel("Pearson Correlation (r)", fontsize=10)
-        ax3.set_title("Frame-to-Frame Correlation Coefficient", fontsize=10)
-        ax3.set_xlabel("Frame Index (Target Frame)", fontsize=10)
+        ax3.set_ylabel("Pearson Correlation (r)", fontsize=18)
+        ax3.set_title("Frame-to-Frame Correlation Coefficient", fontsize=20)
+        ax3.set_xlabel("Frame Index (Target Frame)", fontsize=18)
         ax3.grid(True, alpha=0.3, linestyle='--')
+        ax3.tick_params(axis='both', which='major', labelsize=14)
         
-        self.fig_sum.suptitle(f"Sequential Frame-to-Frame Registration Analysis | Window: {SPAN}x{SPAN}px")
+        self.fig_sum.suptitle(f"Sequential Frame-to-Frame Registration Analysis | Window: {SPAN}x{SPAN}px", fontsize=24)
         self.fig_sum.tight_layout()
         
-        # --- Option B: 2D Scatter/Density Heatmap of Global Shifts ---
-        shift_x = [c['shift_m_x'] for c in valid_comps]
-        shift_y = [c['shift_m_y'] for c in valid_comps]
+        # Determine base directory and prefix from SOURCE_CUBE_PATH
+        base_dir = os.path.dirname(SOURCE_CUBE_PATH)
+        base_name = os.path.splitext(os.path.basename(SOURCE_CUBE_PATH))[0]
         
-        self.fig_heat, self.ax_heat = plt.subplots(figsize=(10, 8))
-        self.fig_heat.canvas.manager.set_window_title("2D Registration Error Heatmap")
+        fig_sum_path = os.path.join(base_dir, f"{base_name}_frame_to_frame_stability.png")
+        self.fig_sum.savefig(fig_sum_path, dpi=300)
         
-        h = self.ax_heat.hist2d(shift_x, shift_y, bins=30, cmap='inferno')
-        self.fig_heat.colorbar(h[3], ax=self.ax_heat, label='Frequency')
-        
-        self.ax_heat.set_xlabel("Shift X (Meters)")
-        self.ax_heat.set_ylabel("Shift Y (Meters)")
-        self.ax_heat.set_title(f"2D Scatter/Density Heatmap of Global Shifts: {self.baseline_name}")
-        self.ax_heat.grid(True, alpha=0.3, linestyle='--')
-        
-        stats_str = (f"Summary Statistics:\n"
-                     f"Valid Evaluations: {len(mags)}\n"
-                     f"Mean Translation: {np.mean(mags):.2f}m\n"
-                     f"Mean Abs Rotation: {np.mean(rots):.3f}°\n"
-                     f"Mean Correlation: {np.mean(corrs):.3f}")
-        
-        props = dict(boxstyle='round', facecolor='wheat', alpha=0.9)
-        self.ax_heat.text(0.05, 0.95, stats_str, transform=self.ax_heat.transAxes, fontsize=11,
-                          verticalalignment='top', bbox=props)
-                     
-        self.fig_heat.tight_layout()
-        self.fig_heat.savefig(f"registration_error_heatmap_{Location}.png", dpi=300)
+        # --- Box-and-Swarm: Cross-Sensor Geometric Registration Accuracy ---
+        def _classify_sensor(name):
+            name = str(name).upper()
+            if 'LANDSAT' in name or 'HLSL' in name:
+                return 'Landsat'
+            elif 'SENTINEL' in name or 'HLSS' in name:
+                return 'Sentinel'
+            elif 'TANAGER' in name:
+                return 'Tanager'
+            raise ValueError(f"Unrecognised spacecraft/grid name: {name}")
+
+        rows = []
+        for c in valid_comps:
+            b_meta = self.timeline[c['b_idx']]
+            t_meta = self.timeline[c['t_idx']]
+            b_sc = b_meta['grid']
+            t_sc = t_meta['grid']
+
+            pair = tuple(sorted([_classify_sensor(b_sc), _classify_sensor(t_sc)]))
+            pair_label = f"{pair[0]}-{pair[1]}"
+            rows.append({'Sensor_Pair': pair_label, 'Magnitude_Error_m': c['mag']})
+
+        df_pairs = pd.DataFrame(rows)
+
+        # Print per-pair summary statistics
+        print(f"\n--- Cross-Sensor Pair Statistics ---")
+        for pair_name, grp_df in df_pairs.groupby('Sensor_Pair'):
+            vals = grp_df['Magnitude_Error_m']
+            print(f"  {pair_name}: N={len(vals)}, "
+                  f"Mean={vals.mean():.2f}m, Median={vals.median():.2f}m, "
+                  f"Max={vals.max():.2f}m")
+
+        self.fig_box, ax_box = plt.subplots(figsize=(10, 8))
+        self.fig_box.canvas.manager.set_window_title(
+            "Cross-Sensor Geometric Registration Accuracy")
+
+        sns.stripplot(
+            data=df_pairs, x='Sensor_Pair', y='Magnitude_Error_m',
+            color='steelblue', alpha=0.6, jitter=True, size=6, ax=ax_box
+        )
+
+        # 30m GSD threshold annotation
+        ax_box.axhline(30, color='red', linestyle='--', lw=2, zorder=5)
+        ax_box.text(
+            0.98, 30, '  30m Pixel GSD Threshold',
+            transform=ax_box.get_yaxis_transform(),
+            va='bottom', ha='right', color='red',
+            fontsize=18, fontweight='bold'
+        )
+
+        ax_box.set_ylabel('Absolute Translation Error (meters)', fontsize=20)
+        ax_box.set_xlabel('Evaluated Sensor Pair', fontsize=20)
+        ax_box.set_title('Cross-Sensor Geometric Registration Accuracy',
+                         fontsize=24, fontweight='bold')
+        ax_box.grid(True, axis='y', alpha=0.3, linestyle='--')
+        ax_box.tick_params(axis='both', which='major', labelsize=16)
+
+        self.fig_box.tight_layout()
+        fig_box_path = os.path.join(base_dir, f"{base_name}_cross_sensor_registration_accuracy.png")
+        self.fig_box.savefig(fig_box_path, dpi=300)
 
     def _init_ui(self):
         self.fig, (self.ax1, self.ax2) = plt.subplots(1, 2, figsize=(15, 7))
@@ -391,23 +485,20 @@ class MultiSensorCoRegistrationViewer:
         b_idx = comp['b_idx']
         t_idx = comp['t_idx']
         
-        if 'source_spacecraft' in self.b_grp['ortho_visual'].attrs:
-            b_sc_raw = self.b_grp['ortho_visual'].attrs['source_spacecraft'][b_idx]
-            t_sc_raw = self.b_grp['ortho_visual'].attrs['source_spacecraft'][t_idx]
-            b_sc = b_sc_raw.decode('utf-8') if isinstance(b_sc_raw, bytes) else b_sc_raw
-            t_sc = t_sc_raw.decode('utf-8') if isinstance(t_sc_raw, bytes) else t_sc_raw
-        else:
-            b_sc = self.baseline_name
-            t_sc = comp['t_grid']
+        b_meta = self.timeline[b_idx]
+        t_meta = self.timeline[t_idx]
+        b_sc = b_meta['grid']
+        t_sc = t_meta['grid']
         
         status = f"Pair {self.current_idx + 1} of {len(self.comparisons)} | Target: Lat {comp.get('lat', 0):.5f}, Lon {comp.get('lon', 0):.5f}\n"
         status += f"Target Frame: {t_idx} [{t_sc}] ({t_date_str}) | Anchor Frame: {b_idx} [{b_sc}] ({b_date_str}) [{comp['label']}]"
         self.status_text.set_text(status)
 
         if comp['valid']:
-            t_grp = self.h5_ard[f'/HDFEOS/GRIDS/{comp["t_grid"]}/Data Fields']
-            _, _, rgb_b = get_luminance_and_mask(self.b_grp, comp['b_idx'])
-            _, _, rgb_t = get_luminance_and_mask(t_grp, comp['t_idx'])
+            b_grp = self.h5_src[f'/HDFEOS/GRIDS/{b_meta["grid"]}/Data Fields']
+            t_grp = self.h5_src[f'/HDFEOS/GRIDS/{t_meta["grid"]}/Data Fields']
+            _, _, rgb_b = get_reflectance_and_mask(b_grp, b_meta['local_idx'])
+            _, _, rgb_t = get_reflectance_and_mask(t_grp, t_meta['local_idx'])
             
             local_rgb_b = rgb_b[comp['y_start']:comp['y_end'], comp['x_start']:comp['x_end']]
             local_rgb_t = rgb_t[comp['y_start']:comp['y_end'], comp['x_start']:comp['x_end']]
@@ -462,15 +553,15 @@ class MultiSensorCoRegistrationViewer:
 def main():
     print("--- Initializing Baseline-Anchored Co-Registration Analytics ---")
     try:
-        h5_ard = h5py.File(ARD_CUBE_PATH, 'r')
+        h5_src = h5py.File(SOURCE_CUBE_PATH, 'r')
     except Exception as e:
-        print(f"CRITICAL ERROR: Could not open ARD Cube: {e}")
+        print(f"CRITICAL ERROR: Could not open Source Cube: {e}")
         return
         
-    viewer = MultiSensorCoRegistrationViewer(h5_ard)
+    viewer = MultiSensorCoRegistrationViewer(h5_src)
     plt.show()
     
-    h5_ard.close()
+    h5_src.close()
 
 if __name__ == "__main__":
     main()

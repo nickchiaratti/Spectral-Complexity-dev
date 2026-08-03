@@ -272,9 +272,9 @@ def plot_global_stats(target_location=None, h5_path=None, location=None):
     ax_dist_z.plot(z_grid, norm_pdf, 'k--', linewidth=2, label=r"Theoretical Normal $\mathcal{N}(0, 1)$", zorder=4)
 
     # Shaded 90% parametric interval [-1.645, +1.645]
-    ax_dist_z.axvline(-1.645, color='gray', linestyle=':', linewidth=1.5)
-    ax_dist_z.axvline(1.645, color='gray', linestyle=':', linewidth=1.5)
-    ax_dist_z.axvspan(-1.645, 1.645, color='gray', alpha=0.15, label=r"Parametric 90\% Interval ($\pm 1.645\sigma$)")
+    #ax_dist_z.axvline(-1.645, color='gray', linestyle=':', linewidth=1.5)
+    #ax_dist_z.axvline(1.645, color='gray', linestyle=':', linewidth=1.5)
+    #ax_dist_z.axvspan(-1.645, 1.645, color='gray', alpha=0.15, label=r"Parametric 90\% Interval ($\pm 1.645\sigma$)")
 
     for s_name, s_vals in sensor_z_samples.items():
         if len(s_vals) == 0: continue

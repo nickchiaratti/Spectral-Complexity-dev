@@ -158,8 +158,8 @@ def run_analysis():
         # Data Extraction: Read ONLY the specific pixel we need from disk
         pixel_mask_value = ds_mask[t, row, col]
         
-        # STRICT DATA PURITY GUARDRAIL: Only evaluate pixels where Mask == 1
-        if pixel_mask_value == 1:
+        # STRICT DATA PURITY GUARDRAIL: Only evaluate pixels where Mask == 0 (Valid)
+        if pixel_mask_value == 0:
             pixel_zscore = ds_zscore[t, row, col]
             
             # Additional safety check against algorithm-induced NaNs
