@@ -12,6 +12,8 @@ from pyproj import Transformer
 # Suppress warnings for cleaner output
 warnings.filterwarnings("ignore")
 LOCATION = 'Rochesterv2'
+BASE_TOLERANCE = 0
+FRAME_IDX_SPAN = 5
 
 # Import the core spectral complexity logic and the skeleton loader
 sys.path.append(r'F:\Resilio\IMGS 890 Research\Spectral-Complexity-dev')
@@ -42,6 +44,7 @@ def main():
     results = {}
     plotted_failures = set()
     first_failures_info = {}
+    hls_frame_counter = defaultdict(int)
     
     for t in range(ard.num_frames):
         # We process 1/10th of the entire timeline for HLS, but ALL of Tanager
@@ -49,6 +52,12 @@ def main():
         
         if sensor_grid not in sensors_to_process:
             continue
+            
+        if sensor_grid in ['HLSL30', 'HLSS30']:
+            if hls_frame_counter[sensor_grid] % FRAME_IDX_SPAN != 0:
+                hls_frame_counter[sensor_grid] += 1
+                continue
+            hls_frame_counter[sensor_grid] += 1
             
         local_idx = ard.indices[t]
         height, width = ard.height, ard.width
@@ -79,6 +88,7 @@ def main():
         total_pixels_evaluated = 0
         total_encapsulated = 0
         k_opt_freq = defaultdict(int)
+        sum_volumes_frame = np.zeros(8)
         
         stride = 1 
         
@@ -129,6 +139,7 @@ def main():
                 # Insert 0 at index 0 and 1 so that index matches k
                 # (e.g. index 4 corresponds to k=4 endmembers)
                 volumes = np.insert(volumes, 0, [0.0, 0.0])
+                sum_volumes_frame += volumes
                 
                 # We need to find the k that maximizes the volume, between k_min and k_max
                 sub_volumes = volumes[k_min : k_max + 1]
@@ -148,7 +159,7 @@ def main():
                 upper_bound = np.max(ems_opt, axis=1) # Shape: [bands]
                 
                 # Define band-specific tolerances based on atmospheric correction uncertainty
-                tolerances = np.full(bands, 0.03)
+                tolerances = np.full(bands, BASE_TOLERANCE)
                 #if bands < 8: #Landsat Case
                 #    # Approximating 2xsigma for HLS errors identified in  Claverie et al. (2025) 
                 #    tolerances[0] = 0.022 #Ultra Blue
@@ -185,7 +196,7 @@ def main():
                 
                 # Plot the first AABB failure we encounter for each sensor
                 if len(failed_pixels) > 0 and len(encapsulated_pixels) > 0 and sensor_grid not in plotted_failures:
-                    output_dir = r'F:\Resilio\IMGS 890 Research\Spectral-Complexity-dev\Harmonized_SC\encapsulation_results'
+                    output_dir = r'F:\Resilio\IMGS 890 Research\Spectral-Complexity-dev\spectral_complexity_tests\encapsulation_results'
                     os.makedirs(output_dir, exist_ok=True)
                     
                     plt.figure(figsize=(10, 6))
@@ -281,11 +292,15 @@ def main():
             results[sensor_grid] = {
                 'encapsulated_pixels': 0,
                 'total_pixels': 0,
-                'k_opt_freq': defaultdict(int)
+                'k_opt_freq': defaultdict(int),
+                'sum_volumes': np.zeros(8),
+                'total_windows': 0
             }
             
         results[sensor_grid]['encapsulated_pixels'] += total_encapsulated
         results[sensor_grid]['total_pixels'] += total_pixels_evaluated
+        results[sensor_grid]['sum_volumes'] += sum_volumes_frame
+        results[sensor_grid]['total_windows'] += (total_pixels_evaluated // 9)
         for k, v in k_opt_freq.items():
             results[sensor_grid]['k_opt_freq'][k] += v
         
@@ -297,13 +312,13 @@ def main():
     raw_h5.close()
     
     # Save the results to text to ensure they aren't lost
-    output_dir = r'F:\Resilio\IMGS 890 Research\Spectral-Complexity-dev\Harmonized_SC\encapsulation_results'
+    output_dir = r'F:\Resilio\IMGS 890 Research\Spectral-Complexity-dev\spectral_complexity_tests\encapsulation_results'
     os.makedirs(output_dir, exist_ok=True)
     
     with open(os.path.join(output_dir, 'gram_optimal_encapsulation.txt'), 'w') as f:
         f.write("Gramian Optimal k Spectral Bounds Encapsulation\n")
         f.write("Strict Masking: 9/9 valid pixels per window\n")
-        f.write("Tolerance: Band-specific (Ultra-Blue/Blue=0.015, Others=0.005)\n\n")
+        f.write(f"Tolerance: {BASE_TOLERANCE}\n\n")
         
         for sensor, data in results.items():
             tot = data['total_pixels']
@@ -348,8 +363,30 @@ def main():
                 plt.savefig(plot_path)
                 plt.close()
                 print(f"Saved k_opt distribution plot to: {plot_path}")
+
+            # Generate average volumes plot
+            total_windows = data.get('total_windows', 0)
+            if total_windows > 0:
+                avg_volumes = data['sum_volumes'] / total_windows
+                
+                plt.figure(figsize=(8, 5))
+                k_indices = np.arange(3, 8)
+                v_values = avg_volumes[3:8]
+                
+                plt.plot(k_indices, v_values, marker='o', linestyle='-', color='indigo', linewidth=2)
+                plt.title(f"{sensor} - Average Simplex Volume vs Number of Endmembers\nTotal Valid Windows: {total_windows}")
+                plt.xlabel("Number of Endmembers ($k$)")
+                plt.ylabel("Average Volume")
+                plt.xticks(k_indices)
+                plt.grid(axis='both', linestyle='--', alpha=0.7)
+                plt.tight_layout()
+                
+                vol_plot_path = os.path.join(output_dir, f"avg_volumes_{sensor}.png")
+                plt.savefig(vol_plot_path)
+                plt.close()
+                print(f"Saved average volumes plot to: {vol_plot_path}")
             
-    print("\nResults saved to:", os.path.join(output_dir, 'gram_optimal_encapsulation.txt'))
+    print("\nResults saved to:", os.path.join(output_dir, f'tolerance_{BASE_TOLERANCE}_gram_optimal_encapsulation.txt'))
 
 if __name__ == "__main__":
     main()

@@ -1,0 +1,22 @@
+Gramian Optimal k Spectral Bounds Encapsulation
+Strict Masking: 9/9 valid pixels per window
+Tolerance: 0
+
+Sensor: HLSL30
+  Total Valid Pixels Tested: 328880277
+  Encapsulated Pixels: 252485137 (76.77%)
+  k_opt Frequencies: defaultdict(<class 'int'>, {np.int64(3): 36542253})
+  First Failure Context: Date=2015-01-28, Lat=43.278294, Lon=-77.661425, Array=[237, 297], k_opt=3
+
+Sensor: HLSS30
+  Total Valid Pixels Tested: 236334375
+  Encapsulated Pixels: 159202438 (67.36%)
+  k_opt Frequencies: defaultdict(<class 'int'>, {np.int64(3): 26259375})
+  First Failure Context: Date=2016-08-22, Lat=43.337816, Lon=-77.770266, Array=[16, 3], k_opt=3
+
+Sensor: TANAGER
+  Total Valid Pixels Tested: 32673006
+  Encapsulated Pixels: 16777737 (51.35%)
+  k_opt Frequencies: defaultdict(<class 'int'>, {np.int64(3): 3630334})
+  First Failure Context: Date=2025-07-04, Lat=43.279380, Lon=-77.653296, Array=[233, 319], k_opt=3
+

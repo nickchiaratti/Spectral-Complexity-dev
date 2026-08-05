@@ -4,9 +4,11 @@ import numpy as np
 import datetime
 import math
 from tqdm import tqdm
+from sklearn.linear_model import LassoLarsIC
 import multiprocessing
 import joblib
 import contextlib
+from scipy.stats import chi2
 from joblib import Parallel, delayed
 
 @contextlib.contextmanager
@@ -28,21 +30,30 @@ def tqdm_joblib(tqdm_object):
 # ==========================================
 # 1. CONFIGURATION
 # ==========================================
+# Input/Output
 LOCATION = "Tait"
 H5_PATH = f"C:/satelliteImagery/HLST30/HLST_{LOCATION}_Harmonized_SC_EM-7_Norm-None.h5"
+TARGET_METRIC = 'sliding_volume_z_score'
 
-TARGET_METRIC = 'pixel_temporal_z_score'#'pixel_temporal_z_score'  'sliding_volume_z_score' 'temporal_z_score' 'ndvi_map'
-RMSE_MULTIPLIER = 3.0
+# Anomaly Detection Thresholds
+CHANGE_PROBABILITY = 0.99
 CONSECUTIVE_ANOMALIES = 4
-TIME_WINDOW_YEARS = 3.0
-ENABLE_ELASTIC_WINDOW = False  # Allows window to expand backwards to meet MIN_SAMPLES
-MAX_ELASTIC_WINDOW_YEARS = TIME_WINDOW_YEARS + 2.0  # Maximum span to expand backwards
+CHI2_DEGREES_OF_FREEDOM = 3
+
+# Segment Initialization & Stability Constraints
+MAX_RMSE = 1.0
+MIN_RMSE_CLAMP = 1e-5
+MIN_YEARS_FOR_INIT = 1.5
+MIN_SAMPLES = 16
 
 # Harmonic Regression Configurations
 ENABLE_CONSTANT = True
-ENABLE_LINEAR = True
+ENABLE_LINEAR = False
 ENABLE_QUADRATIC = False
-TEMPORAL_PERIODS = [0.66, 1]
+TEMPORAL_PERIODS = [0.33, 0.5, 1]
+
+# RLS Tuning
+RLS_RIDGE_PENALTY = 1e-6
 
 
 
@@ -67,8 +78,10 @@ def build_harmonic_matrix(t, temporal_periods=TEMPORAL_PERIODS,
     Constructs a Fourier basis matrix with configurable polynomial trends and temporal periods.
     """
     cols = []
+    
     if enable_const:
         cols.append(np.ones_like(t))
+    
     if enable_lin:
         cols.append(t)
     if enable_quad:
@@ -82,16 +95,20 @@ def build_harmonic_matrix(t, temporal_periods=TEMPORAL_PERIODS,
     return np.column_stack(cols) if cols else np.zeros((len(t), 0))
 
 def _process_row_chunk(chunk_args):
-    y_start, y_end, width, y_data, valid_mask, frac_years, X_full, acq_times, min_samples, time_window_years, enable_elastic, max_elastic_years, rmse_mult, consec_anom = chunk_args
+    y_start, y_end, width, y_data, valid_mask, frac_years, X_full, acq_times, min_samples, change_prob, consec_anom = chunk_args
     
     num_frames = y_data.shape[0]
     chunk_height = y_end - y_start
+    num_features = X_full.shape[1]
     
     chunk_pred = np.full((num_frames, chunk_height, width), np.nan, dtype=np.float32)
     chunk_rmse = np.full((num_frames, chunk_height, width), np.nan, dtype=np.float32)
+    chunk_coef = np.full((num_frames, chunk_height, width, num_features), np.nan, dtype=np.float32)
     chunk_flags = np.zeros((num_frames, chunk_height, width), dtype=np.uint8)
     chunk_date = np.full((chunk_height, width), np.nan, dtype=np.float64)
     chunk_count = np.zeros((chunk_height, width), dtype=np.int32)
+    
+    chi2_threshold = chi2.ppf(change_prob, df=CHI2_DEGREES_OF_FREEDOM)
     
     for y_local in range(chunk_height):
         y_global = y_start + y_local
@@ -102,90 +119,176 @@ def _process_row_chunk(chunk_args):
             if len(valid_indices) <= min_samples:
                 continue
 
-            consecutive_count = 0
-            first_valid_time = frac_years[valid_indices[0]]
-            
-            for i in range(min_samples, len(valid_indices)):
-                target_idx = valid_indices[i]
-                target_time = frac_years[target_idx]
+            i = 0
+            while i < len(valid_indices) - min_samples:
+                # 1. Initialize segment
+                segment_start_idx = i
+                train_end = segment_start_idx + min_samples
                 
-                if target_time - first_valid_time < time_window_years:
+                # 1-year constraint
+                while train_end <= len(valid_indices):
+                    time_span = frac_years[valid_indices[train_end - 1]] - frac_years[valid_indices[segment_start_idx]]
+                    if time_span >= MIN_YEARS_FOR_INIT:
+                        break
+                    train_end += 1
+                    
+                if train_end > len(valid_indices):
+                    # Could not find a 1-year window
+                    break
+                
+                active_pool = list(range(segment_start_idx, train_end))
+                min_dof = X_full.shape[1] + 1
+                absolute_min_samples = max(min_dof, min_samples)
+                
+                initialization_successful = False
+                lasso_model = LassoLarsIC(criterion='bic', fit_intercept=True)
+                
+                while len(active_pool) >= absolute_min_samples:
+                    X_train = X_full[valid_indices[active_pool], :]
+                    Y_train = y_data[valid_indices[active_pool], y_global, x]
+                    
+                    try:
+                        lasso_model.fit(X_train, Y_train)
+                        y_train_pred = lasso_model.predict(X_train)
+                        rmse = np.sqrt(np.mean((Y_train - y_train_pred)**2))
+                        rmse = max(rmse, MIN_RMSE_CLAMP)
+                    except Exception:
+                        break
+                        
+                    errors = np.abs(Y_train - y_train_pred)
+                    max_error_idx = int(np.argmax(errors))
+                    max_error = errors[max_error_idx]
+                    
+                    chi2_val_init = (max_error / rmse)**2
+                    if chi2_val_init > chi2_threshold:
+                        active_pool.pop(max_error_idx)
+                    else:
+                        initialization_successful = True
+                        break
+                
+                if not initialization_successful:
+                    i += 1
                     continue
                 
-                window_start_time = target_time - time_window_years
-                past_valid = valid_indices[:i]
-                past_times = frac_years[past_valid]
-                in_window_mask = past_times >= window_start_time
+                # Hand-off to OLS for RLS initialization
+                active_features = np.where(lasso_model.coef_ != 0)[0]
                 
-                if np.sum(in_window_mask) < min_samples:
-                    if enable_elastic:
-                        train_idx = past_valid[-min_samples:]
-                        if target_time - frac_years[train_idx[0]] > max_elastic_years:
-                            continue
-                    else:
-                        continue
-                else:
-                    train_idx = past_valid[in_window_mask]
-                
-                X_train = X_full[train_idx, :]
-                Y_train = y_data[train_idx, y_global, x]
-                
-                # Fit model on window
-                coeffs, residuals, rank, s = np.linalg.lstsq(X_train, Y_train, rcond=None)
-                
-                # Compute RMSE of the training window
-                if len(residuals) > 0:
-                    rmse = np.sqrt(residuals[0] / len(Y_train))
-                else:
-                    y_train_pred = X_train @ coeffs
-                    rmse = np.sqrt(np.mean((Y_train - y_train_pred)**2))
-                
-                rmse = max(rmse, 1e-5)
-                
-                # Predict target step
-                X_target = X_full[target_idx, :]
-                y_pred = X_target @ coeffs
-                
-                chunk_pred[target_idx, y_local, x] = y_pred
-                chunk_rmse[target_idx, y_local, x] = rmse
-                
-                # Check anomaly condition
-                actual = y_data[target_idx, y_global, x]
-                error = abs(actual - y_pred)
-                
-                is_anomaly = error > (rmse_mult * rmse)
-                if is_anomaly:
-                    chunk_flags[target_idx, y_local, x] = 1
-                    consecutive_count += 1
+                # If the constant term is enabled, force it to be active 
+                # (LASSO zeroed it out internally due to fit_intercept=True)
+                if ENABLE_CONSTANT and 0 not in active_features:
+                    active_features = np.insert(active_features, 0, 0)
                     
-                    if consecutive_count >= consec_anom:
-                        chunk_count[y_local, x] += 1
-                        # If this is the first confirmed structural change, record the date
-                        if np.isnan(chunk_date[y_local, x]):
-                            first_anomaly_idx = valid_indices[i - consec_anom + 1]
-                            chunk_date[y_local, x] = acq_times[first_anomaly_idx]
+                if len(active_features) == 0:
+                    active_features = np.array([0]) 
+                    
+                X_train_active = X_full[valid_indices[active_pool]][:, active_features]
+                Y_train_active = y_data[valid_indices[active_pool], y_global, x]
+                
+                # Initialize RLS State
+                try:
+                    P = np.linalg.inv(X_train_active.T @ X_train_active + np.eye(len(active_features)) * RLS_RIDGE_PENALTY)
+                    theta = P @ X_train_active.T @ Y_train_active
+                except np.linalg.LinAlgError:
+                    i += 1
+                    continue
+                
+                Y_pred_init = X_train_active @ theta
+                SSE = np.sum((Y_train_active - Y_pred_init)**2)
+                dof = len(active_features)
+                n_points = len(active_pool)
+                rmse = np.sqrt(SSE / max(1, n_points - dof))
+                rmse = max(rmse, MIN_RMSE_CLAMP)
+                
+                # CCDC Transient Event Rejection: If the initialization window is 
+                # highly volatile (e.g. caught in a transition), reject it and slide forward.
+                if rmse > MAX_RMSE:
+                    i += 1
+                    continue
+                    
+                # Backfill predictions for the initialization window
+                for global_idx in valid_indices[segment_start_idx:train_end]:
+                    x_target = X_full[global_idx, active_features]
+                    chunk_pred[global_idx, y_local, x] = np.dot(x_target, theta)
+                    chunk_rmse[global_idx, y_local, x] = rmse
+                    # Note: chunk_coef is preallocated with NaNs or 0s, active features updated
+                    chunk_coef[global_idx, y_local, x, active_features] = theta
+                
+                consecutive_count = 0
+                break_detected = False
+                
+                # 2. Forward Expanding Phase
+                for j in range(train_end, len(valid_indices)):
+                    target_idx = valid_indices[j]
+                    
+                    x_target = X_full[target_idx, active_features]
+                    y_pred = np.dot(x_target, theta)
+                    
+                    actual = y_data[target_idx, y_global, x]
+                    error = abs(actual - y_pred)
+                    
+                    chunk_pred[target_idx, y_local, x] = y_pred
+                    # Keep RMSE frozen from initialization for stable break detection
+                    chunk_rmse[target_idx, y_local, x] = rmse
+                    chunk_coef[target_idx, y_local, x, active_features] = theta
+                    
+                    chi2_val = (error / rmse)**2
+                    is_anomaly = chi2_val > chi2_threshold
+                    
+                    if is_anomaly:
+                        chunk_flags[target_idx, y_local, x] = 1
+                        consecutive_count += 1
+                        
+                        if consecutive_count >= consec_anom:
+                            chunk_count[y_local, x] += 1
+                            if np.isnan(chunk_date[y_local, x]):
+                                first_anomaly_idx = valid_indices[j - consec_anom + 1]
+                                chunk_date[y_local, x] = acq_times[first_anomaly_idx]
+                                
+                            # Break detected: end segment and prepare to start new one
+                            break_detected = True
+                            break
+                    else:
+                        consecutive_count = 0
+                        # RLS Update Step
+                        x_target_2d = x_target.reshape(-1, 1) # column vector
+                        Px = P @ x_target_2d
+                        denom = 1.0 + (x_target_2d.T @ Px)[0, 0]
+                        K = Px / denom
+                        
+                        e = actual - y_pred
+                        
+                        theta = theta + (K.flatten() * e)
+                        P = P - (K @ (x_target_2d.T @ P))
+                        # Update SSE and mathematically track RMSE, but DO NOT use it 
+                        # to overwrite the frozen `chunk_rmse` for the anomaly threshold.
+                        SSE = SSE + (e**2) / denom
+                        n_points += 1
+                        new_rmse = np.sqrt(SSE / max(1, n_points - dof))
+                
+                if break_detected:
+                    # Re-initialize after the break, starting from the first anomaly
+                    i = j - consec_anom + 1
                 else:
-                    consecutive_count = 0
+                    # Reached end of time series
+                    break
 
-    return y_start, y_end, chunk_pred, chunk_rmse, chunk_flags, chunk_date, chunk_count
+    return y_start, y_end, chunk_pred, chunk_rmse, chunk_coef, chunk_flags, chunk_date, chunk_count
 
 def main(enable_const=ENABLE_CONSTANT, 
          enable_lin=ENABLE_LINEAR, 
          enable_quad=ENABLE_QUADRATIC, 
          temporal_periods=None,
-         enable_elastic_window=ENABLE_ELASTIC_WINDOW,
          target_metric=TARGET_METRIC,
          launch_vis=True):
     if temporal_periods is None:
         temporal_periods = TEMPORAL_PERIODS
         
-    _num_trend_terms = sum([enable_const, enable_lin, enable_quad])
-    min_samples = _num_trend_terms + len(temporal_periods) * 2 + 3
+    # Enforce global hyperparameter instead of dynamic CCDC equation
+    min_samples = MIN_SAMPLES
     
     _term_str = f"C{int(enable_const)}L{int(enable_lin)}Q{int(enable_quad)}"
     _period_str = f"P{len(temporal_periods)}"
-    _elastic_str = f"E{int(enable_elastic_window)}"
-    output_h5 = f"C:/satelliteImagery/HLST30/CCD/{LOCATION}_CCD_Harmonized_Change_Detection_{target_metric}_{_term_str}_{_period_str}_{_elastic_str}.h5"
+    output_h5 = f"C:/satelliteImagery/HLST30/CCD/{LOCATION}_CCD_Harmonized_Change_Detection_{target_metric}_{_term_str}_{_period_str}.h5"
 
     print(f"Loading data from {H5_PATH}...")
     with h5py.File(H5_PATH, 'r') as f:
@@ -221,12 +324,16 @@ def main(enable_const=ENABLE_CONSTANT,
     
     predicted_series = np.full((num_frames, height, width), np.nan, dtype=np.float32)
     rmse_series = np.full((num_frames, height, width), np.nan, dtype=np.float32)
+    
     anomaly_flags = np.zeros((num_frames, height, width), dtype=np.uint8)
 
     X_full = build_harmonic_matrix(frac_years, temporal_periods=temporal_periods,
                                    enable_const=enable_const, enable_lin=enable_lin, enable_quad=enable_quad)
+                                   
+    num_features = X_full.shape[1]
+    coef_series = np.full((num_frames, height, width, num_features), np.nan, dtype=np.float32)
 
-    print("\nExecuting Sliding Window OLS Harmonic Regression...")
+    print("\nExecuting Sliding Window LASSO Harmonic Regression...")
     
     n_jobs = multiprocessing.cpu_count()
     print(f"Using {n_jobs} cores for parallel processing.")
@@ -242,9 +349,7 @@ def main(enable_const=ENABLE_CONSTANT,
             y_start, y_end, width, 
             y_data, valid_mask, 
             frac_years, X_full, acq_times, 
-            min_samples, TIME_WINDOW_YEARS, 
-            enable_elastic_window, MAX_ELASTIC_WINDOW_YEARS, 
-            RMSE_MULTIPLIER, CONSECUTIVE_ANOMALIES
+            min_samples, CHANGE_PROBABILITY, CONSECUTIVE_ANOMALIES
         )
         chunks.append(chunk_args)
         
@@ -253,9 +358,10 @@ def main(enable_const=ENABLE_CONSTANT,
             delayed(_process_row_chunk)(chunk) for chunk in chunks
         )
     
-    for y_start, y_end, c_pred, c_rmse, c_flags, c_date, c_count in results:
+    for y_start, y_end, c_pred, c_rmse, c_coef, c_flags, c_date, c_count in results:
         predicted_series[:, y_start:y_end, :] = c_pred
         rmse_series[:, y_start:y_end, :] = c_rmse
+        coef_series[:, y_start:y_end, :, :] = c_coef
         anomaly_flags[:, y_start:y_end, :] = c_flags
         change_date_map[y_start:y_end, :] = c_date
         change_count_map[y_start:y_end, :] = c_count
@@ -265,11 +371,12 @@ def main(enable_const=ENABLE_CONSTANT,
     with h5py.File(output_h5, 'w') as out_file:
         out_file.attrs['spatial_ref'] = spatial_ref
         out_file.attrs['GeoTransform'] = geo_transform
-        out_file.attrs['RMSE_MULTIPLIER'] = RMSE_MULTIPLIER
+        out_file.attrs['CHANGE_PROBABILITY'] = CHANGE_PROBABILITY
         out_file.attrs['CONSECUTIVE_ANOMALIES'] = CONSECUTIVE_ANOMALIES
-        out_file.attrs['TIME_WINDOW_YEARS'] = TIME_WINDOW_YEARS
-        out_file.attrs['ENABLE_ELASTIC_WINDOW'] = enable_elastic_window
-        out_file.attrs['MAX_ELASTIC_WINDOW_YEARS'] = MAX_ELASTIC_WINDOW_YEARS
+        out_file.attrs['CHI2_DEGREES_OF_FREEDOM'] = CHI2_DEGREES_OF_FREEDOM
+        out_file.attrs['MAX_RMSE'] = MAX_RMSE
+        out_file.attrs['MIN_RMSE_CLAMP'] = MIN_RMSE_CLAMP
+        out_file.attrs['MIN_YEARS_FOR_INIT'] = MIN_YEARS_FOR_INIT
         out_file.attrs['MIN_SAMPLES'] = min_samples
         out_file.attrs['TEMPORAL_PERIODS'] = temporal_periods
         out_file.attrs['ENABLE_CONSTANT'] = enable_const
@@ -280,6 +387,7 @@ def main(enable_const=ENABLE_CONSTANT,
         
         out_file.create_dataset('predicted_series', data=predicted_series, compression='gzip')
         out_file.create_dataset('rmse_series', data=rmse_series, compression='gzip')
+        out_file.create_dataset('coef_series', data=coef_series, compression='gzip')
         out_file.create_dataset('anomaly_flags', data=anomaly_flags, compression='gzip')
         out_file.create_dataset('change_date_timestamp', data=change_date_map, compression='gzip')
         out_file.create_dataset('change_count', data=change_count_map, compression='gzip')

@@ -8,15 +8,11 @@ import matplotlib.patches as patches
 import scienceplots
 plt.style.use(['science','no-latex'])
 
-from harmonized_CCD_main import LOCATION, H5_PATH, ENABLE_CONSTANT, ENABLE_LINEAR, ENABLE_QUADRATIC, TEMPORAL_PERIODS
-_term_str = f"C{int(ENABLE_CONSTANT)}L{int(ENABLE_LINEAR)}Q{int(ENABLE_QUADRATIC)}"
-_period_str = f"P{len(TEMPORAL_PERIODS)}"
-CONFIG = f"{_term_str}_{_period_str}"
-
+from lcmap_pyccd_main import LOCATION, H5_PATH, TARGET_METRIC
 import glob
 
-def get_inference_h5(location, config):
-    search_pattern = f"C:/satelliteImagery/HLST30/CCD/{location}_CCD_Harmonized_Change_Detection_*{config}.h5"
+def get_inference_h5(location):
+    search_pattern = f"C:/satelliteImagery/HLST30/CCD/{location}_CCD_lcmap_pyccd_Change_Detection_{TARGET_METRIC}.h5"
     files = glob.glob(search_pattern)
     if not files:
         return None
@@ -27,7 +23,7 @@ def get_inference_h5(location, config):
 def plot_pixel_sits(pixel_y, pixel_x, source_h5_path, inference_results_h5, ax=None, current_date=None):
     lat, lon = None, None
     with h5py.File(inference_results_h5, 'r') as f:
-        target_metric = f.attrs.get('TARGET_METRIC', 'sliding_volume_z_score')
+        target_metric = f.attrs.get('TARGET_METRIC', TARGET_METRIC)
 
     with h5py.File(source_h5_path, 'r') as f:
         harm_grp = f['/HDFEOS/GRIDS/HARMONIZED/Data Fields']
@@ -65,28 +61,7 @@ def plot_pixel_sits(pixel_y, pixel_x, source_h5_path, inference_results_h5, ax=N
         predicted = f['predicted_series'][:, pixel_y, pixel_x]
         rmse = f['rmse_series'][:, pixel_y, pixel_x]
         anomalies = f['anomaly_flags'][:, pixel_y, pixel_x]
-        if 'CHANGE_PROBABILITY' in f.attrs:
-            from scipy.stats import chi2
-            p = f.attrs['CHANGE_PROBABILITY']
-            
-            # Read degrees of freedom from attributes, or default to 1 for backwards compatibility with older runs
-            df = f.attrs.get('CHI2_DEGREES_OF_FREEDOM', 1)
-            
-            # For older runs where it wasn't saved, try to import from main script if available
-            if 'CHI2_DEGREES_OF_FREEDOM' not in f.attrs:
-                import sys, os
-                try:
-                    sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-                    import harmonized_CCD_main
-                    df = harmonized_CCD_main.CHI2_DEGREES_OF_FREEDOM
-                except Exception:
-                    pass
-
-            rmse_multiplier = np.sqrt(chi2.ppf(p, df=df))
-            bound_label = f"Prediction ±{rmse_multiplier:.2f}σ (p={p}, df={df})"
-        else:
-            rmse_multiplier = f.attrs.get('RMSE_MULTIPLIER', 3.0)
-            bound_label = f"Prediction ±{rmse_multiplier}σ"
+        rmse_multiplier = f.attrs.get('RMSE_MULTIPLIER', 1.0)
     
     if ax is None:
         fig, ax = plt.subplots(figsize=(12, 6))
@@ -99,17 +74,12 @@ def plot_pixel_sits(pixel_y, pixel_x, source_h5_path, inference_results_h5, ax=N
     spacecrafts_arr = np.array(spacecrafts)
     
     # Plot Actuals
-    is_anomaly = (anomalies == 1)
     for marker_type, sc_keyword in [('s', 'Sentinel'), ('o', 'Landsat'), ('D', 'Tanager')]:
         sc_mask = np.array([sc_keyword.lower() in str(sc).lower() for sc in spacecrafts_arr])
         
-        idx_valid_normal = valid_mask & sc_mask & ~is_anomaly
-        if np.any(idx_valid_normal):
-            ax.plot(dates_arr[idx_valid_normal], z_score[idx_valid_normal], color='k', marker=marker_type, linestyle='None', label=f'Valid ({sc_keyword})')
-            
-        idx_valid_anomaly = valid_mask & sc_mask & is_anomaly
-        if np.any(idx_valid_anomaly):
-            ax.plot(dates_arr[idx_valid_anomaly], z_score[idx_valid_anomaly], color='r', marker=marker_type, linestyle='None', label=f'Anomaly ({sc_keyword})')
+        idx_valid = valid_mask & sc_mask
+        if np.any(idx_valid):
+            ax.plot(dates_arr[idx_valid], z_score[idx_valid], color='k', marker=marker_type, linestyle='None', label=f'Valid ({sc_keyword})')
             
         idx_invalid = is_invalid & sc_mask
         if np.any(idx_invalid):
@@ -122,32 +92,17 @@ def plot_pixel_sits(pixel_y, pixel_x, source_h5_path, inference_results_h5, ax=N
         preds = predicted[pred_mask]
         rmses = rmse[pred_mask]
         
-        # Detect segments based on changes in the frozen RMSE
-        rmse_diff = np.diff(rmses)
-        # Add 1 because diff shifts indices by 1
-        break_indices = np.where(rmse_diff != 0)[0] + 1
+        upper_bound = preds + rmse_multiplier * rmses
+        lower_bound = preds - rmse_multiplier * rmses
         
-        date_segments = np.split(pred_dates, break_indices)
-        pred_segments = np.split(preds, break_indices)
-        rmse_segments = np.split(rmses, break_indices)
+        ax.plot(pred_dates, preds, 'b--', label='Harmonic Prediction (lcmap-pyccd)')
+        ax.fill_between(pred_dates, lower_bound, upper_bound, color='blue', alpha=0.15, label=f'Prediction ±{rmse_multiplier}σ (RMSE)')
         
-        segment_colors = ['blue', 'green', 'purple', 'orange', 'cyan', 'magenta', 'brown']
-        
-        for i, (seg_dates, seg_preds, seg_rmses) in enumerate(zip(date_segments, pred_segments, rmse_segments)):
-            if len(seg_dates) == 0:
-                continue
-                
-            c = segment_colors[i % len(segment_colors)]
-            upper_bound = seg_preds + rmse_multiplier * seg_rmses
-            lower_bound = seg_preds - rmse_multiplier * seg_rmses
-            
-            label = 'Harmonic Prediction' if i == 0 else f'Prediction (Seg {i+1})'
-            ax.plot(seg_dates, seg_preds, color=c, linestyle='--', label=label)
-            
-            fill_label = bound_label if i == 0 else None
-            ax.fill_between(seg_dates, lower_bound, upper_bound, color=c, alpha=0.15, label=fill_label)
-        
-        # Anomalies are now plotted with their respective sensor markers in red above.
+        anom_mask = anomalies[pred_mask] == 1
+        if np.any(anom_mask):
+            anom_dates = pred_dates[anom_mask]
+            anom_vals = z_score[pred_mask][anom_mask]
+            ax.plot(anom_dates, anom_vals, 'rx', markersize=10, mew=2, label='Break Detected')
             
     if current_date is not None:
         ax.axvline(x=current_date, color='orange', linestyle='--', label='Displayed Frame')
@@ -167,7 +122,7 @@ def plot_pixel_sits(pixel_y, pixel_x, source_h5_path, inference_results_h5, ax=N
 
 def plot_spatial_anomaly_overlay(source_h5_path, inference_results_h5):
     with h5py.File(inference_results_h5, 'r') as f:
-        target_metric = f.attrs.get('TARGET_METRIC', 'sliding_volume_z_score')
+        target_metric = f.attrs.get('TARGET_METRIC', TARGET_METRIC)
 
     with h5py.File(source_h5_path, 'r') as f:
         harm_grp = f['/HDFEOS/GRIDS/HARMONIZED/Data Fields']
@@ -218,9 +173,9 @@ def plot_spatial_anomaly_overlay(source_h5_path, inference_results_h5):
     ax_img.imshow(gray)
     
     if not np.all(np.isnan(anomaly_map)):
-        from matplotlib.cm import gist_rainbow
+        from matplotlib.cm import viridis
         masked_anom = np.ma.masked_invalid(anomaly_map)
-        cmap = gist_rainbow
+        cmap = viridis
         cmap.set_bad(color='white', alpha=0)
         im = ax_img.imshow(masked_anom, cmap=cmap, alpha=0.7)
         cbar = plt.colorbar(im, ax=ax_img)
@@ -262,16 +217,16 @@ def plot_spatial_anomaly_overlay(source_h5_path, inference_results_h5):
         ax_img.set_title(f"{current_sg} Acquisition: {current_date.strftime('%Y-%m-%d %H:%M:%S')} UTC")
         ax_ts.clear()
         plot_pixel_sits(y, x, source_h5_path, inference_results_h5, ax=ax_ts, current_date=current_date)
-        #ax_ts.set_ylim([-4, 4])
+        ax_ts.set_ylim([-4, 4])
         fig.canvas.draw()
 
     fig.canvas.mpl_connect('button_press_event', onclick)
     plt.show()
 
 if __name__ == "__main__":
-    inference_h5 = get_inference_h5(LOCATION, CONFIG)
+    inference_h5 = get_inference_h5(LOCATION)
     if inference_h5 and os.path.exists(inference_h5):
         print(f"Loading latest inference results: {inference_h5}")
         plot_spatial_anomaly_overlay(H5_PATH, inference_h5)
     else:
-        print("Run harmonized_CCD_main.py first to create output h5")
+        print("Run lcmap_pyccd_main.py first to create output h5")
