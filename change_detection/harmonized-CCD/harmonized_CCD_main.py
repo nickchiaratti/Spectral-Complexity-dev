@@ -31,7 +31,7 @@ def tqdm_joblib(tqdm_object):
 # 1. CONFIGURATION
 # ==========================================
 # Input/Output
-LOCATION = "Tait"
+LOCATION = "Rochesterv2"
 H5_PATH = f"C:/satelliteImagery/HLST30/HLST_{LOCATION}_Harmonized_SC_EM-7_Norm-None.h5"
 TARGET_METRIC = 'sliding_volume_z_score'
 
@@ -54,6 +54,7 @@ TEMPORAL_PERIODS = [0.33, 0.5, 1]
 
 # RLS Tuning
 RLS_RIDGE_PENALTY = 1e-6
+RLS_FORGETTING_FACTOR = 0.999
 
 
 
@@ -95,9 +96,9 @@ def build_harmonic_matrix(t, temporal_periods=TEMPORAL_PERIODS,
     return np.column_stack(cols) if cols else np.zeros((len(t), 0))
 
 def _process_row_chunk(chunk_args):
-    y_start, y_end, width, y_data, valid_mask, frac_years, X_full, acq_times, min_samples, change_prob, consec_anom = chunk_args
+    y_start, y_end, width, y_data_chunk, valid_mask_chunk, frac_years, X_full, acq_times, min_samples, change_prob, consec_anom = chunk_args
     
-    num_frames = y_data.shape[0]
+    num_frames = y_data_chunk.shape[0]
     chunk_height = y_end - y_start
     num_features = X_full.shape[1]
     
@@ -113,7 +114,7 @@ def _process_row_chunk(chunk_args):
     for y_local in range(chunk_height):
         y_global = y_start + y_local
         for x in range(width):
-            pixel_valid = valid_mask[:, y_global, x]
+            pixel_valid = valid_mask_chunk[:, y_local, x]
             valid_indices = np.where(pixel_valid)[0]
             
             if len(valid_indices) <= min_samples:
@@ -145,7 +146,7 @@ def _process_row_chunk(chunk_args):
                 
                 while len(active_pool) >= absolute_min_samples:
                     X_train = X_full[valid_indices[active_pool], :]
-                    Y_train = y_data[valid_indices[active_pool], y_global, x]
+                    Y_train = y_data_chunk[valid_indices[active_pool], y_local, x]
                     
                     try:
                         lasso_model.fit(X_train, Y_train)
@@ -182,17 +183,28 @@ def _process_row_chunk(chunk_args):
                     active_features = np.array([0]) 
                     
                 X_train_active = X_full[valid_indices[active_pool]][:, active_features]
-                Y_train_active = y_data[valid_indices[active_pool], y_global, x]
+                Y_train_active = y_data_chunk[valid_indices[active_pool], y_local, x]
                 
-                # Initialize RLS State
+                # Initialize Full RLS State (track all terms)
+                X_train_all = X_full[valid_indices[active_pool]]
+                num_total_features = X_train_all.shape[1]
+                
                 try:
-                    P = np.linalg.inv(X_train_active.T @ X_train_active + np.eye(len(active_features)) * RLS_RIDGE_PENALTY)
-                    theta = P @ X_train_active.T @ Y_train_active
+                    # OLS only on active features to prevent overfitting on initialization
+                    P_active = np.linalg.inv(X_train_active.T @ X_train_active + np.eye(len(active_features)) * RLS_RIDGE_PENALTY)
+                    theta_active = P_active @ X_train_active.T @ Y_train_active
+                    
+                    # Map to full theta vector (inactive terms start at 0)
+                    theta = np.zeros(num_total_features)
+                    theta[active_features] = theta_active
+                    
+                    # Initialize P matrix on all features so RLS can adapt them later
+                    P = np.linalg.inv(X_train_all.T @ X_train_all + np.eye(num_total_features) * RLS_RIDGE_PENALTY)
                 except np.linalg.LinAlgError:
                     i += 1
                     continue
                 
-                Y_pred_init = X_train_active @ theta
+                Y_pred_init = X_train_all @ theta
                 SSE = np.sum((Y_train_active - Y_pred_init)**2)
                 dof = len(active_features)
                 n_points = len(active_pool)
@@ -207,11 +219,10 @@ def _process_row_chunk(chunk_args):
                     
                 # Backfill predictions for the initialization window
                 for global_idx in valid_indices[segment_start_idx:train_end]:
-                    x_target = X_full[global_idx, active_features]
+                    x_target = X_full[global_idx, :]
                     chunk_pred[global_idx, y_local, x] = np.dot(x_target, theta)
                     chunk_rmse[global_idx, y_local, x] = rmse
-                    # Note: chunk_coef is preallocated with NaNs or 0s, active features updated
-                    chunk_coef[global_idx, y_local, x, active_features] = theta
+                    chunk_coef[global_idx, y_local, x, :] = theta
                 
                 consecutive_count = 0
                 break_detected = False
@@ -220,16 +231,16 @@ def _process_row_chunk(chunk_args):
                 for j in range(train_end, len(valid_indices)):
                     target_idx = valid_indices[j]
                     
-                    x_target = X_full[target_idx, active_features]
+                    x_target = X_full[target_idx, :]
                     y_pred = np.dot(x_target, theta)
                     
-                    actual = y_data[target_idx, y_global, x]
+                    actual = y_data_chunk[target_idx, y_local, x]
                     error = abs(actual - y_pred)
                     
                     chunk_pred[target_idx, y_local, x] = y_pred
                     # Keep RMSE frozen from initialization for stable break detection
                     chunk_rmse[target_idx, y_local, x] = rmse
-                    chunk_coef[target_idx, y_local, x, active_features] = theta
+                    chunk_coef[target_idx, y_local, x, :] = theta
                     
                     chi2_val = (error / rmse)**2
                     is_anomaly = chi2_val > chi2_threshold
@@ -252,13 +263,13 @@ def _process_row_chunk(chunk_args):
                         # RLS Update Step
                         x_target_2d = x_target.reshape(-1, 1) # column vector
                         Px = P @ x_target_2d
-                        denom = 1.0 + (x_target_2d.T @ Px)[0, 0]
+                        denom = RLS_FORGETTING_FACTOR + (x_target_2d.T @ Px)[0, 0]
                         K = Px / denom
                         
                         e = actual - y_pred
                         
                         theta = theta + (K.flatten() * e)
-                        P = P - (K @ (x_target_2d.T @ P))
+                        P = (P - (K @ (x_target_2d.T @ P))) / RLS_FORGETTING_FACTOR
                         # Update SSE and mathematically track RMSE, but DO NOT use it 
                         # to overwrite the frozen `chunk_rmse` for the anomaly threshold.
                         SSE = SSE + (e**2) / denom
@@ -335,26 +346,26 @@ def main(enable_const=ENABLE_CONSTANT,
 
     print("\nExecuting Sliding Window LASSO Harmonic Regression...")
     
-    n_jobs = multiprocessing.cpu_count()
+    n_jobs = min(8, multiprocessing.cpu_count())
     print(f"Using {n_jobs} cores for parallel processing.")
     
-    # Divide the workload into roughly n_jobs * 4 chunks for load balancing
-    num_chunks = max(1, n_jobs * 4) 
-    chunk_size = max(1, math.ceil(height / num_chunks))
+    # Restrict chunk size to minimize per-worker memory allocation (ArrayMemoryError fix)
+    chunk_size = 4
+    num_chunks = max(1, math.ceil(height / chunk_size))
     
     chunks = []
     for y_start in range(0, height, chunk_size):
         y_end = min(y_start + chunk_size, height)
         chunk_args = (
             y_start, y_end, width, 
-            y_data, valid_mask, 
+            y_data[:, y_start:y_end, :], valid_mask[:, y_start:y_end, :], 
             frac_years, X_full, acq_times, 
             min_samples, CHANGE_PROBABILITY, CONSECUTIVE_ANOMALIES
         )
         chunks.append(chunk_args)
         
     with tqdm_joblib(tqdm(desc="Processing row chunks", total=len(chunks))):
-        results = Parallel(n_jobs=n_jobs, backend='loky')(
+        results = Parallel(n_jobs=n_jobs, backend='loky', return_as='generator')(
             delayed(_process_row_chunk)(chunk) for chunk in chunks
         )
     
