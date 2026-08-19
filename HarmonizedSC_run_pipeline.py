@@ -55,6 +55,12 @@ def main():
                         help='Do not skip the interactive mgrs_view step')
     parser.add_argument('--show-spec-viewer', action='store_true',
                         help='Do not skip the interactive SpecComplex viewer step')
+    parser.add_argument('--skip-earthaccess', action='store_true',
+                        help='Skip HLS30_earthAccess_to_hdf5 download step')
+    parser.add_argument('--skip-constellation', action='store_true',
+                        help='Skip HLST_constellation_to_hdf5 harmonization step')
+    parser.add_argument('--skip-ingest', action='store_true',
+                        help='Skip both HLS30_earthAccess_to_hdf5 and HLST_constellation_to_hdf5 steps')
     parser.add_argument('--tile-size', type=int, default=3,
                         help='Tile size for spatial sliding window calculation')
     parser.add_argument('--num-endmembers', type=int, default=7,
@@ -95,6 +101,14 @@ def main():
                 print("Please interact with the browser window, then click 'Close App & Continue Pipeline' to proceed.")
                 subprocess.run([sys.executable, "-m", "streamlit", "run", script_path], check=True)
                 continue
+        elif name == "HLS30_earthAccess_to_hdf5":
+            if args.skip_earthaccess or args.skip_ingest:
+                print("Skipping HLS30_earthAccess_to_hdf5 as requested.")
+                continue
+        elif name == "HLST_constellation_to_hdf5":
+            if args.skip_constellation or args.skip_ingest:
+                print("Skipping HLST_constellation_to_hdf5 as requested.")
+                continue
         elif name == "HLST_SC_calculations":
             func(target_location=target_location, tile_size=args.tile_size, num_endmembers=args.num_endmembers, norm_param=args.norm_param)
             continue
@@ -104,9 +118,11 @@ def main():
             func(h5_path=file_path)
             continue
         elif name == "plot_sliding_volume_global_stats":
-            print(f"Plotting sliding volume global stats for {location_name}...")
             file_path = f"{SATELLITE_DATA_DIR}/HLST_{location_name}_Harmonized_SC_EM-{args.num_endmembers}_Norm-{args.norm_param}.h5"
-            func(h5_path=file_path)
+            print(f"Plotting sliding volume global stats (zscore) for {location_name}...")
+            func(h5_path=file_path, metric='zscore')
+            print(f"Plotting sliding volume global stats (robust) for {location_name}...")
+            func(h5_path=file_path, metric='robust')
             continue
         elif name == "HLST_specComplex_viewer":
             if not args.show_spec_viewer:

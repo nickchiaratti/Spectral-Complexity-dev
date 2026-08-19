@@ -8,15 +8,15 @@ import matplotlib.patches as patches
 import scienceplots
 plt.style.use(['science','no-latex'])
 
-from harmonized_CCD_main import LOCATION, H5_PATH, ENABLE_CONSTANT, ENABLE_LINEAR, ENABLE_QUADRATIC, TEMPORAL_PERIODS
+from harmonized_CCD_main import LOCATION, H5_PATH, ENABLE_CONSTANT, ENABLE_LINEAR, ENABLE_QUADRATIC, TEMPORAL_PERIODS, TARGET_METRIC, TARGET_NAME
 _term_str = f"C{int(ENABLE_CONSTANT)}L{int(ENABLE_LINEAR)}Q{int(ENABLE_QUADRATIC)}"
 _period_str = f"P{len(TEMPORAL_PERIODS)}"
 CONFIG = f"{_term_str}_{_period_str}"
 
 import glob
 
-def get_inference_h5(location, config):
-    search_pattern = f"C:/satelliteImagery/HLST30/CCD/{location}_CCD_Harmonized_Change_Detection_*{config}.h5"
+def get_inference_h5(location, config, target_metric):
+    search_pattern = f"C:/satelliteImagery/HLST30/CCD/{location}_CCD_Harmonized_Change_Detection_{target_metric}_{config}.h5"
     files = glob.glob(search_pattern)
     if not files:
         return None
@@ -159,7 +159,7 @@ def plot_pixel_sits(pixel_y, pixel_x, source_h5_path, inference_results_h5, ax=N
     ax.set_xlabel('Date')
     import matplotlib.dates as mdates
     ax.xaxis.set_major_locator(mdates.YearLocator())
-    ax.set_ylabel('Spectral Complexity (Z-Score)')
+    ax.set_ylabel(TARGET_NAME)
     ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left', borderaxespad=0.)
     ax.grid(True)
     if show_plot:
@@ -269,7 +269,7 @@ def plot_spatial_anomaly_overlay(source_h5_path, inference_results_h5):
     plt.show()
 
 if __name__ == "__main__":
-    inference_h5 = get_inference_h5(LOCATION, CONFIG)
+    inference_h5 = get_inference_h5(LOCATION, CONFIG, TARGET_METRIC)
     if inference_h5 and os.path.exists(inference_h5):
         print(f"Loading latest inference results: {inference_h5}")
         plot_spatial_anomaly_overlay(H5_PATH, inference_h5)

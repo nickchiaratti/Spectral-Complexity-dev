@@ -1,6 +1,7 @@
 import numpy as np
 import warnings
 from scipy import ndimage
+from sklearn.preprocessing import PowerTransformer, RobustScaler
 
 def get_landsat_mask(data_grp, f_idx, shape, 
                      sun_elevation_threshold=30, 
@@ -590,13 +591,14 @@ def calculate_global_z_score(volume_array, valid_pixel_mask):
     # Intersect with radiometrically valid pixels for the statistical background model
     stats_mask = global_valid_mask & valid_pixel_mask
     
-    # Graceful fallback per user directive: Return NaNs for entire frame if no valid background exists.
-    if not np.any(stats_mask):
-        warnings.warn("calculate_global_z_score warning: No radiometrically valid pixels with volume > 0 found. Returning NaNs.")
-        return z_scores, np.nan, np.nan
-        
     # Extract subset volumes strictly for statistical estimation
     stats_vols = volume_array[stats_mask]
+
+    # Graceful fallback per user directive: Return NaNs for entire frame if no valid background exists.
+    if len(stats_vols) < 9 or len(np.unique(stats_vols)) <= 1:
+        warnings.warn("calculate_global_z_score warning: Insufficient valid pixels (< 9) or zero variance found. Returning NaNs.")
+        return z_scores, np.nan, np.nan
+        
     log_stats_vols = np.log(stats_vols)
     
     # Calculate global scene statistics (using ddof=1 for unbiased sample estimator)
@@ -615,6 +617,62 @@ def calculate_global_z_score(volume_array, valid_pixel_mask):
     z_scores[global_valid_mask] = (log_apply_vols - global_mean) / global_std
     
     return z_scores, global_mean, global_std
+
+def calculate_global_robust_scaler(volume_array, valid_pixel_mask):
+    """
+    Calculates the global robust scaling for an entire frame of spectral complexity volumes.
+    Uses scikit-learn's PowerTransformer (Box-Cox) to stabilize variance and minimize skewness,
+    followed by RobustScaler (Median and IQR) to handle extreme kurtosis (outliers) without
+    resorting to data clipping.
+    """
+    height, width = volume_array.shape
+    robust_scores = np.full((height, width), np.nan, dtype=np.float32)
+    
+    # Identify globally valid pixels (strictly positive for box-cox transform)
+    global_valid_mask = volume_array > 0.0
+    
+    # Intersect with radiometrically valid pixels for the statistical background model
+    stats_mask = global_valid_mask & valid_pixel_mask
+    
+    # Extract subset volumes strictly for statistical estimation
+    # scikit-learn expects 2D arrays: (n_samples, n_features)
+    stats_vols = volume_array[stats_mask].reshape(-1, 1)
+
+    # Graceful fallback per user directive: Return NaNs for entire frame if no valid background exists.
+    if len(stats_vols) < 9 or len(np.unique(stats_vols)) <= 1:
+        warnings.warn("calculate_global_robust_scaler warning: Insufficient valid pixels (< 9) or zero variance found. Returning NaNs.")
+        return robust_scores, np.nan, np.nan, np.nan
+    
+    # Initialize Transformers
+    # We disable standardization in PowerTransformer because it is vulnerable to outliers.
+    # We will let RobustScaler handle the standardization.
+    pt = PowerTransformer(method='box-cox', standardize=False)
+    rs = RobustScaler(with_centering=True, with_scaling=True, quantile_range=(25.0, 75.0),unit_variance=True)
+    
+    # Fit and transform the background statistical model
+    # Note: PowerTransformer will raise an error if data is not strictly positive,
+    # but we explicitly filtered for > 0.0 with global_valid_mask.
+    pt_stats_vols = pt.fit_transform(stats_vols)
+    
+    # Fit the RobustScaler on the skew-corrected data
+    rs.fit(pt_stats_vols)
+    
+    # Strict failure handling: Prevent training on synthetically flat frames
+    if rs.scale_[0] == 0:
+        raise ValueError("calculate_global_robust_scaler failed: Interquartile range of the radiometrically valid subset is exactly zero.")
+        
+    # Evaluate ALL geometrically valid pixels using the fitted pure background models
+    apply_vols = volume_array[global_valid_mask].reshape(-1, 1)
+    
+    # Transform using the learned parameters sequentially
+    pt_apply_vols = pt.transform(apply_vols)
+    final_vols = rs.transform(pt_apply_vols)
+    
+    # Assign back to the full spatial map (flattened from 2D back to 1D)
+    robust_scores[global_valid_mask] = final_vols.flatten()
+    
+    # Return the spatial map and the calculated scalar parameters
+    return robust_scores, pt.lambdas_[0], rs.center_[0], rs.scale_[0]
 
 def calculate_temporal_z_score(volume_cube, valid_pixel_mask_cube):
     """

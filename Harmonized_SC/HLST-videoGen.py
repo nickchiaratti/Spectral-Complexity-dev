@@ -8,6 +8,7 @@ from contextlib import ExitStack
 from zoneinfo import ZoneInfo
 import rasterio.transform
 from pyproj import Transformer, CRS
+from mpl_toolkits.axes_grid1 import make_axes_locatable
 
 # ==========================================
 # 1. VIDEO & EXTRACTION CONFIGURATION
@@ -15,15 +16,16 @@ from pyproj import Transformer, CRS
 
 background_color = 'w' 
 text_color = 'black'
-TEXT_OVERLAY = False
+TEXT_OVERLAY = True
 
-Location = "MtEtna-Catania"
-ARD_CUBE_PATH = f"C:/satelliteImagery/HLST30/HLST_{Location}_Harmonized_SC_EM-7_Norm-bandCount.h5"
+Location = "Tait"
+ARD_CUBE_PATH = f"C:/satelliteImagery/HLST30/HLST_{Location}_Harmonized_SC_EM-7_Norm-None.h5"
 OUTPUT_DIR = f"C:/satelliteImagery/HLST30/HLST_{Location}_Videos"
 
 COMPLEXITY_TYPE = 'sliding_volume_map'
+SOURCE_GRID = 'HLSL30' #None # Set to a specific grid (e.g., 'HLSL30') or None for all
 
-START_DATE = datetime(2020, 1, 1, tzinfo=timezone.utc)
+START_DATE = datetime(2020, 4, 1, tzinfo=timezone.utc)
 END_DATE = datetime(2025, 12, 31, tzinfo=timezone.utc)
 
 if Location == "Tait" or Location == "Rochesterv2":
@@ -50,24 +52,24 @@ elif Location == "MtEtna" or Location == "MtEtna-Catania":
 #   'POI'        : (Recommended) Frame is rendered ONLY if ALL TS_LOCATIONS are within the frame's valid data coverage.
 #   'PERCENTAGE' : Frame is rendered if the overall valid-pixel ratio exceeds MIN_FRAME_VALIDITY_PERCENTAGE.
 # ==========================================
-COVERAGE_EVALUATION_MODE = 'POI'
+COVERAGE_EVALUATION_MODE = 'PERCENTAGE'
 
 # If True, validates pixels against the QA mask (cloud/water filters), meaning data must be both present AND clear.
 # If False, only checks that data physically exists (is not NaN / outside the valid satellite swath).
-ENFORCE_QA_MASKING = False
+ENFORCE_QA_MASKING = True
 
 # Used strictly if COVERAGE_EVALUATION_MODE = 'PERCENTAGE'
-MIN_FRAME_VALIDITY_PERCENTAGE = .25
+MIN_FRAME_VALIDITY_PERCENTAGE = 0.9
 
 # Video Output Configuration
 FPS = 2
-DPI = 300
+DPI = 60
 EXPORT_GIF = True
-GIF_DPI = 20 
+GIF_DPI = 60
 SHOW_PIXEL_INDICATORS = False
 
 # --- Localized Color Scale Configuration ---
-GLOBAL_COLOR_SCALE = True 
+GLOBAL_COLOR_SCALE = False 
 COLOR_SCALE_POI_RADIUS = 100 # Pixel radius around TS_LOCATIONS to sample for statistical color limits
 
 
@@ -163,6 +165,10 @@ def generate_videos():
             dt = datetime.fromtimestamp(ts, tz=timezone.utc)
             
             if START_DATE <= dt <= END_DATE:
+                source_grid = decode_h5_string(prov_grids[global_idx])
+                if SOURCE_GRID is not None and source_grid != SOURCE_GRID:
+                    continue
+
                 # ----------------------------------------------------
                 # CORE QUALITY ASSESSMENT: FRAME COVERAGE EVALUATION
                 # ----------------------------------------------------
@@ -174,7 +180,7 @@ def generate_videos():
                     
                     if COVERAGE_EVALUATION_MODE == 'PERCENTAGE':
                         if ENFORCE_QA_MASKING:
-                            valid_frac = np.sum(qa_frame == 1) / qa_frame.size
+                            valid_frac = np.sum(qa_frame == 0) / qa_frame.size
                         else:
                             valid_frac = np.sum(~np.isnan(vol_frame)) / vol_frame.size
                             
@@ -187,18 +193,16 @@ def generate_videos():
                         poi_valid = ~np.isnan(vol_frame[poi_y, poi_x])
                         
                         if ENFORCE_QA_MASKING:
-                            qa_valid = (qa_frame[poi_y, poi_x] == 1)
+                            qa_valid = (qa_frame[poi_y, poi_x] == 0)
                             poi_valid = poi_valid & qa_valid
                             
                         if not np.all(poi_valid):
                             dropped_due_to_qa += 1
                             continue
                 
-                source_grid = decode_h5_string(prov_grids[global_idx])
                 source_spacecraft = decode_h5_string(prov_spaces[global_idx])
-                local_idx = int(prov_indices[global_idx])
                 
-                ortho_path = f'/HDFEOS/GRIDS/{source_grid}/Data Fields/ortho_visual'
+                ortho_path = '/HDFEOS/GRIDS/HARMONIZED/Data Fields/ortho_visual'
                 if ortho_path not in h5_ard:
                     raise ValueError(f"CRITICAL ERROR: '{ortho_path}' missing for frame {global_idx}.")
                     
@@ -211,7 +215,7 @@ def generate_videos():
                     'vol_dset': vol_ds,        
                     'vol_idx': global_idx,     
                     'ortho_dset': ortho_ds,    
-                    'ortho_idx': local_idx     
+                    'ortho_idx': global_idx     
                 })
                 
         if not unified_frames:
@@ -286,42 +290,47 @@ def generate_videos():
             path_comp_gif = os.path.join(OUTPUT_DIR, f"{prefix}_Complexity.gif")
             path_side_gif = os.path.join(OUTPUT_DIR, f"{prefix}_SideBySide.gif")
 
-        # Set up Figures with Black Backgrounds
-        fig_rgb, ax_rgb = plt.subplots(figsize=(8, 8), facecolor=background_color)
-        fig_comp, ax_comp = plt.subplots(figsize=(8, 8), facecolor=background_color)
-        fig_side, (ax_s1, ax_s2) = plt.subplots(1, 2, figsize=(16, 8), facecolor=background_color)
+        # Determine appropriate figure sizes to match data aspect ratio
+        base_width = 8.0
+        aspect = height / width
+        extra_h = 0.6 # extra vertical space for the date text
         
-        fig_rgb.subplots_adjust(left=0.0, right=1.0, top=1.0, bottom=0.0)
-        fig_comp.subplots_adjust(left=0.0, right=0.88, top=1.0, bottom=0.0)
-        fig_side.subplots_adjust(left=0.0, right=0.92, top=0.92, bottom=0.0, wspace=0.02)
+        fig_rgb, ax_rgb = plt.subplots(figsize=(base_width, base_width * aspect + extra_h), facecolor=background_color)
+        fig_comp, ax_comp = plt.subplots(figsize=(base_width * 1.15, base_width * aspect + extra_h), facecolor=background_color)
+        fig_side, (ax_s1, ax_s2) = plt.subplots(1, 2, figsize=(base_width * 2.15, base_width * aspect + extra_h), facecolor=background_color)
+
         
         for ax in [ax_rgb, ax_comp, ax_s1, ax_s2]:
             ax.set_facecolor(background_color) 
             ax.axis('off')
 
-        # Initialize Imshow objects
-        dummy_shape = (100, 100)
+        # Initialize Imshow objects with the correct shape to preserve aspect ratio for tight_layout
+        dummy_shape = (height, width)
         im_rgb = ax_rgb.imshow(np.zeros((*dummy_shape, 4))) 
-        im_comp = ax_comp.imshow(np.zeros(dummy_shape), cmap='viridis', vmin=v_min, vmax=v_max)
+        im_comp = ax_comp.imshow(np.zeros(dummy_shape), cmap='cividis', vmin=v_min, vmax=v_max)
         im_s1 = ax_s1.imshow(np.zeros((*dummy_shape, 4)))
-        im_s2 = ax_s2.imshow(np.zeros(dummy_shape), cmap='viridis', vmin=v_min, vmax=v_max)
+        im_s2 = ax_s2.imshow(np.zeros(dummy_shape), cmap='cividis', vmin=v_min, vmax=v_max)
         
-        cbar_comp = fig_comp.colorbar(im_comp, ax=ax_comp, fraction=0.046, pad=0.04)
-        cbar_comp.set_label("Complexity Volume", color=text_color, fontweight='bold')
+        divider_comp = make_axes_locatable(ax_comp)
+        cax_comp = divider_comp.append_axes("right", size="5%", pad=0.05)
+        cbar_comp = fig_comp.colorbar(im_comp, cax=cax_comp)
+        cbar_comp.set_label("Spectral Complexity", color=text_color, fontweight='bold')
         cbar_comp.ax.yaxis.set_tick_params(color=text_color, labelcolor=text_color)
         cbar_comp.outline.set_edgecolor(text_color)
 
-        cbar_side = fig_side.colorbar(im_s2, ax=ax_s2, fraction=0.046, pad=0.04)
-        cbar_side.set_label("Complexity Volume", color=text_color, fontweight='bold')
+        divider_side = make_axes_locatable(ax_s2)
+        cax_side = divider_side.append_axes("right", size="5%", pad=0.05)
+        cbar_side = fig_side.colorbar(im_s2, cax=cax_side)
+        cbar_side.set_label("Spectral Complexity", color=text_color, fontweight='bold')
         cbar_side.ax.yaxis.set_tick_params(color=text_color, labelcolor=text_color)
         cbar_side.outline.set_edgecolor(text_color)
 
-        txt_rgb = ax_rgb.text(0.5, 0.02, "", transform=ax_rgb.transAxes, ha='center', va='bottom', color=text_color, fontsize=12, fontweight='bold', bbox=dict(facecolor=background_color, alpha=0.6, pad=3))
-        txt_comp = ax_comp.text(0.5, 0.02, "", transform=ax_comp.transAxes, ha='center', va='bottom', color=text_color, fontsize=12, fontweight='bold', bbox=dict(facecolor=background_color, alpha=0.6, pad=3))
-        txt_side = fig_side.text(0.5, 0.02, "", ha='center', va='bottom', color=text_color, fontsize=14, fontweight='bold', bbox=dict(facecolor=background_color, alpha=0.6, pad=5))
+        txt_rgb = ax_rgb.text(0.5, -0.05, "", transform=ax_rgb.transAxes, ha='center', va='top', color=text_color, fontsize=12, fontweight='bold', bbox=dict(facecolor=background_color, alpha=0.6, pad=3))
+        txt_comp = ax_comp.text(0.5, -0.05, "", transform=ax_comp.transAxes, ha='center', va='top', color=text_color, fontsize=12, fontweight='bold', bbox=dict(facecolor=background_color, alpha=0.6, pad=3))
+        txt_side = fig_side.text(0.5, 0.03, "", ha='center', va='center', color=text_color, fontsize=14, fontweight='bold', bbox=dict(facecolor=background_color, alpha=0.6, pad=5))
         
-        ax_s1.set_title("Ortho Visual", color=text_color, fontweight='bold')
-        ax_s2.set_title(f"Complexity ({COMPLEXITY_TYPE})", color=text_color, fontweight='bold')
+        #ax_s1.set_title("Ortho Visual", color=text_color, fontweight='bold')
+        #ax_s2.set_title(f"Complexity ({COMPLEXITY_TYPE})", color=text_color, fontweight='bold')
 
         inds_rgb, inds_comp, inds_s1, inds_s2 = [], [], [], []
         if SHOW_PIXEL_INDICATORS:
@@ -330,6 +339,10 @@ def generate_videos():
                 inds_comp.append(ax_comp.plot([], [], marker='s', markersize=12, markerfacecolor='none', markeredgewidth=2)[0])
                 inds_s1.append(ax_s1.plot([], [], marker='s', markersize=12, markerfacecolor='none', markeredgewidth=2)[0])
                 inds_s2.append(ax_s2.plot([], [], marker='s', markersize=12, markerfacecolor='none', markeredgewidth=2)[0])
+
+        fig_rgb.tight_layout(pad=0.1, rect=[0, 0.07, 1, 1])
+        fig_comp.tight_layout(pad=0.1, rect=[0, 0.07, 1, 1])
+        fig_side.tight_layout(pad=0.1, rect=[0, 0.08, 1, 1])
 
         # 5. Execution Block
         print("Writing video streams...")
@@ -346,7 +359,7 @@ def generate_videos():
             for i, frame in enumerate(unified_frames):
                 sensor = frame['sensor']
                 
-                time_str = f"[{sensor}] Acquired: {frame['dt_et'].strftime('%Y-%m-%d %H:%M:%S ET')}"
+                time_str = frame['dt_et'].strftime('%Y-%m-%d')
                 
                 if i % 10 == 0:
                     print(f"  Rendering frame {i}/{len(unified_frames)}...")
@@ -377,10 +390,13 @@ def generate_videos():
                     comp_data[rgba[..., 3] == 0.0] = np.nan
                 
                 if not GLOBAL_COLOR_SCALE:
-                    with np.errstate(all='ignore'):
-                        v_min, v_max = np.nanmin(comp_data), np.nanmax(comp_data)
-                    im_comp.set_clim(vmin=v_min, vmax=v_max)
-                    im_s2.set_clim(vmin=v_min, vmax=v_max)
+                    valid_vals = comp_data[~np.isnan(comp_data)]
+                    if len(valid_vals) > 0:
+                        v_min, v_max = np.percentile(valid_vals, 1), np.percentile(valid_vals, 98)
+                        if v_min == v_max:
+                            v_max = v_min + 1e-6
+                        im_comp.set_clim(vmin=v_min, vmax=v_max)
+                        im_s2.set_clim(vmin=v_min, vmax=v_max)
 
                 h, w = comp_data.shape
                 dynamic_extent = [0, w, h, 0] 

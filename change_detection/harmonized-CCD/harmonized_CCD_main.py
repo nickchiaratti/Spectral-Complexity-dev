@@ -35,6 +35,15 @@ LOCATION = "Rochesterv2"
 H5_PATH = f"C:/satelliteImagery/HLST30/HLST_{LOCATION}_Harmonized_SC_EM-7_Norm-None.h5"
 TARGET_METRIC = 'sliding_volume_z_score'
 
+if TARGET_METRIC == 'sliding_volume_z_score':
+    TARGET_NAME = 'Spectral Complexity (Z-Score)'
+elif TARGET_METRIC == 'sliding_volume_robust_scale':
+    TARGET_NAME = 'Spectral Complexity (Robust)'
+elif TARGET_METRIC == 'ndvi':
+    TARGET_NAME = 'NDVI'
+elif TARGET_METRIC == 'ndbi':
+    TARGET_NAME = 'NDBI'
+
 # Anomaly Detection Thresholds
 CHANGE_PROBABILITY = 0.99
 CONSECUTIVE_ANOMALIES = 4
