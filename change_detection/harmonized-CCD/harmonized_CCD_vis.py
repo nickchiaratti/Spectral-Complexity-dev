@@ -6,6 +6,7 @@ import os
 import pyproj
 import matplotlib.patches as patches
 import scienceplots
+import matplotlib.dates as mdates
 plt.style.use(['science','no-latex'])
 
 from harmonized_CCD_main import LOCATION, H5_PATH, ENABLE_CONSTANT, ENABLE_LINEAR, ENABLE_QUADRATIC, TEMPORAL_PERIODS, TARGET_METRIC, TARGET_NAME
@@ -165,7 +166,453 @@ def plot_pixel_sits(pixel_y, pixel_x, source_h5_path, inference_results_h5, ax=N
     if show_plot:
         plt.show()
 
+
+import re
+from matplotlib.animation import FuncAnimation
+
+def animate_pixel_endmembers(pixel_y, pixel_x, source_h5_path):
+    import sys, os
+    root_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    if root_dir not in sys.path:
+        sys.path.append(root_dir)
+    import SpecComplex as sc
+    
+    raw_h5_path = re.sub(r'_SC_.*?\.h5$', '.h5', source_h5_path)
+    if not os.path.exists(raw_h5_path):
+        print(f"Error: Raw H5 file not found at {raw_h5_path}")
+        return
+        
+    endmembers_over_time = []
+    dates_over_time = []
+    sensors_over_time = []
+    wavelengths_over_time = []
+    
+    with h5py.File(source_h5_path, 'r') as f_sc, h5py.File(raw_h5_path, 'r') as f_raw:
+        harm_grp = f_sc['/HDFEOS/GRIDS/HARMONIZED/Data Fields']
+        target_metric = f_sc.attrs.get('TARGET_METRIC', 'sliding_volume_z_score')
+        if target_metric not in harm_grp:
+            target_metric = list(harm_grp.keys())[0]
+            
+        attrs = harm_grp[target_metric].attrs
+        acq_time = attrs['acquisition_time'][:]
+        source_grids = [s.decode('utf-8') if isinstance(s, bytes) else str(s) for s in attrs['source_grid'][:]]
+        source_frames = attrs['source_frame_index'][:]
+        spacecrafts = [s.decode('utf-8') if isinstance(s, bytes) else str(s) for s in attrs['source_spacecraft'][:]]
+        
+        unified_masks = harm_grp['common_mask'][:, pixel_y, pixel_x]
+        
+        _, H, W = harm_grp['common_mask'].shape
+        y_start = max(0, pixel_y - 1)
+        y_end = min(H, pixel_y + 2)
+        x_start = max(0, pixel_x - 1)
+        x_end = min(W, pixel_x + 2)
+        
+        for i in range(len(acq_time)):
+            if unified_masks[i]: 
+                continue
+                
+            grid = source_grids[i]
+            frame_idx = source_frames[i]
+            
+            sr_ds = f_raw[f"/HDFEOS/GRIDS/{grid}/Data Fields/surface_reflectance"]
+            patch = sr_ds[frame_idx, :, y_start:y_end, x_start:x_end]
+            
+            w_attr = sr_ds.attrs.get('wavelengths')
+            if w_attr is None: w_attr = sr_ds.attrs.get('wavelength')
+            if w_attr is not None:
+                wavelengths = w_attr[:]
+            else:
+                wavelengths = np.arange(1, patch.shape[0] + 1, dtype=float)
+                
+            if grid == "TANAGER":
+                gw_mask = sr_ds.attrs.get("all_good_wavelengths")[frame_idx].astype(bool)
+                patch = patch[gw_mask, :, :]
+                wavelengths = wavelengths[gw_mask]
+                
+            if np.max(wavelengths) < 10:
+                wavelengths = wavelengths * 1000
+                
+            patch = np.transpose(patch, (1, 2, 0))
+            
+            em, _ = sc.maximumDistance(patch, 7, strict_nan=False)
+            
+            if not np.isnan(em).all():
+                endmembers_over_time.append(em)
+                dates_over_time.append(datetime.fromtimestamp(acq_time[i], timezone.utc))
+                sensors_over_time.append(spacecrafts[i])
+                wavelengths_over_time.append(wavelengths)
+                
+    if not endmembers_over_time:
+        print("No valid data to animate for this pixel neighborhood.")
+        return
+        
+    fig, ax = plt.subplots(figsize=(10, 6))
+    lines = []
+    colors = plt.cm.turbo(np.linspace(0, 1, 7))
+    
+    for j in range(7):
+        line, = ax.plot([], [], marker='o', markersize=4, color=colors[j], label=f'EM {j+1} (MaxD Rank {j+1})')
+        lines.append(line)
+        
+    ax.set_xlabel("Wavelength (nm)")
+    ax.set_ylabel("Surface Reflectance")
+    ax.legend(loc='upper left', bbox_to_anchor=(1.05, 1.0))
+    fig.subplots_adjust(right=0.75)
+    title = ax.set_title("")
+    
+    frame_text = ax.text(0.02, 0.95, '', transform=ax.transAxes, fontsize=12, verticalalignment='top')
+    
+    def init():
+        for line in lines:
+            line.set_data([], [])
+        title.set_text("")
+        frame_text.set_text("")
+        return lines + [title, frame_text]
+        
+    def update(frame):
+        em = endmembers_over_time[frame]
+        dt = dates_over_time[frame]
+        sensor = sensors_over_time[frame]
+        wl = wavelengths_over_time[frame]
+        
+        for j in range(7):
+            if j < em.shape[1]:
+                lines[j].set_data(wl, em[:, j])
+            else:
+                lines[j].set_data([], [])
+                
+        title.set_text(f"3x3 Endmembers | {sensor} | {dt.strftime('%Y-%m-%d')}")
+        frame_text.set_text(f"Frame: {frame+1}/{len(endmembers_over_time)}")
+        
+        ax.set_xlim(np.min(wl) * 0.95, np.max(wl) * 1.05)
+        max_r = np.nanmax(em)
+        if np.isnan(max_r) or max_r < 0.1:
+            max_r = 1.0
+        ax.set_ylim(0, min(1.2, max_r * 1.1))
+        
+        return lines + [title, frame_text]
+        
+    ani = FuncAnimation(fig, update, frames=len(endmembers_over_time), init_func=init, blit=False, interval=500, repeat=True)
+    fig._endmember_animation = ani
+    
+    # --- Add Export Button ---
+    fig.subplots_adjust(bottom=0.15)
+    from matplotlib.widgets import Button
+    ax_save_btn = fig.add_axes([0.8, 0.02, 0.15, 0.06])
+    btn_save = Button(ax_save_btn, 'Export Animation')
+    
+    def save_animation(event):
+        try:
+            out_name = f"Endmembers_x{pixel_x}_y{pixel_y}.mp4"
+            print(f"Exporting animation (MP4) to {out_name}...")
+            ani.save(out_name, writer='ffmpeg', fps=2)
+            print("Export complete.")
+        except Exception as e:
+            print(f"FFMpeg not available, falling back to GIF export...")
+            out_name = f"Endmembers_x{pixel_x}_y{pixel_y}.gif"
+            print(f"Exporting animation (GIF) to {out_name}...")
+            ani.save(out_name, writer='pillow', fps=2)
+            print("Export complete.")
+            
+    btn_save.on_clicked(save_animation)
+    fig._btn_save = btn_save
+    
+    plt.show(block=False)
+
+
+def plot_segment_spectra(pixel_y, pixel_x, source_h5_path, inference_results_h5):
+    import sys, os, re
+    import numpy as np
+    import h5py
+    from datetime import datetime, timezone
+    import matplotlib.pyplot as plt
+    root_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    if root_dir not in sys.path:
+        sys.path.append(root_dir)
+    import SpecComplex as sc
+    
+    raw_h5_path = re.sub(r'_SC_.*?\.h5$', '.h5', source_h5_path)
+    if not os.path.exists(raw_h5_path):
+        print(f"Error: Raw H5 file not found at {raw_h5_path}")
+        return
+
+    def get_sensor_group(sc_str):
+        s = str(sc_str).upper()
+        if 'LANDSAT' in s: return 'Landsat'
+        if 'SENTINEL' in s: return 'Sentinel'
+        if 'TANAGER' in s: return 'Tanager'
+        return s
+        
+    with h5py.File(inference_results_h5, 'r') as f_inf:
+        rmse = f_inf['rmse_series'][:, pixel_y, pixel_x]
+        
+    with h5py.File(source_h5_path, 'r') as f_sc:
+        harm_grp = f_sc['/HDFEOS/GRIDS/HARMONIZED/Data Fields']
+        target_metric = f_sc.attrs.get('TARGET_METRIC', 'sliding_volume_z_score')
+        if target_metric not in harm_grp:
+            target_metric = list(harm_grp.keys())[0]
+            
+        attrs = harm_grp[target_metric].attrs
+        acq_time = attrs['acquisition_time'][:]
+        source_grids = [s.decode('utf-8') if isinstance(s, bytes) else str(s) for s in attrs['source_grid'][:]]
+        source_frames = attrs['source_frame_index'][:]
+        spacecrafts = [s.decode('utf-8') if isinstance(s, bytes) else str(s) for s in attrs['source_spacecraft'][:]]
+        unified_masks = harm_grp['common_mask'][:, pixel_y, pixel_x]
+        
+        _, H, W = harm_grp['common_mask'].shape
+
+    y_start = max(0, pixel_y - 1)
+    y_end = min(H, pixel_y + 2)
+    x_start = max(0, pixel_x - 1)
+    x_end = min(W, pixel_x + 2)
+    
+    # Identify Segments based on stable RMSE predictions
+    segments = []
+    current_segment = []
+    current_rmse = None
+    for i in range(len(acq_time)):
+        if unified_masks[i]: continue
+        r = rmse[i]
+        if np.isnan(r): continue
+        
+        if current_rmse is None:
+            current_rmse = r
+            current_segment.append(i)
+        elif abs(r - current_rmse) < 1e-6:
+            current_segment.append(i)
+        else:
+            segments.append(current_segment)
+            current_segment = [i]
+            current_rmse = r
+    if current_segment:
+        segments.append(current_segment)
+        
+    if not segments:
+        print("No valid structural segments found for this pixel.")
+        return
+
+    # Discover present sensors
+    present_sensors = set()
+    for seg in segments:
+        for i in seg:
+            present_sensors.add(get_sensor_group(spacecrafts[i]))
+    
+    sensors = sorted(list(present_sensors))
+    
+    fig, axes = plt.subplots(len(sensors), len(segments), figsize=(6*len(segments), 4*len(sensors)), squeeze=False)
+    fig.suptitle(f"Segment Spectra Overview (Median & IQR)\nPixel: x={pixel_x}, y={pixel_y}", fontsize=14)
+    
+    with h5py.File(raw_h5_path, 'r') as f_raw:
+        for col_idx, seg in enumerate(segments):
+            seg_data = {s: [] for s in sensors}
+            seg_wl = {s: None for s in sensors}
+            
+            for i in seg:
+                grid = source_grids[i]
+                frame_idx = source_frames[i]
+                sensor = get_sensor_group(spacecrafts[i])
+                
+                sr_ds = f_raw[f"/HDFEOS/GRIDS/{grid}/Data Fields/surface_reflectance"]
+                patch = sr_ds[frame_idx, :, y_start:y_end, x_start:x_end]
+                
+                w_attr = sr_ds.attrs.get('wavelengths')
+                if w_attr is None: w_attr = sr_ds.attrs.get('wavelength')
+                if w_attr is not None:
+                    wavelengths = w_attr[:]
+                else:
+                    wavelengths = np.arange(1, patch.shape[0] + 1, dtype=float)
+                    
+                if grid == "TANAGER":
+                    gw_mask = sr_ds.attrs.get("all_good_wavelengths")[frame_idx].astype(bool)
+                    patch = patch[gw_mask, :, :]
+                    wavelengths = wavelengths[gw_mask]
+                    
+                if np.max(wavelengths) < 10:
+                    wavelengths = wavelengths * 1000
+                    
+                if seg_wl[sensor] is None:
+                    seg_wl[sensor] = wavelengths
+                    
+                patch = np.transpose(patch, (1, 2, 0))
+                em, _ = sc.maximumDistance(patch, 7, strict_nan=False)
+                if not np.isnan(em).all():
+                    seg_data[sensor].append(em)
+                    
+            start_date = datetime.fromtimestamp(acq_time[seg[0]], timezone.utc).strftime('%Y-%m-%d')
+            end_date = datetime.fromtimestamp(acq_time[seg[-1]], timezone.utc).strftime('%Y-%m-%d')
+            
+            for row_idx, sensor in enumerate(sensors):
+                ax = axes[row_idx, col_idx]
+                
+                segment_colors = ['blue', 'green', 'purple', 'orange', 'cyan', 'magenta', 'brown']
+                c_bg = segment_colors[col_idx % len(segment_colors)]
+                import matplotlib.colors as mcolors
+                
+                data = seg_data[sensor]
+                
+                if row_idx == 0:
+                    ax.set_title(f"Seg {col_idx+1}\n{start_date} to {end_date}", bbox=dict(facecolor=mcolors.to_rgba(c_bg, alpha=0.3), edgecolor='none'))
+                if col_idx == 0:
+                    ax.set_ylabel(f"{sensor}\nReflectance")
+                
+                if not data:
+                    ax.text(0.5, 0.5, "No Data for Sensor", ha='center', va='center', transform=ax.transAxes)
+                    continue
+                    
+                # -- Spectral Alignment using Hungarian Algorithm & SAM --
+                from scipy.optimize import linear_sum_assignment
+                aligned_data = []
+                ref_em = data[0]  # First frame as the reference for this segment/sensor
+                aligned_data.append(ref_em)
+                
+                for em in data[1:]:
+                    # Compute norms (add epsilon to prevent div by zero)
+                    norm_ref = np.linalg.norm(ref_em, axis=0) + 1e-8
+                    norm_curr = np.linalg.norm(em, axis=0) + 1e-8
+                    
+                    # Cosine similarity
+                    cos_sim = np.dot(ref_em.T, em) / np.outer(norm_ref, norm_curr)
+                    cos_sim = np.clip(cos_sim, -1.0, 1.0)
+                    
+                    # Cost is the Spectral Angle (we want to minimize it)
+                    cost_matrix = np.arccos(cos_sim)
+                    
+                    # Hungarian assignment
+                    # row_ind corresponds to reference indices
+                    # col_ind corresponds to current frame indices
+                    row_ind, col_ind = linear_sum_assignment(cost_matrix)
+                    
+                    aligned_em = np.zeros_like(em)
+                    # Align current frame's endmembers to match the reference slots
+                    aligned_em[:, row_ind] = em[:, col_ind]
+                    aligned_data.append(aligned_em)
+                    
+                cube = np.stack(aligned_data, axis=0) # (time, bands, 7)
+                wl = seg_wl[sensor]
+                colors = plt.cm.turbo(np.linspace(0, 1, 7))
+                
+                for j in range(7):
+                    # Robust non-parametric bounds: Median and IQR
+                    em_series = cube[:, :, j]
+                    
+                    # Suppress All-NaN slice warnings for bands that might be fully masked across time
+                    import warnings
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("ignore", category=RuntimeWarning)
+                        median = np.nanmedian(em_series, axis=0)
+                        p25 = np.nanpercentile(em_series, 25, axis=0)
+                        p75 = np.nanpercentile(em_series, 75, axis=0)
+                    
+                    if not np.isnan(median).all():
+                        label = f'EM {j+1} (Rank {j+1})' if (row_idx==0 and col_idx==len(segments)-1) else ""
+                        ax.plot(wl, median, color=colors[j], label=label)
+                        ax.fill_between(wl, p25, p75, color=colors[j], alpha=0.15)
+                
+                ax.set_xlabel("Wavelength (nm)")
+                max_val = np.nanmax(cube)
+                ax.set_ylim(0, min(1.2, max_val * 1.1) if not np.isnan(max_val) else 1.0)
+                
+                if col_idx == len(segments)-1 and row_idx == 0:
+                    ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+
+    plt.tight_layout()
+    plt.subplots_adjust(top=0.90, right=0.85)
+    plt.show(block=False)
+
+
+def plot_lcmap_classes(pixel_y, pixel_x, source_h5_path, inference_results_h5):
+    import os
+    import sys
+    
+    # Add classification module to path
+    class_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', 'classification'))
+    if class_dir not in sys.path:
+        sys.path.append(class_dir)
+        
+    try:
+        from lcmap_classification import extract_lcmap_time_series
+    except ImportError:
+        print('Failed to import lcmap_classification. Ensure it is in the classification/ directory.')
+        return
+        
+    lcmap_classes = ['Developed', 'Cropland', 'Grass/Shrub', 'Tree Cover', 'Water', 'Wetland', 'Ice/Snow', 'Barren']
+    colors_map = {
+        'Developed': 'gray', 'Cropland': 'yellowgreen', 'Grass/Shrub': 'wheat', 
+        'Tree Cover': 'forestgreen', 'Water': 'blue', 'Wetland': 'teal', 
+        'Ice/Snow': 'cyan', 'Barren': 'sandybrown'
+    }
+
+    segments, sensors, extracted_data = extract_lcmap_time_series(
+        pixel_y, pixel_x, source_h5_path, inference_results_h5, lcmap_classes=lcmap_classes
+    )
+    
+    if not segments or not sensors:
+        print('No valid data found for LCMAP classification.')
+        return
+        
+    fig, axes = plt.subplots(len(sensors), len(segments), figsize=(7*len(segments), 4*len(sensors)), squeeze=False)
+    fig.suptitle(f'LCMAP Level 1 Class Percentages (Hard SAM over Full Library)\nPixel: x={pixel_x}, y={pixel_y}', fontsize=14)
+    
+    for row_idx, sensor in enumerate(sensors):
+        for col_idx, _ in enumerate(segments):
+            ax = axes[row_idx, col_idx]
+            
+            segment_colors = ['blue', 'green', 'purple', 'orange', 'cyan', 'magenta', 'brown']
+            c_bg = segment_colors[col_idx % len(segment_colors)]
+            import matplotlib.colors as mcolors
+            
+            data = extracted_data.get(row_idx, {}).get(col_idx, None)
+            
+            if not data or not data['dates']:
+                if row_idx == 0 and data:
+                    start_date = datetime.fromtimestamp(data['start_acq_time'], timezone.utc).strftime('%Y-%m-%d')
+                    end_date = datetime.fromtimestamp(data['end_acq_time'], timezone.utc).strftime('%Y-%m-%d')
+                    ax.set_title(f'Seg {col_idx+1}\n{start_date} to {end_date}', bbox=dict(facecolor=mcolors.to_rgba(c_bg, alpha=0.3), edgecolor='none'))
+                if col_idx == 0:
+                    ax.set_ylabel(f'{sensor}\nPercentage')
+                ax.text(0.5, 0.5, 'No Data', ha='center', va='center', transform=ax.transAxes)
+                continue
+                
+            dates = data['dates']
+            class_counts = data['class_counts']
+            
+            if row_idx == 0:
+                start_date = datetime.fromtimestamp(data['start_acq_time'], timezone.utc).strftime('%Y-%m-%d')
+                end_date = datetime.fromtimestamp(data['end_acq_time'], timezone.utc).strftime('%Y-%m-%d')
+                ax.set_title(f'Seg {col_idx+1}\n{start_date} to {end_date}', bbox=dict(facecolor=mcolors.to_rgba(c_bg, alpha=0.3), edgecolor='none'))
+            if col_idx == 0:
+                ax.set_ylabel(f'{sensor}\nPercentage')
+                
+            y = np.vstack([class_counts[c] for c in lcmap_classes])
+            x = dates
+            
+            colors = [colors_map[c] for c in lcmap_classes]
+            ax.stackplot(x, y, labels=lcmap_classes, colors=colors, alpha=0.8)
+            
+            ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m'))
+            plt.setp(ax.xaxis.get_majorticklabels(), rotation=45, ha='right')
+            
+            if len(x) > 0:
+                start_year = x[0].year
+                end_year = x[-1].year
+                for year in range(start_year, end_year + 2):
+                    dt = datetime(year, 1, 1, tzinfo=timezone.utc)
+                    if x[0] <= dt <= x[-1]:
+                        ax.axvline(dt, color='black', linestyle='--', alpha=0.5, linewidth=1)
+            
+            ax.set_ylim(0, 1)
+            
+            if col_idx == len(segments)-1 and row_idx == 0:
+                from matplotlib.patches import Patch
+                legend_elements = [Patch(facecolor=colors_map[c], label=c) for c in lcmap_classes]
+                ax.legend(handles=legend_elements, bbox_to_anchor=(1.05, 1), loc='upper left')
+
+    plt.tight_layout()
+    plt.subplots_adjust(top=0.90, right=0.85)
+    plt.show(block=False)
+
 def plot_spatial_anomaly_overlay(source_h5_path, inference_results_h5):
+
     with h5py.File(inference_results_h5, 'r') as f:
         target_metric = f.attrs.get('TARGET_METRIC', 'sliding_volume_z_score')
 
@@ -204,6 +651,48 @@ def plot_spatial_anomaly_overlay(source_h5_path, inference_results_h5):
     anomaly_map[change_count_map == 0] = np.nan
     
     fig, (ax_img, ax_ts) = plt.subplots(1, 2, figsize=(18, 8))
+    fig.subplots_adjust(bottom=0.15)
+    
+    from matplotlib.widgets import Button
+    ax_anim_btn = fig.add_axes([0.42, 0.02, 0.16, 0.06])
+    btn_anim = Button(ax_anim_btn, 'Animate 3x3 Endmembers')
+    fig._btn_anim = btn_anim
+    
+    current_selected = {'x': None, 'y': None}
+    
+    def on_animate_click(event):
+        x = current_selected['x']
+        y = current_selected['y']
+        if x is not None and y is not None:
+            animate_pixel_endmembers(y, x, source_h5_path)
+            
+    btn_anim.on_clicked(on_animate_click)
+    
+    ax_spectra_btn = fig.add_axes([0.60, 0.02, 0.16, 0.06])
+    btn_spectra = Button(ax_spectra_btn, 'Plot Segment Spectra')
+    fig._btn_spectra = btn_spectra
+    
+    def on_spectra_click(event):
+        x = current_selected['x']
+        y = current_selected['y']
+        if x is not None and y is not None:
+            plot_segment_spectra(y, x, source_h5_path, inference_results_h5)
+            
+    btn_spectra.on_clicked(on_spectra_click)
+    
+    
+    ax_lcmap_btn = fig.add_axes([0.78, 0.02, 0.12, 0.06])
+    btn_lcmap = Button(ax_lcmap_btn, 'LCMAP Classes')
+    fig._btn_lcmap = btn_lcmap
+    
+    def on_lcmap_click(event):
+        x = current_selected['x']
+        y = current_selected['y']
+        if x is not None and y is not None:
+            plot_lcmap_classes(y, x, source_h5_path, inference_results_h5)
+            
+    btn_lcmap.on_clicked(on_lcmap_click)
+
     ax_img.imshow(base_frame)
     ax_img.set_title(f"{base_sg} Acquisition: {base_date.strftime('%Y-%m-%d %H:%M:%S')} UTC")
     
@@ -244,6 +733,9 @@ def plot_spatial_anomaly_overlay(source_h5_path, inference_results_h5):
         
         rect.set_xy((x - 0.5, y - 0.5))
         rect.set_visible(True)
+        
+        current_selected['x'] = x
+        current_selected['y'] = y
         
         current_date_ts = None
         current_sg = None

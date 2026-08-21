@@ -618,6 +618,52 @@ def calculate_global_z_score(volume_array, valid_pixel_mask):
     
     return z_scores, global_mean, global_std
 
+def calculate_global_box_cox(volume_array, valid_pixel_mask):
+    """
+    Calculates the global Z-score for an entire frame of spectral complexity volumes.
+    Uses scikit-learn's PowerTransformer (Box-Cox) to stabilize variance and minimize skewness,
+    standardizing the results in the process. Decouples the evaluation space from the 
+    background statistics space by strictly calculating the parameters from radiometrically valid pixels.
+    """
+    height, width = volume_array.shape
+    normalized_scores = np.full((height, width), np.nan, dtype=np.float32)
+    
+    # Identify globally valid pixels (strictly positive for box-cox transform)
+    global_valid_mask = volume_array > 0.0
+    
+    # Intersect with radiometrically valid pixels for the statistical background model
+    stats_mask = global_valid_mask & valid_pixel_mask
+    
+    # Extract subset volumes strictly for statistical estimation
+    # scikit-learn expects 2D arrays: (n_samples, n_features)
+    stats_vols = volume_array[stats_mask].reshape(-1, 1)
+
+    # Graceful fallback per user directive: Return NaNs for entire frame if no valid background exists.
+    if len(stats_vols) < 9 or len(np.unique(stats_vols)) <= 1:
+        warnings.warn("calculate_global_box_cox warning: Insufficient valid pixels (< 9) or zero variance found. Returning NaNs.")
+        return normalized_scores, np.nan, np.nan, np.nan
+        
+    # Initialize PowerTransformer
+    pt = PowerTransformer(method='box-cox', standardize=True)
+    
+    # Fit the background statistical model
+    # Note: PowerTransformer will raise an error if data is not strictly positive,
+    # but we explicitly filtered for > 0.0 with global_valid_mask.
+    pt.fit(stats_vols)
+    
+    # Extract the learned parameters
+    lambda_val = pt.lambdas_[0]
+    global_mean = pt._scaler.mean_[0]
+    global_std = pt._scaler.scale_[0]
+    
+    # Evaluate ALL geometrically valid pixels using the fitted pure background model
+    apply_vols = volume_array[global_valid_mask].reshape(-1, 1)
+    final_vols = pt.transform(apply_vols)
+    normalized_scores[global_valid_mask] = final_vols.flatten()
+    
+    # Return the spatial map and scalar parameters
+    return normalized_scores, lambda_val, global_mean, global_std
+
 def calculate_global_robust_scaler(volume_array, valid_pixel_mask):
     """
     Calculates the global robust scaling for an entire frame of spectral complexity volumes.

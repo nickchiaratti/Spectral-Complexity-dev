@@ -69,6 +69,8 @@ def plot_global_stats(target_location=None, h5_path=None, location=None, metric=
     with h5py.File(h5_path, 'r') as h5_file:
         if metric == 'zscore':
             dset_path = '/HDFEOS/GRIDS/HARMONIZED/Data Fields/sliding_volume_z_score'
+        elif metric =="box_cox":
+            dset_path = '/HDFEOS/GRIDS/HARMONIZED/Data Fields/sliding_volume_box_cox'
         else:
             dset_path = '/HDFEOS/GRIDS/HARMONIZED/Data Fields/sliding_volume_robust_scale'
             
@@ -81,6 +83,10 @@ def plot_global_stats(target_location=None, h5_path=None, location=None, metric=
         times = attrs['acquisition_time']
         if metric == 'zscore':
             lambdas = None
+            means = attrs['frame_global_means']
+            stds = attrs['frame_global_stds']
+        elif metric == "box_cox":
+            lambdas = attrs['frame_global_lambdas']
             means = attrs['frame_global_means']
             stds = attrs['frame_global_stds']
         else:

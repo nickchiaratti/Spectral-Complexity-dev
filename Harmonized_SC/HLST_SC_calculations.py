@@ -157,6 +157,16 @@ def compute_frame_metrics(payload):
             robust_map, global_lambda, global_median, global_iqr = sc.calculate_global_robust_scaler(slide_map, valid_mask)
             telemetry['Robust_Scale'] = time.perf_counter() - t0
 
+        # --- 6c. Global Box Cox ---
+        box_cox_map = None
+        bc_global_lambda = np.nan
+        bc_global_mean = np.nan
+        bc_global_std = np.nan
+        if flags.get('box_cox', False):
+            t0 = time.perf_counter()
+            box_cox_map, bc_global_lambda, bc_global_mean, bc_global_std = sc.calculate_global_box_cox(slide_map, valid_mask)
+            telemetry['Box_Cox'] = time.perf_counter() - t0
+
         # --- 7. Ortho Visual Consolidation ---
         t0 = time.perf_counter()
         frame_ortho = raw_frame_ortho
@@ -191,9 +201,13 @@ def compute_frame_metrics(payload):
             'z_map': z_map,
             'neighborhood_z_map': neighborhood_z_map,
             'robust_map': robust_map,
+            'box_cox_map': box_cox_map,
             'global_lambda': global_lambda,
             'global_median': global_median,
             'global_iqr': global_iqr,
+            'bc_global_lambda': bc_global_lambda,
+            'bc_global_mean': bc_global_mean,
+            'bc_global_std': bc_global_std,
             'global_mean': global_mean,
             'global_std': global_std,
             'neighborhood_global_mean': neighborhood_global_mean,
@@ -229,6 +243,7 @@ def main(target_location=None, tile_size=3, num_endmembers=7, norm_param=None):
     CALC_NEIGHBORHOOD_VOLUME = True
     CALC_Z_SCORE = True
     CALC_ROBUST_SCALE = True
+    CALC_BOX_COX = True
     CALC_NEIGHBORHOOD_Z_SCORE = True
     CALC_TEMPORAL_Z_SCORE = True
     CALC_PIXEL_TEMPORAL_Z_SCORE = True
@@ -384,6 +399,7 @@ def main(target_location=None, tile_size=3, num_endmembers=7, norm_param=None):
             ds_harm_msd = overwrite_dset(harm_grp, 'msd_map', (total_frames, height, width), spatial_ref=spatial_ref, geo_transform=geo_transform, chunks=chunks_3d) if CALC_MSD else None
             ds_harm_z = overwrite_dset(harm_grp, 'sliding_volume_z_score', (total_frames, height, width), spatial_ref=spatial_ref, geo_transform=geo_transform, chunks=chunks_3d) if CALC_Z_SCORE else None
             ds_harm_robust = overwrite_dset(harm_grp, 'sliding_volume_robust_scale', (total_frames, height, width), spatial_ref=spatial_ref, geo_transform=geo_transform, chunks=chunks_3d) if CALC_ROBUST_SCALE else None
+            ds_harm_box_cox = overwrite_dset(harm_grp, 'sliding_volume_box_cox', (total_frames, height, width), spatial_ref=spatial_ref, geo_transform=geo_transform, chunks=chunks_3d) if CALC_BOX_COX else None
             ds_harm_neighborhood_z = overwrite_dset(harm_grp, 'neighborhood_volume_z_score', (total_frames, height, width), spatial_ref=spatial_ref, geo_transform=geo_transform, chunks=chunks_3d) if CALC_NEIGHBORHOOD_Z_SCORE else None
             ds_harm_temp_z = overwrite_dset(harm_grp, 'temporal_z_score', (total_frames, height, width), spatial_ref=spatial_ref, geo_transform=geo_transform, chunks=chunks_3d) if CALC_TEMPORAL_Z_SCORE else None
             ds_harm_pixel_temp_z = overwrite_dset(harm_grp, 'pixel_temporal_z_score', (total_frames, height, width), spatial_ref=spatial_ref, geo_transform=geo_transform, chunks=chunks_3d) if CALC_PIXEL_TEMPORAL_Z_SCORE else None
@@ -436,7 +452,8 @@ def main(target_location=None, tile_size=3, num_endmembers=7, norm_param=None):
                     'ndvi': CALC_NDVI, 'ndbi': CALC_NDBI, 'msd': CALC_MSD,
                     'endmembers': CALC_GLOBAL_ENDMEMBERS, 'volume': CALC_SLIDING_VOLUME,
                     'neighborhood_volume': CALC_NEIGHBORHOOD_VOLUME, 'z_score': CALC_Z_SCORE,
-                    'neighborhood_z_score': CALC_NEIGHBORHOOD_Z_SCORE, 'robust_scale': CALC_ROBUST_SCALE
+                    'neighborhood_z_score': CALC_NEIGHBORHOOD_Z_SCORE, 'robust_scale': CALC_ROBUST_SCALE,
+                    'box_cox': CALC_BOX_COX
                 },
                 'MASKING': MASKING,
                 'NUM_ENDMEMBERS': NUM_ENDMEMBERS,
@@ -453,6 +470,9 @@ def main(target_location=None, tile_size=3, num_endmembers=7, norm_param=None):
         global_lambdas_list = []
         global_medians_list = []
         global_iqrs_list = []
+        bc_global_lambdas_list = []
+        bc_global_means_list = []
+        bc_global_stds_list = []
 
         completed_frames = 0
         max_workers = 2
@@ -491,6 +511,8 @@ def main(target_location=None, tile_size=3, num_endmembers=7, norm_param=None):
                 ds_harm_z[global_idx, ...] = result['z_map']
             if CALC_ROBUST_SCALE:
                 ds_harm_robust[global_idx, ...] = result['robust_map']
+            if CALC_BOX_COX:
+                ds_harm_box_cox[global_idx, ...] = result['box_cox_map']
             if CALC_NEIGHBORHOOD_Z_SCORE:
                 ds_harm_neighborhood_z[global_idx, ...] = result['neighborhood_z_map']
         
@@ -507,6 +529,10 @@ def main(target_location=None, tile_size=3, num_endmembers=7, norm_param=None):
                 global_lambdas_list.append(result['global_lambda'])
                 global_medians_list.append(result['global_median'])
                 global_iqrs_list.append(result['global_iqr'])
+            if CALC_BOX_COX:
+                bc_global_lambdas_list.append(result['bc_global_lambda'])
+                bc_global_means_list.append(result['bc_global_mean'])
+                bc_global_stds_list.append(result['bc_global_std'])
         
             completed_frames += 1
             print(f"  [{completed_frames}/{total_frames}] {grid_name} (Global Index {global_idx}) processed in {result['telemetry']['Total_Worker_Time']:.2f}s")
@@ -587,7 +613,7 @@ def main(target_location=None, tile_size=3, num_endmembers=7, norm_param=None):
         prov_idx = np.array([m['local_idx'] for m in timeline], dtype='int32')
     
         # Only tag the datasets that were actually generated in this run
-        created_harm_dsets = [ds for ds in [ds_harm_mask, ds_harm_ortho, ds_harm_slide, ds_harm_neighborhood, ds_harm_ndvi, ds_harm_ndbi, ds_harm_msd, ds_harm_z, ds_harm_robust, ds_harm_neighborhood_z, ds_harm_temp_z, ds_harm_pixel_temp_z] if ds is not None]
+        created_harm_dsets = [ds for ds in [ds_harm_mask, ds_harm_ortho, ds_harm_slide, ds_harm_neighborhood, ds_harm_ndvi, ds_harm_ndbi, ds_harm_msd, ds_harm_z, ds_harm_robust, ds_harm_box_cox, ds_harm_neighborhood_z, ds_harm_temp_z, ds_harm_pixel_temp_z] if ds is not None]
     
         for ds in created_harm_dsets:
             ds.attrs.create('source_grid', data=prov_grid)
@@ -631,6 +657,13 @@ def main(target_location=None, tile_size=3, num_endmembers=7, norm_param=None):
                 ds.attrs['frame_global_lambdas'] = np.array(global_lambdas_list, dtype=np.float32)
                 ds.attrs['frame_global_medians'] = np.array(global_medians_list, dtype=np.float32)
                 ds.attrs['frame_global_iqrs'] = np.array(global_iqrs_list, dtype=np.float32)
+            elif ds.name.endswith('sliding_volume_box_cox'):
+                ds.attrs['description'] = "Global Spectral Complexity Box Cox Scale (PowerTransformer with standardization). ARD Masked pixels excluded from background stats."
+                ds.attrs['MASKING_APPLIED'] = MASKING
+                ds.attrs['MASK_SOURCE'] = "HARMONIZED_common_mask"
+                ds.attrs['frame_global_lambdas'] = np.array(bc_global_lambdas_list, dtype=np.float32)
+                ds.attrs['frame_global_means'] = np.array(bc_global_means_list, dtype=np.float32)
+                ds.attrs['frame_global_stds'] = np.array(bc_global_stds_list, dtype=np.float32)
             elif ds.name.endswith('neighborhood_volume_z_score'):
                 ds.attrs['description'] = "Global Spectral Complexity Neighborhood Z-score. ARD Masked pixels excluded from background stats."
                 ds.attrs['MASKING_APPLIED'] = MASKING

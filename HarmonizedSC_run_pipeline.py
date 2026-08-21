@@ -123,6 +123,8 @@ def main():
             func(h5_path=file_path, metric='zscore')
             print(f"Plotting sliding volume global stats (robust) for {location_name}...")
             func(h5_path=file_path, metric='robust')
+            print(f"Plotting sliding volume global stats (box_cox) for {location_name}...")
+            func(h5_path=file_path, metric='box_cox')
             continue
         elif name == "HLST_specComplex_viewer":
             if not args.show_spec_viewer:
