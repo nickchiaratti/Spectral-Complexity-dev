@@ -107,3 +107,16 @@ locations:
     DRAGONETTE_AVAILABLE: false
     ENMAP_AVAILABLE: true
     ENMAP_STAC_URL: https://wyvern-odp.com/industry/spatio_temporal/collection.json
+
+  SanRafael:
+    SOURCE_CACHE: SantaBarbara
+    ROI_LON_MIN: -120.010853
+    ROI_LON_MAX: -119.776707
+    ROI_LAT_MIN: 34.622992
+    ROI_LAT_MAX: 35.009888
+    START_DATE: '2022-01-01'
+    END_DATE: '2026-08-01'
+    TANAGER_AVAILABLE: false
+    DRAGONETTE_AVAILABLE: false
+    ENMAP_AVAILABLE: true
+    ENMAP_STAC_URL: https://wyvern-odp.com/industry/spatio_temporal/collection.json

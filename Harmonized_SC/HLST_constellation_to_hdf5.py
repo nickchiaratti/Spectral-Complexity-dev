@@ -315,6 +315,7 @@ def main(target_location=None):
         if s30_master_data:
             write_hdf_sensor_group(h5f, '/HDFEOS/GRIDS/HLSS30/Data Fields', s30_master_data, S30_WAVELENGTHS, master_crs, master_transform, tile_mapping_json=master_tile_mapping_json)
             odl_blocks.append(hdfeos_odl.generate_hls_odl_grid_string("HLSS30", master_width, master_height, master_transform, master_proj, master_zone, master_gctp, 10, s30_master_data['count']))
+            del s30_master_data  # Free ~60GB of memory before moving to the next sensor
 
         print("Harmonizing HLSL30...")
         l30_master_data = process_hls_master_stack(
@@ -334,6 +335,7 @@ def main(target_location=None):
         if l30_master_data:
             write_hdf_sensor_group(h5f, '/HDFEOS/GRIDS/HLSL30/Data Fields', l30_master_data, L30_SR_WAVELENGTHS, master_crs, master_transform, tile_mapping_json=master_tile_mapping_json)
             odl_blocks.append(hdfeos_odl.generate_hls_odl_grid_string("HLSL30", master_width, master_height, master_transform, master_proj, master_zone, master_gctp, 7, l30_master_data['count']))
+            del l30_master_data  # Free ~30GB of memory
 
         # --- 5b. TANAGER Hyperspectral Processing (From Basic SWATH) ---
         tanager_odl = process_tanager_master_stack(h5f)

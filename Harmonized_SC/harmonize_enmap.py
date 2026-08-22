@@ -23,6 +23,20 @@ MIN_ROI_COVERAGE_PERCENT = 25.0
 SUN_ELEVATION_THRESHOLD = 30
 TIME_THRESHOLD_SECONDS = 120
 
+def load_default_enmap_wavelengths():
+    excel_path = script_dir.parent / "wavelengths" / "EnMAP_Spectral_Bands_update.xlsx"
+    if excel_path.exists():
+        import pandas as pd
+        try:
+            df_vnir = pd.read_excel(excel_path, sheet_name='VNIR')
+            df_swir = pd.read_excel(excel_path, sheet_name='SWIR')
+            df = pd.concat([df_vnir, df_swir], ignore_index=True)
+            if 'CW (nm)' in df.columns:
+                return df['CW (nm)'].values.astype(np.float32)
+        except Exception as e:
+            print(f"Warning: Failed to load default EnMAP wavelengths from Excel: {e}")
+    return np.zeros(224, dtype=np.float32)
+
 def parse_enmap_stac(json_path):
     with open(json_path, 'r') as f:
         stac = json.load(f)
@@ -37,10 +51,17 @@ def parse_enmap_stac(json_path):
         return os.path.join(base_dir, os.path.basename(href))
     
     eo_bands = assets.get('image', {}).get('eo:bands', [])
-    if eo_bands and 'center_wavelength' in eo_bands[0]:
-        wavelengths = [b['center_wavelength'] for b in eo_bands]
-    else:
-        wavelengths = [0.0] * 224
+    wavelengths = []
+    if eo_bands:
+        for b in eo_bands:
+            if 'eo:center_wavelength' in b:
+                wavelengths.append(b['eo:center_wavelength'])
+            elif 'center_wavelength' in b:
+                wavelengths.append(b['center_wavelength'])
+    
+    if len(wavelengths) != 224 or any(w == 0.0 for w in wavelengths):
+        print(f"  Warning: STAC JSON '{os.path.basename(json_path)}' omits complete band wavelength metadata. Falling back to default EnMAP 224-band table.")
+        wavelengths = load_default_enmap_wavelengths()
         
     sun_elev = stac['properties'].get('view:sun_elevation', 0.0)
     sun_azim = stac['properties'].get('view:sun_azimuth', 0.0)
