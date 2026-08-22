@@ -10,7 +10,7 @@ from datetime import datetime
 from tqdm import tqdm
 
 # --- Configuration ---
-LOCATION='Rochesterv2'
+LOCATION='CentralGreece'
 TIME_THRESHOLD_SECONDS = 120  # Group acquisitions within 2 minutes into the same temporal pass
 SOURCE_DIR = "C:/satelliteImagery/enmap/SourceData"
 OUTPUT_DIR = SOURCE_DIR
@@ -223,10 +223,15 @@ def process_native_stack(target_location):
         try:
             scene_data = parse_enmap_stac(str(j_path))
             if not os.path.exists(scene_data['reflectance_tif']):
-                raise FileNotFoundError(f"Missing image asset for item {scene_data['id']}.")
+                print(f"Warning: Skipping item {scene_data['id']} - missing primary reflectance TIFF.")
+                continue
             raw_scenes.append(scene_data)
         except Exception as e:
-            raise RuntimeError(f"Data integrity error during discovery of {j_path.name}: {str(e)}")
+            print(f"Warning: Skipping {j_path.name} due to discovery error: {e}")
+            continue
+
+    if not raw_scenes:
+        raise FileNotFoundError(f"CRITICAL: No complete EnMAP scenes with valid reflectance TIFFs found in {location_dir}")
 
     raw_scenes.sort(key=lambda x: x['time'])
 

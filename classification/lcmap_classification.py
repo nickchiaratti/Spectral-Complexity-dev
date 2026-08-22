@@ -64,11 +64,13 @@ def extract_lcmap_time_series(pixel_y, pixel_x, source_h5_path, inference_result
     for i in range(len(acq_time)):
         if unified_masks[i]: continue
         r = rmse[i]
-        if np.isnan(r): continue
-        if current_rmse is None:
+        
+        if len(current_segment) == 0:
             current_rmse = r
             current_segment.append(i)
-        elif abs(r - current_rmse) < 1e-6:
+        elif (np.isnan(r) and np.isnan(current_rmse)):
+            current_segment.append(i)
+        elif (not np.isnan(r) and not np.isnan(current_rmse) and abs(r - current_rmse) < 1e-6):
             current_segment.append(i)
         else:
             segments.append(current_segment)

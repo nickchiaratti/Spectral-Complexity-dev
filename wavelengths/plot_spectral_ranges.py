@@ -24,12 +24,13 @@ def plot_spectral_ranges():
     tirs_b11_path = os.path.join(script_dir, 'L9_TIRS2_RSR.xlsx')
     oli_rsr_path = os.path.join(script_dir, 'L9_OLI2_RSR.xlsx')
 
-    # Create figure with 3 subplots
-    fig, axes = plt.subplots(3, 1, figsize=(7.16, 3))
+    # Create figure with 4 subplots
+    fig, axes = plt.subplots(4, 1, figsize=(7.16, 4))
     
     ax_landsat = axes[0]
     ax_tanager = axes[1]
-    ax_sentinel = axes[2]
+    ax_enmap = axes[2]
+    ax_sentinel = axes[3]
 
     # ==========================================
     # Plot 1: Landsat 8/9 (OLI + TIRS)
@@ -143,10 +144,14 @@ def plot_spectral_ranges():
                         # Generate Gaussian y values (normalized to peak at 1.0 for RSR comparability)
                         y = np.exp(-0.5 * ((x - center) / sigma) ** 2)
                         
-                        # Determine if it's a water absorption band
-                        if not ((1.35 <= center <= 1.45) or (1.80 <= center <= 1.95)):
+                        # Determine if it's a water absorption band using the metadata attribute
+                        is_good = band.get('good_wavelength')
+                        if is_good is None:
+                            raise ValueError("Missing 'good_wavelength' attribute in Tanager JSON. Cannot verify valid bands.")
+                            
+                        if is_good:
                             current_color = tanager_color
-                # Plot the distribution
+                            # Plot the distribution
                             ax_tanager.plot(x, y, color=current_color, alpha=0.6, linewidth=1, linestyle='-')
                             ax_tanager.fill_between(x, y, color=current_color, alpha=0.1)
                 
@@ -165,7 +170,58 @@ def plot_spectral_ranges():
     ax_tanager.text(0.98, 0.90, 'Tanager', transform=ax_tanager.transAxes, ha='right', va='top', fontsize=9, fontweight='bold')
 
     # ==========================================
-    # Plot 3: Sentinel-2A
+    # Plot 3: EnMAP Hyperspectral
+    # ==========================================
+    enmap_excel_path = os.path.join(script_dir, 'EnMAP_Spectral_Bands_update.xlsx')
+    
+    if os.path.exists(enmap_excel_path):
+        try:
+            import warnings
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", category=UserWarning)
+                df_vnir = pd.read_excel(enmap_excel_path, sheet_name='VNIR')
+                df_swir = pd.read_excel(enmap_excel_path, sheet_name='SWIR')
+                df_enmap = pd.concat([df_vnir, df_swir], ignore_index=True)
+            
+            enmap_color = '#9467bd' # Purple for EnMAP hyperspectral lines
+            bands_found = False
+            
+            for idx, row in df_enmap.iterrows():
+                center_nm = row.get('CW (nm)')
+                fwhm_nm = row.get('FWHM (nm)')
+                
+                if pd.notna(center_nm) and pd.notna(fwhm_nm):
+                    bands_found = True
+                    # Excel has wavelengths in nm, we need um
+                    center = center_nm / 1000.0
+                    fwhm = fwhm_nm / 1000.0
+                    
+                    # Exclude major atmospheric water absorption bands
+                    if (1.35 <= center <= 1.45) or (1.80 <= center <= 1.95):
+                        continue
+                    
+                    sigma = fwhm / 2.355
+                    x = np.linspace(center - 3*sigma, center + 3*sigma, 100)
+                    y = np.exp(-0.5 * ((x - center) / sigma) ** 2)
+                    
+                    ax_enmap.plot(x, y, color=enmap_color, alpha=0.6, linewidth=1, linestyle='-')
+                    ax_enmap.fill_between(x, y, color=enmap_color, alpha=0.1)
+                        
+            if not bands_found:
+                print("No band data found in EnMAP Excel.")
+        except Exception as e:
+            print(f"Error reading EnMAP Excel: {e}")
+    else:
+        print("EnMAP Excel file not found.")
+
+    # EnMAP Subplot Formatting
+    ax_enmap.set_xlim(0.37, 2.51) # Standard VSWIR range
+    ax_enmap.set_ylim(0, 1.3)
+    ax_enmap.grid(True, linestyle='--', alpha=0.6)
+    ax_enmap.text(0.98, 0.90, 'EnMAP', transform=ax_enmap.transAxes, ha='right', va='top', fontsize=9, fontweight='bold')
+
+    # ==========================================
+    # Plot 4: Sentinel-2A
     # ==========================================
     sentinel_path = os.path.join(script_dir, 'Sentinel-2A MSI Spectral Responses.xlsx')
     

@@ -133,7 +133,7 @@ def process_tanager_swaths_to_grid(h5f, tanager_source_dir, master_height, maste
                         dtype = df_grp[name].dtype
                         
                         fill_val = grp_tanager[name].fillvalue
-                        resample_algo = Resampling.average
+                        resample_algo = Resampling.nearest
                         if dtype.kind in ['i', 'u', 'b']:
                             resample_algo = Resampling.nearest
                         

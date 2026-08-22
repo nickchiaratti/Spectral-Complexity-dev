@@ -34,6 +34,7 @@ import SpecComplex as sc
 import hdfeos_odl
 from Harmonized_SC.harmonize_tanager import process_tanager_swaths_to_grid
 from Harmonized_SC.harmonize_hls import process_hls_master_stack
+from Harmonized_SC.harmonize_enmap import process_enmap_scenes_to_grid
 
 import yaml
 
@@ -56,6 +57,16 @@ def main(target_location=None):
     TANAGER_CLOUD_DILATION = 5
     TANAGER_UNCERTAINTY_THRESHOLD = 0.1
     TANAGER_AEROSOL_THRESHOLD = 0.35
+
+    # ENMAP Specific Configuration
+    ENMAP_CLOUD_DILATION = 0
+    ENMAP_REJECT_CLOUD = True
+    ENMAP_REJECT_CLOUD_SHADOW = True
+    ENMAP_REJECT_HAZE = True
+    ENMAP_REJECT_CIRRUS = True
+    ENMAP_REJECT_SNOW = True
+    ENMAP_REJECT_DEFECTIVE = True
+    ENMAP_REJECT_WATER = True
 
     # Load Configuration
     script_dir = Path(__file__).resolve().parent
@@ -80,10 +91,12 @@ def main(target_location=None):
     ROI_LAT_MIN = config["ROI_LAT_MIN"]
     ROI_LAT_MAX = config["ROI_LAT_MAX"]
     TANAGER_AVAILABLE = config.get("TANAGER_AVAILABLE", False)
+    ENMAP_AVAILABLE = config.get("ENMAP_AVAILABLE", False)
 
     HLS_SOURCE_DIR = "C:/satelliteImagery/HLS30/"
 
     TANAGER_SOURCE_DIR = f"C:/satelliteImagery/Tanager/{SOURCE_CACHE}_SourceData"
+    ENMAP_SOURCE_DIR = f"C:/satelliteImagery/Enmap/{SOURCE_CACHE}_SourceData"
     COMBINED_OUTPUT_DIR = "C:/satelliteImagery/HLST30/"
  
     INPUT_NATIVE_HDF5 = os.path.join(HLS_SOURCE_DIR, f"HLS_{Location}_STAC_Native_2025.h5")
@@ -235,6 +248,31 @@ def main(target_location=None):
         else:
             return None
 
+    def process_enmap_master_stack(h5f):
+        res = process_enmap_scenes_to_grid(
+            h5f=h5f,
+            enmap_source_dir=ENMAP_SOURCE_DIR,
+            master_height=master_height,
+            master_width=master_width,
+            master_crs=master_crs,
+            master_transform=master_transform,
+            min_roi_coverage=MIN_ROI_COVERAGE_PERCENT,
+            sun_elev_thresh=SUN_ELEVATION_THRESHOLD,
+            cloud_dil=ENMAP_CLOUD_DILATION,
+            reject_cloud=ENMAP_REJECT_CLOUD,
+            reject_shadow=ENMAP_REJECT_CLOUD_SHADOW,
+            reject_haze=ENMAP_REJECT_HAZE,
+            reject_cirrus=ENMAP_REJECT_CIRRUS,
+            reject_snow=ENMAP_REJECT_SNOW,
+            reject_defective=ENMAP_REJECT_DEFECTIVE,
+            reject_water=ENMAP_REJECT_WATER
+        )
+        if res is not None:
+            datasets_created_info, total_num_frames, band_count = res
+            return hdfeos_odl.generate_dynamic_odl_grid_string("ENMAP", master_width, master_height, master_transform, master_proj, master_zone, master_gctp, datasets_created_info, total_num_frames, band_count)
+        else:
+            return None
+
     # ==========================================
     # 5. MASTER EXECUTION
     # ==========================================
@@ -302,6 +340,15 @@ def main(target_location=None):
         if tanager_odl:
             odl_blocks.append(tanager_odl)
 
+        # --- 5c. ENMAP Hyperspectral Processing (From STAC TIFFs) ---
+        if ENMAP_AVAILABLE:
+            enmap_odl = process_enmap_master_stack(h5f)
+            if enmap_odl:
+                odl_blocks.append(enmap_odl)
+                
+        # Finalize StructMetadata
+        odl_string = "\n".join(odl_blocks)
+        info_grp.create_dataset("StructMetadata.0", data=np.array(odl_string, dtype=h5py.string_dtype(encoding='ascii')))
 
 if __name__ == '__main__':
     main()

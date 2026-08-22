@@ -69,7 +69,7 @@ def compute_frame_metrics(payload):
                 # Flag persistent open water as masked/invalid in the frame's common_mask
                 frame_mask[persistent_water_mask] = 1
 
-            if sensor_type == "TANAGER":
+            if sensor_type in ["TANAGER", "ENMAP"]:
                 gw_mask = data_grp["surface_reflectance"].attrs.get("all_good_wavelengths")[t_local].astype(bool)
             else:
                 gw_mask = None
@@ -432,6 +432,12 @@ def main(target_location=None, tile_size=3, num_endmembers=7, norm_param=None):
             elif "TANAGER" in grid_name:
                 red_idx, nir_idx, swir_idx = 59, 97, 244
                 sensor_type = "TANAGER"
+            elif "ENMAP" in grid_name:
+                wl = h5_orig[f"/HDFEOS/GRIDS/{grid_name}/Data Fields/surface_reflectance"].attrs['wavelengths']
+                red_idx = int(np.argmin(np.abs(wl - 650)))
+                nir_idx = int(np.argmin(np.abs(wl - 850)))
+                swir_idx = int(np.argmin(np.abs(wl - 1600)))
+                sensor_type = "ENMAP"
             else:
                 raise ValueError(f"CRITICAL ERROR: Unrecognized Sensor Grid Architecture: {grid_name}")
 
@@ -565,7 +571,7 @@ def main(target_location=None, tile_size=3, num_endmembers=7, norm_param=None):
             print("\nCalculating Temporal Z-Scores per Sensor...")
             
             # Group frame indices by sensor
-            sensor_indices = {"Landsat": [], "Sentinel": [], "Tanager": []}
+            sensor_indices = {"Landsat": [], "Sentinel": [], "Tanager": [], "EnMAP": []}
             for idx, meta in enumerate(timeline):
                 grid = meta['grid']
                 if "HLSL30" in grid:
@@ -574,6 +580,8 @@ def main(target_location=None, tile_size=3, num_endmembers=7, norm_param=None):
                     sensor_indices["Sentinel"].append(idx)
                 elif "TANAGER" in grid:
                     sensor_indices["Tanager"].append(idx)
+                elif "ENMAP" in grid:
+                    sensor_indices["EnMAP"].append(idx)
                     
             for sensor, indices in sensor_indices.items():
                 if len(indices) == 0: continue

@@ -110,6 +110,60 @@ def get_tanager_mask(data_grp, f_idx, shape,
         
     return invalid_mask
 
+def get_enmap_mask(data_grp, f_idx, shape, 
+                   sun_elevation_threshold=30, 
+                   cloud_dilation=2,
+                   reject_cloud=True,
+                   reject_shadow=True,
+                   reject_haze=True,
+                   reject_cirrus=True,
+                   reject_snow=True,
+                   reject_defective=True,
+                   reject_water=True):
+    """
+    Generates a boolean spatial mask for ENMAP data using quality classes and other masks.
+    EnMAP Quality Classes (Table 4-8): 1=Land, 2=Water, 3=Background, 0=None.
+    True = Masked/Invalid, False = Valid.
+    """
+    invalid_mask = np.zeros(shape, dtype=bool)
+    kernel = np.ones((3, 3), dtype=bool)
+    
+    # Read quality classes
+    qc = data_grp['quality_classes'][f_idx, ...]
+    
+    # Always reject Background (3)
+    qc_invalid = (qc == 3)
+    
+    if reject_water:
+        qc_invalid |= (qc == 2)
+    
+    if reject_cloud and 'quality_cloud' in data_grp:
+        qc_invalid |= (data_grp['quality_cloud'][f_idx, ...] > 0)
+    if reject_shadow and 'quality_cloud_shadow' in data_grp:
+        qc_invalid |= (data_grp['quality_cloud_shadow'][f_idx, ...] > 0)
+    if reject_haze and 'quality_haze' in data_grp:
+        qc_invalid |= (data_grp['quality_haze'][f_idx, ...] > 0)
+    if reject_cirrus and 'quality_cirrus' in data_grp:
+        # EnMAP cirrus: 0=none, 1=thin, 2=medium, 3=thick
+        qc_invalid |= (data_grp['quality_cirrus'][f_idx, ...] > 0)
+    if reject_snow and 'quality_snow' in data_grp:
+        qc_invalid |= (data_grp['quality_snow'][f_idx, ...] > 0)
+    if reject_defective and 'defective_pixel_mask' in data_grp:
+        qc_invalid |= (data_grp['defective_pixel_mask'][f_idx, ...] > 0)
+        
+    if cloud_dilation > 0:
+        qc_invalid = ndimage.binary_dilation(qc_invalid, structure=kernel, iterations=cloud_dilation)
+        
+    invalid_mask |= qc_invalid
+    
+    # Sun elevation check
+    sun_elev_arr = data_grp['surface_reflectance'].attrs.get('sun_elevation', None)
+    if sun_elev_arr is not None and sun_elevation_threshold is not None:
+        if sun_elev_arr[f_idx] < sun_elevation_threshold:
+            invalid_mask |= True
+            
+    return invalid_mask
+
 def get_hls_mask(data_grp, t, sun_elevation_threshold, cloud_dilation, qa_reject_mask, aerosol_accept_level):
     """
     Derives a strict validity mask based on HLS Fmask bits and Solar angles.

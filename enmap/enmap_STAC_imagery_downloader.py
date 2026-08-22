@@ -19,41 +19,89 @@ import yaml
 # Target collection
 STAC_API_URL = "https://geoservice.dlr.de/eoc/ogc/stac/v1"
 COLLECTION_ID = "ENMAP_HSI_L2A"
-TARGET_LOCATION = 'Rochesterv2'
+TARGET_LOCATION = 'SantaBarbara'
 
-# Output Directory
-OUTPUT_DIR = Path(f"C:/satelliteImagery/enmap/SourceData")
+def auto_cas_login(session, user, password):
+    """Automatically logs into DLR's CAS SSO to establish download session cookies."""
+    from bs4 import BeautifulSoup
+    from urllib.parse import urljoin
+    print("Authenticating with DLR CAS using credentials from .env...")
+    
+    # We use a known protected endpoint to trigger the CAS redirect
+    trigger_url = 'https://download.geoservice.dlr.de/ENMAP/files/L2A/2026/08/08/DT0000208491/01/ENMAP01-____L2A-DT0000208491_20260808T004733Z_001_V010506_20260809T184648Z/ENMAP01-____L2A-DT0000208491_20260808T004733Z_001_V010506_20260809T184648Z-METADATA.XML'
+    
+    r_get = session.get(trigger_url)
+    soup = BeautifulSoup(r_get.text, 'html.parser')
+    form = soup.find('form', id='fm1')
+    
+    if not form:
+        print("Warning: CAS login form not found. Assuming session is already valid.")
+        return session
+        
+    action = form.get('action', 'login')
+    post_url = urljoin(r_get.url, action)
+    
+    payload = {}
+    for inp in form.find_all('input'):
+        n = inp.get('name')
+        v = inp.get('value', '')
+        if n:
+            payload[n] = v
+            
+    payload['username'] = user
+    payload['password'] = password
+    payload['_eventId'] = 'submit'
+    
+    xsrf_token = session.cookies.get('XSRF-TOKEN')
+    headers = {}
+    if xsrf_token:
+        headers['X-XSRF-TOKEN'] = xsrf_token
+        payload['_csrf'] = xsrf_token
+        
+    r_post = session.post(post_url, data=payload, headers=headers, allow_redirects=True)
+    if 'ticket=' in r_post.url or 'download.geoservice.dlr.de' in r_post.url:
+        print("Successfully authenticated with DLR download server.")
+    else:
+        print(f"Warning: Unexpected post-login URL: {r_post.url}")
+        
+    return session
 
 def create_retry_session():
-    """Creates a robust requests Session equipped with exponential backoff and browser cookies."""
+    """Creates a robust requests Session equipped with exponential backoff and automated CAS authentication."""
     session = requests.Session()
+    session.headers.update({
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    })
     
-    # Attempt to load .env manually if dotenv is not installed
     env_path = Path(__file__).parent.parent / '.env'
+    user, pwd = None, None
+    env_cookie = None
+    
     if env_path.exists():
         with open(env_path, 'r') as f:
             for line in f:
-                line = line.strip()
-                if line and not line.startswith('#') and '=' in line:
-                    key, val = line.split('=', 1)
-                    os.environ[key.strip()] = val.strip()
-
-    enmap_user = os.environ.get('ENMAP_USERNAME')
-    enmap_pass = os.environ.get('ENMAP_PASSWORD')
+                if '=' in line and not line.startswith('#'):
+                    k, v = line.strip().split('=', 1)
+                    if k.strip() == 'ENMAP_USERNAME': user = v.strip()
+                    if k.strip() == 'ENMAP_PASSWORD': pwd = v.strip()
+                    if k.strip() == 'ENMAP_COOKIE': env_cookie = v.strip().strip('"').strip("'")
     
-    session.basic_auth = None
-    if enmap_user and enmap_pass:
-        print("Using basic authentication from .env file for EnMAP downloads.")
-        session.basic_auth = (enmap_user, enmap_pass)
+    if user and pwd:
+        session = auto_cas_login(session, user, pwd)
+    elif env_cookie:
+        print("Using session cookie provided in .env file (ENMAP_COOKIE).")
+        session.headers.update({'Cookie': env_cookie})
     else:
-        print("Extracting session cookies for dlr.de from your local browser...")
+        print("Extracting session cookies for dlr.de from your Chrome/local browser...")
         try:
-            cj = browser_cookie3.load(domain_name='dlr.de')
+            try:
+                cj = browser_cookie3.chrome(domain_name='dlr.de')
+            except Exception:
+                cj = browser_cookie3.load(domain_name='dlr.de')
             session.cookies.update(cj)
         except Exception as e:
-            print(f"Warning: Failed to extract browser cookies: {e}")
-            print("Continuing without browser cookies, but downloads may fail if authentication is required.")
-        
+            print(f"Warning: Could not extract browser cookies ({e}).")
+
     retry_strategy = Retry(
         total=10,
         status_forcelist=[429, 500, 502, 503, 504],
@@ -73,16 +121,18 @@ def download_file(url, destination_path, session):
 
     print(f"    -> Downloading to {destination_path.name}...")
     try:
-        kwargs = {"stream": True}
-        if getattr(session, 'basic_auth', None):
-            kwargs['auth'] = session.basic_auth
-            
-        with session.get(url, **kwargs) as r:
-            # Note: For some web-based portals, a 401/403 might indicate auth issues.
+        with session.get(url, stream=True) as r:
             if r.status_code in [401, 403]:
                 print(f"    -> Authentication failed or access denied (HTTP {r.status_code}) for {url}")
                 return False
             r.raise_for_status()
+
+            # Verify response is not an HTML login/error page instead of valid binary/data asset
+            content_type = r.headers.get('Content-Type', '').lower()
+            if 'text/html' in content_type and not destination_path.name.endswith('.html'):
+                print(f"    -> Download returned an HTML login page instead of asset file. Session authentication required for {url}")
+                return False
+
             with open(destination_path, 'wb') as f:
                 for chunk in r.iter_content(chunk_size=8192):
                     f.write(chunk)
@@ -98,10 +148,9 @@ def execute_job(job_config, session):
     job_name = job_config["job_name"]
     bbox = job_config["bbox"]
     dt_range = job_config["datetime"]
-    cc_max = job_config.get("cloud_cover_max", 100)
     target_assets = job_config.get("target_assets", ['image','metadata','quality_classes'])
     
-    out_dir = OUTPUT_DIR / job_name
+    out_dir = job_config["out_dir"]
     out_dir.mkdir(parents=True, exist_ok=True)
     
     print(f"\n{'='*50}")
@@ -142,20 +191,8 @@ def execute_job(job_config, session):
         print(f"Failed to query STAC API: {e}")
         return
 
-    # Client-side cloud cover filtering
-    filtered_items = []
-    for item in items:
-        # Check cloud cover property if it exists
-        properties = item.get('properties', {})
-        cloud_cov = properties.get('eo:cloud_cover', 0)
-        try:
-            if float(cloud_cov) <= float(cc_max):
-                filtered_items.append(item)
-        except (ValueError, TypeError):
-            # If cloud cover is entirely missing or unparseable, keep the item just in case
-            filtered_items.append(item)
-            
-    print(f"Found {len(filtered_items)} items matching criteria (Cloud Cover <= {cc_max}%).")
+    filtered_items = items
+    print(f"Found {len(filtered_items)} items matching query criteria.")
     
     matched_items = 0
     for idx, item in enumerate(filtered_items):
@@ -186,8 +223,16 @@ def execute_job(job_config, session):
             href = asset.get('href')
             if not href:
                 continue
-                
+            
+            # WORKAROUND: DLR STAC Catalog has a bug where older items have invalid hrefs missing the item_id folder.
+            # Example Bad:  .../DT0000163932/05/ENMAP01-...-METADATA.XML
+            # Example Good: .../DT0000163932/05/ENMAP01-.../ENMAP01-...-METADATA.XML
+            # We automatically fix the URL by injecting the item_id folder if it's missing.
             file_name = os.path.basename(href.split("?")[0])
+            if f"/{item_id}/" not in href:
+                parent_dir_path = href.rsplit('/', 1)[0]
+                href = f"{parent_dir_path}/{item_id}/{file_name}"
+
             dest_path = item_folder / file_name
             
             download_file(href, dest_path, session)
@@ -207,6 +252,9 @@ def main(target_location=None):
     with open(config_path, "r") as f:
         config_data = yaml.safe_load(f)
         
+    if target_location is None:
+        target_location = config_data.get("current_run", {}).get("location")
+        
     download_jobs = []
     locations_to_process = [target_location] if target_location else config_data.get("locations", {}).keys()
     
@@ -225,15 +273,19 @@ def main(target_location=None):
         start_date = loc_config.get("START_DATE", "2023-01-01")
         end_date = loc_config.get("END_DATE", "2025-12-31")
         
+        source_cache = loc_config.get("SOURCE_CACHE") or loc_name
+        
         # Enforce valid bbox format [minx, miny, maxx, maxy]
         bbox = [min(min_lon, max_lon), min(min_lat, max_lat), max(min_lon, max_lon), max(min_lat, max_lat)]
+        
+        out_dir = Path(f"C:/satelliteImagery/Enmap/{source_cache}_SourceData")
         
         download_jobs.append({
             "job_name": f"{loc_name}_EnMAP",
             "bbox": bbox,
             "datetime": f"{start_date}/{end_date}",
-            "cloud_cover_max": 85,
-            "target_assets": [] 
+            "target_assets": [],
+            "out_dir": out_dir
         })
     
     session = create_retry_session()

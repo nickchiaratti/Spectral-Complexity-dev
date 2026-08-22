@@ -54,7 +54,7 @@ def process_hls_master_stack(
                 src_sr = sr_node[fidx, 0:1, :, :]
                 
                 tmp_sr_band0 = np.full((1, master_height, master_width), np.nan, dtype=np.float32)
-                reproject(source=src_sr, destination=tmp_sr_band0, src_transform=src_tf, src_crs=src_crs, dst_transform=master_transform, dst_crs=master_crs, resampling=Resampling.cubic, src_nodata=np.nan, dst_nodata=np.nan)
+                reproject(source=src_sr, destination=tmp_sr_band0, src_transform=src_tf, src_crs=src_crs, dst_transform=master_transform, dst_crs=master_crs, resampling=Resampling.nearest, src_nodata=np.nan, dst_nodata=np.nan)
                 
                 mask_sr = ~np.isnan(tmp_sr_band0)
                 accum_sr_band0[mask_sr] = tmp_sr_band0[mask_sr]
@@ -105,7 +105,7 @@ def process_hls_master_stack(
             
                 src_sr = sr_node[fidx]
                 tmp_sr = np.full((expected_sr, master_height, master_width), np.nan, dtype=np.float32)
-                reproject(source=src_sr, destination=tmp_sr, src_transform=src_tf, src_crs=src_crs, dst_transform=master_transform, dst_crs=master_crs, resampling=Resampling.cubic, src_nodata=np.nan, dst_nodata=np.nan)
+                reproject(source=src_sr, destination=tmp_sr, src_transform=src_tf, src_crs=src_crs, dst_transform=master_transform, dst_crs=master_crs, resampling=Resampling.nearest, src_nodata=np.nan, dst_nodata=np.nan)
                 mask_sr = ~np.isnan(tmp_sr)
                 stk_sr[idx][mask_sr] = tmp_sr[mask_sr]
             

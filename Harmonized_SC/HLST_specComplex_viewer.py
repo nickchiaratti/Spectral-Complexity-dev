@@ -162,7 +162,7 @@ class HarmonizedComplexityViewer:
                 raw_wl = data_grp.attrs['wavelengths'][:]
             else:
                 raw_wl = self.h5[f'/HDFEOS/GRIDS/{g}/Data Fields/surface_reflectance'].attrs['wavelengths'][:]
-            if 'TANAGER' in g.upper():
+            if 'TANAGER' in g.upper() or 'ENMAP' in g.upper():
                 self.wavelengths[g] = raw_wl / 1000.0
             else:
                 self.wavelengths[g] = raw_wl
@@ -170,6 +170,7 @@ class HarmonizedComplexityViewer:
         # Find specific indices for scatter plot reference
         self.l_file_idx = next((i for i, g in enumerate(self.prov_grid) if 'HLS' in g.upper()), None)
         self.t_file_idx = next((i for i, g in enumerate(self.prov_grid) if 'TANAGER' in g.upper()), None)
+        self.e_file_idx = next((i for i, g in enumerate(self.prov_grid) if 'ENMAP' in g.upper()), None)
         
         # Map Geographic Coordinates to Pixel Coordinates
         data_grp0 = self.h5[f'/HDFEOS/GRIDS/{self.prov_grid[0]}/Data Fields']
@@ -250,7 +251,8 @@ class HarmonizedComplexityViewer:
         ts_res = {
             'LANDSAT': {loc['label']: {'t': [], 'v': []} for loc in TS_LOCATIONS},
             'SENTINEL': {loc['label']: {'t': [], 'v': []} for loc in TS_LOCATIONS},
-            'TANAGER': {loc['label']: {'t': [], 'v': []} for loc in TS_LOCATIONS}
+            'TANAGER': {loc['label']: {'t': [], 'v': []} for loc in TS_LOCATIONS},
+            'ENMAP': {loc['label']: {'t': [], 'v': []} for loc in TS_LOCATIONS}
         }
         all_comp = target_dset[:]
         all_mask = self.common_mask_dset[:] if MASKING else np.ones_like(all_comp, dtype=bool)
@@ -265,7 +267,8 @@ class HarmonizedComplexityViewer:
                         grid_upper = self.prov_grid[i].upper()
                         if 'HLSL30' in grid_upper: key = 'LANDSAT'
                         elif 'HLSS30' in grid_upper: key = 'SENTINEL'
-                        else: key = 'TANAGER'
+                        elif 'TANAGER' in grid_upper: key = 'TANAGER'
+                        else: key = 'ENMAP'
                         ts_res[key][loc['label']]['t'].append(dt)
                         ts_res[key][loc['label']]['v'].append(vals[i])
         return ts_res
@@ -306,11 +309,13 @@ class HarmonizedComplexityViewer:
         
         # Scatter Plot Controls
         self.ax_meta.text(0.5, 0.67, f"--- {COMPLEXITY_DICT.get(complexity_type, complexity_type)} Scatter ---", ha='center', va='center', fontsize=10)
-        ax_l_frame = self.fig_controls.add_axes([0.2, 0.62, 0.15, 0.035])
-        ax_t_frame = self.fig_controls.add_axes([0.5, 0.62, 0.15, 0.035])
+        ax_l_frame = self.fig_controls.add_axes([0.1, 0.62, 0.15, 0.035])
+        ax_t_frame = self.fig_controls.add_axes([0.35, 0.62, 0.15, 0.035])
+        ax_e_frame = self.fig_controls.add_axes([0.6, 0.62, 0.15, 0.035])
         ax_scatter_btn = self.fig_controls.add_axes([0.3, 0.57, 0.4, 0.035])
-        self.txt_l_frame = TextBox(ax_l_frame, 'L Idx: ', initial=str(self.l_file_idx if self.l_file_idx is not None else 0))
-        self.txt_t_frame = TextBox(ax_t_frame, 'T Idx: ', initial=str(self.t_file_idx if self.t_file_idx is not None else 0))
+        self.txt_l_frame = TextBox(ax_l_frame, 'L: ', initial=str(self.l_file_idx if self.l_file_idx is not None else 0))
+        self.txt_t_frame = TextBox(ax_t_frame, 'T: ', initial=str(self.t_file_idx if self.t_file_idx is not None else 0))
+        self.txt_e_frame = TextBox(ax_e_frame, 'E: ', initial=str(self.e_file_idx if self.e_file_idx is not None else 0))
         self.btn_scatter = Button(ax_scatter_btn, 'Update Scatter', color='lightyellow')
         
         # Localization
@@ -409,6 +414,8 @@ class HarmonizedComplexityViewer:
             self.txt_l_frame.set_val(str(idx))
         elif 'TANAGER' in grid_name.upper():
             self.txt_t_frame.set_val(str(idx))
+        elif 'ENMAP' in grid_name.upper():
+            if hasattr(self, 'txt_e_frame'): self.txt_e_frame.set_val(str(idx))
 
         filter_str = "Masking: Derived from HARMONIZED common_mask"
         self.combined_hud.set_text(meta_str.replace('\n', ' | ') + '\n' + filter_str)
@@ -438,7 +445,7 @@ class HarmonizedComplexityViewer:
         else:
             rgba = raw_vis.astype(np.float32)
             
-        if 'TANAGER' in grid_name.upper():
+        if 'TANAGER' in grid_name.upper() or 'ENMAP' in grid_name.upper():
             for c in range(3):
                 chan = rgba[..., c]
                 valid_pixels = chan[chan > 0]
@@ -643,6 +650,7 @@ class HarmonizedComplexityViewer:
             l_data = self.ts_data['LANDSAT'][label]
             s_data = self.ts_data['SENTINEL'][label]
             t_data = self.ts_data['TANAGER'][label]
+            e_data = self.ts_data['ENMAP'][label]
             
             filt_t_l, filt_v_l = [], []
             if l_data['t']:
@@ -662,12 +670,20 @@ class HarmonizedComplexityViewer:
                     if self.ts_start_date <= t_data['t'][i] <= self.ts_end_date:
                         filt_t_t.append(t_data['t'][i]); filt_v_t.append(t_data['v'][i])
 
+            filt_t_e, filt_v_e = [], []
+            if e_data['t']:
+                for i in range(len(e_data['t'])):
+                    if self.ts_start_date <= e_data['t'][i] <= self.ts_end_date:
+                        filt_t_e.append(e_data['t'][i]); filt_v_e.append(e_data['v'][i])
+
             if filt_t_l:
                 self.ax_transect_t.plot(filt_t_l, filt_v_l, marker='^', color=c_color, label=f"L: {label}", markersize=5, linestyle='--', linewidth=1.5, alpha=0.7)
             if filt_t_s:
                 self.ax_transect_t.plot(filt_t_s, filt_v_s, marker='o', color=c_color, label=f"S: {label}", markersize=4, linestyle=':', linewidth=1.2, alpha=0.7)
             if filt_t_t:
                 t_ax.plot(filt_t_t, filt_v_t, marker='s', color=c_color, label=f"T: {label}", markersize=6, linestyle='-', linewidth=2, alpha=0.9)
+            if filt_t_e:
+                t_ax.plot(filt_t_e, filt_v_e, marker='D', color=c_color, label=f"E: {label}", markersize=6, linestyle='-', linewidth=2, alpha=0.9)
             
             self.ax_transect_t.grid(True, alpha=0.3, which="both", ls="--")
             self.ax_transect_t.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m'))
@@ -712,6 +728,12 @@ class HarmonizedComplexityViewer:
                     filt_t, filt_v = [t for t in t_d['t'] if self.ts_start_date <= t <= self.ts_end_date], [v for i, v in enumerate(t_d['v']) if self.ts_start_date <= t_d['t'][i] <= self.ts_end_date]
                     if filt_t:
                         t_ax.plot(filt_t, filt_v, marker='s', color=loc['color'], label=f"T: {label}", markersize=5, linestyle='-', linewidth=1.5, alpha=0.9)
+                        
+                e_d = src['ENMAP'][label]
+                if e_d['t']:
+                    filt_t, filt_v = [t for t in e_d['t'] if self.ts_start_date <= t <= self.ts_end_date], [v for i, v in enumerate(e_d['v']) if self.ts_start_date <= e_d['t'][i] <= self.ts_end_date]
+                    if filt_t:
+                        t_ax.plot(filt_t, filt_v, marker='D', color=loc['color'], label=f"E: {label}", markersize=5, linestyle='-', linewidth=1.5, alpha=0.9)
 
             ax_main.grid(True, alpha=0.3, which="both", ls="--")
             ax_main.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m'))

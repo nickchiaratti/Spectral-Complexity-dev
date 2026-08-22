@@ -24,6 +24,8 @@ import re
 import yaml
 import sys
 
+LOCATION_DEFAULT="SantaBarbara"
+
 # Add parent folder to sys.path to find hdfeos_odl
 script_dir = Path(__file__).resolve().parent
 if str(script_dir.parent) not in sys.path:
@@ -50,7 +52,7 @@ def main(target_location=None):
     if target_location is not None:
         Location = target_location
     else:
-        Location = config_data.get("current_run", {}).get("location", "Palisades")
+        Location = config_data.get("current_run", {}).get("location", LOCATION_DEFAULT)
     config = config_data["locations"][Location]
 
     SOURCE_CACHE = config.get("SOURCE_CACHE")

@@ -10,18 +10,27 @@ REGIONS = {
     "Utah": [-114.05, 37.0, -109.0, 42.5],
     "Rochester_NY": [-77.72, 43.04, -77.44, 43.28],
     "BuenosAires": [ -65.0, -70.0, -41.0, -30.0],
-    "Global": [-180.0, -90.0, 180.0, 90.0]
+    "Global": [-180.0, -90.0, 180.0, 90.0],
+    "CentralGreece": [21, 40, 22, 41],
 }
 
 # --- Download Jobs Configuration ---
 # To build temporal series across different catalogs, point multiple jobs to the same 'output_dir'
 # and use the same 'include_bboxes'. The native stacker will combine them automatically.
 DOWNLOAD_JOBS = [
+    #{
+    #    "job_name": "Palisade",
+    #    "collection_url": "https://www.planet.com/data/stac/tanager-core-imagery/natural-lands/collection.json",#"https://www.planet.com/data/stac/tanager-core-imagery/fire/collection.json",
+    #    "output_dir": r"C:\satelliteImagery\Tanager\Palisades_SourceData",
+    #    "include_bboxes": [REGIONS["Southern_California"]],
+    #    "exclude_bboxes": [REGIONS["Utah"]],
+    #    "target_assets": ['basic_sr_hdf5'] 
+    #},
     {
-        "job_name": "Palisade",
-        "collection_url": "https://www.planet.com/data/stac/tanager-core-imagery/natural-lands/collection.json",#"https://www.planet.com/data/stac/tanager-core-imagery/fire/collection.json",
-        "output_dir": r"C:\satelliteImagery\Tanager\Palisades_SourceData",
-        "include_bboxes": [REGIONS["Southern_California"]],
+        "job_name": "CentralGreece",
+        "collection_url": "https://www.planet.com/data/stac/tanager-core-imagery/coastal-water-bodies/collection.json",#"https://www.planet.com/data/stac/tanager-core-imagery/fire/collection.json",
+        "output_dir": r"C:\satelliteImagery\Tanager\CentralGreece_SourceData",
+        "include_bboxes": [REGIONS["CentralGreece"]],
         "exclude_bboxes": [REGIONS["Utah"]],
         "target_assets": ['basic_sr_hdf5'] 
     },

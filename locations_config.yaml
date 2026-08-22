@@ -83,3 +83,27 @@ locations:
     TANAGER_STAC_URL: https://www.planet.com/data/stac/browser/tanager-core-imagery/natural-lands/collection.json # https://www.planet.com/data/stac/tanager-core-imagery/fire/collection.json
     DRAGONETTE_AVAILABLE: false
     DRAGONETTE_STAC_URL: https://wyvern-odp.com/industry/spatio_temporal/collection.json
+  CentralGreece:
+    SOURCE_CACHE: CentralGreece
+    ROI_LON_MIN: 21.497883
+    ROI_LON_MAX: 21.920817
+    ROI_LAT_MIN: 40.438667
+    ROI_LAT_MAX: 40.863913
+    START_DATE: '2022-01-01' # EnMAP launch date 
+    END_DATE: '2026-08-01'
+    TANAGER_AVAILABLE: false
+    DRAGONETTE_AVAILABLE: false
+    ENMAP_AVAILABLE: true
+    ENMAP_STAC_URL: https://wyvern-odp.com/industry/spatio_temporal/collection.json  
+  SantaBarbara:
+    SOURCE_CACHE: SantaBarbara
+    ROI_LON_MIN: -120.017395
+    ROI_LON_MAX: -119.549103
+    ROI_LAT_MIN: 34.389913
+    ROI_LAT_MAX: 35.163705
+    START_DATE: '2022-01-01'
+    END_DATE: '2026-08-01'
+    TANAGER_AVAILABLE: false
+    DRAGONETTE_AVAILABLE: false
+    ENMAP_AVAILABLE: true
+    ENMAP_STAC_URL: https://wyvern-odp.com/industry/spatio_temporal/collection.json

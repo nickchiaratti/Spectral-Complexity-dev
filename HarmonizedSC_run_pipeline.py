@@ -22,6 +22,7 @@ import Harmonized_SC.HLST_specComplex_viewer as HLST_specComplex_viewer
 import Harmonized_SC.plot_sampling_rate as plot_sampling_rate
 import Harmonized_SC.plot_water_mask as plot_water_mask
 import Harmonized_SC.plot_sliding_volume_global_stats as plot_sliding_volume_global_stats
+import Harmonized_SC.mgrs_view as mgrs_view
 
 # ==========================================
 # PIPELINE CONFIGURATION
@@ -96,7 +97,7 @@ def main():
                 print("Skipping mgrs_view.py as requested.")
                 continue
             else:
-                script_path = os.path.join(script_dir, "HLSX30", "mgrs_view.py")
+                script_path = os.path.join(script_dir, "Harmonized_SC", "mgrs_view.py")
                 print(f"Launching Streamlit interface for {script_path}...")
                 print("Please interact with the browser window, then click 'Close App & Continue Pipeline' to proceed.")
                 subprocess.run([sys.executable, "-m", "streamlit", "run", script_path], check=True)
