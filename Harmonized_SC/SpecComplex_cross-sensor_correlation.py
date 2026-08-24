@@ -49,11 +49,8 @@ class HLST_Statistical_Extractor:
         self.harm_grp = self.h5[harm_path]
         
         # Datasets
-        if 'sliding_volume_map' not in self.harm_grp or 'sliding_volume_z_score' not in self.harm_grp or 'common_mask' not in self.harm_grp:
-            raise KeyError("CRITICAL ERROR: Required analytical datasets missing. Run SC calculations first.")
-            
         self.ds_vol = self.harm_grp['sliding_volume_map']
-        self.ds_zscore = self.harm_grp['sliding_volume_z_score']
+        self.ds_zscore = self.harm_grp['sliding_volume_box_cox']#'sliding_volume_z_score']
         self.ds_mask = self.harm_grp['common_mask']
         
         # Relational Vectors
@@ -353,27 +350,185 @@ class InteractiveDashboard:
             self._update_spatial_panels()
 
 # ==========================================
-# 4. EXECUTION POINT
+# 4. SUMMARY FIGURE GENERATION (Publication / Pipeline)
+# ==========================================
+def create_summary_figure(filepath, comparisons, output_filename=None, output_dir=None):
+    """
+    Creates a multi-panel hexbin cross-correlation summary figure.
+    """
+    valid_comparisons = []
+    extractors = []
+    
+    for comp in comparisons:
+        try:
+            extractor = HLST_Statistical_Extractor(
+                filepath, comp["name"], comp["s1"], comp["s2"]
+            )
+            if extractor.extract_matched_distributions():
+                valid_comparisons.append(comp)
+                extractors.append(extractor)
+            if hasattr(extractor, 'h5'):
+                extractor.h5.close()
+        except Exception as e:
+            print(f"  -> Skipping {comp['name']}: {e}")
+
+    if not valid_comparisons:
+        print(f"  -> No comparison pairs met criteria for summary figure.")
+        return None
+
+    num_panels = len(valid_comparisons)
+    fig, axes = plt.subplots(1, num_panels, figsize=(3.5 * num_panels, 3.0), layout='constrained')
+    if num_panels == 1:
+        axes = [axes]
+        
+    hb_list = []
+    first_clim = None
+
+    for ax, comp, extractor in zip(axes, valid_comparisons, extractors):
+        data_1 = extractor.z_1_global
+        data_2 = extractor.z_2_global
+
+        slope, intercept, r_val, _, _ = stats.linregress(data_1, data_2)
+        if first_clim is None:
+            hb = ax.hexbin(data_1, data_2, gridsize=50, cmap='cividis', bins='log', mincnt=1)
+            first_clim = hb.get_clim()
+        else:
+            hb = ax.hexbin(data_1, data_2, gridsize=50, cmap='cividis', bins='log', mincnt=1, vmin=first_clim[0], vmax=first_clim[1])
+        hb_list.append(hb)
+
+        x_sp = np.array([data_1.min(), data_1.max()])
+        y_sp = intercept + slope * x_sp
+        sign = '+' if intercept >= 0 else '-'
+
+        n_pixels = len(data_1)
+        eq_text = (f"Pixels: {n_pixels:.1e}\n"
+                   f"$r$: {r_val:.3f}\n"
+                   f"$y = {slope:.2f}x {sign} {abs(intercept):.2f}$")
+
+        ax.plot(x_sp, y_sp, 'cyan', linestyle='--', lw=1.5, label='Trend')
+
+        ax.set_title(comp["name"], fontsize=10, fontweight='bold')
+        ax.set_xlabel(comp.get("s1_label", "Sensor 1 $Z$-Score"), fontsize=9)
+        ax.set_ylabel(comp.get("s2_label", "Sensor 2 $Z$-Score"), fontsize=9)
+        ax.grid(True, linestyle='--', alpha=0.5)
+
+        ax.text(0.05, 0.95, eq_text, transform=ax.transAxes,
+                bbox=dict(facecolor='white', alpha=0.8, edgecolor='gray', pad=2),
+                color='black', fontsize=8, va='top')
+
+    if hb_list:
+        cb = fig.colorbar(hb_list[0], ax=axes if isinstance(axes, list) else axes.ravel().tolist(), fraction=0.02, pad=0.02)
+        cb.set_label('log10(Pixel Count)', size=8)
+        cb.ax.tick_params(labelsize=7)
+
+    if output_dir is None:
+        output_dir = os.path.dirname(filepath)
+    os.makedirs(output_dir, exist_ok=True)
+
+    if output_filename is None:
+        base_name = os.path.splitext(os.path.basename(filepath))[0]
+        output_filename = f"{base_name}_cross_sensor_correlation.png"
+
+    out_path = os.path.join(output_dir, output_filename)
+    fig.savefig(out_path, dpi=500, bbox_inches='tight')
+    plt.close(fig)
+    print(f"  -> Saved Cross-Sensor Correlation Summary Plot to: {out_path}")
+    return out_path
+
+def plot_cross_sensor_correlations(target_location=None, h5_path=None, location=None):
+    """
+    Main entry point for pipeline execution.
+    """
+    if target_location is None and location is not None:
+        target_location = location
+    if h5_path is None and target_location is not None:
+        import glob
+        matches = glob.glob(os.path.join("C:/satelliteImagery/HLST30", f"HLST_{target_location}_Harmonized*SC_EM*.h5"))
+        if matches:
+            matches.sort(key=lambda x: os.path.getmtime(x), reverse=True)
+            h5_path = matches[0]
+            
+    if not h5_path or not os.path.exists(h5_path):
+        print(f"Warning: Cannot plot cross-sensor correlation, file not found: {h5_path}")
+        return
+
+    cross_comparisons = [
+        {
+            "name": "Landsat vs Sentinel",
+            "s1_label": "Landsat $Z$-Score", "s2_label": "Sentinel $Z$-Score",
+            "s1": ["LANDSAT_8", "LANDSAT-8", "LANDSAT_9", "LANDSAT-9"],
+            "s2": ["Sentinel-2A", "SENTINEL-2A", "Sentinel-2B", "SENTINEL-2B"]
+        },
+        {
+            "name": "Landsat vs Tanager",
+            "s1_label": "Landsat $Z$-Score", "s2_label": "Tanager $Z$-Score",
+            "s1": ["LANDSAT_8", "LANDSAT-8", "LANDSAT_9", "LANDSAT-9"],
+            "s2": ["Tanager-1", "TANAGER-1"]
+        },
+        {
+            "name": "Sentinel vs Tanager",
+            "s1_label": "Sentinel $Z$-Score", "s2_label": "Tanager $Z$-Score",
+            "s1": ["Sentinel-2A", "SENTINEL-2A", "Sentinel-2B", "SENTINEL-2B"],
+            "s2": ["Tanager-1", "TANAGER-1"]
+        },
+        {
+            "name": "Landsat vs EnMAP",
+            "s1_label": "Landsat $Z$-Score", "s2_label": "EnMAP $Z$-Score",
+            "s1": ["LANDSAT_8", "LANDSAT-8", "LANDSAT_9", "LANDSAT-9"],
+            "s2": ["EnMAP", "ENMAP", "enmap"]
+        },
+        {
+            "name": "Sentinel vs EnMAP",
+            "s1_label": "Sentinel $Z$-Score", "s2_label": "EnMAP $Z$-Score",
+            "s1": ["Sentinel-2A", "SENTINEL-2A", "Sentinel-2B", "SENTINEL-2B"],
+            "s2": ["EnMAP", "ENMAP", "enmap"]
+        }
+    ]
+
+    create_summary_figure(h5_path, cross_comparisons)
+
+# ==========================================
+# 5. EXECUTION POINT
 # ==========================================
 if __name__ == "__main__":
-    root = tk.Tk()
-    root.withdraw()
-    
-    print("Please select the processed HLST ARD HDF5 Cube...")
-    file_path = tk.filedialog.askopenfilename(
-        title="Select HLST ARD Master Grid HDF5 Cube",
-        filetypes=[("HDF5 files", "*.h5")]
-    )
+    import argparse
+    parser = argparse.ArgumentParser(description="Multisensor Statistical Cross-Calibration Dashboard")
+    parser.add_argument('--file', '-f', type=str, default=None, help="Path to specific HDF5 file")
+    parser.add_argument('--location', '-l', type=str, default=None, help="Location name (e.g. SanRafael, Tait)")
+    parser.add_argument('--save-summary', action='store_true', help="Export summary figure without interactive GUI")
+    args = parser.parse_args()
+
+    file_path = args.file
+    if not file_path and args.location:
+        loc_candidate = f"C:/satelliteImagery/HLST30/HLST_{args.location}_Harmonized_SC_EM-7_Norm-None.h5"
+        if os.path.exists(loc_candidate):
+            file_path = loc_candidate
+
+    if not file_path:
+        root = tk.Tk()
+        root.withdraw()
+        
+        print("Please select the processed HLST ARD HDF5 Cube...")
+        file_path = tk.filedialog.askopenfilename(
+            title="Select HLST ARD Master Grid HDF5 Cube",
+            filetypes=[("HDF5 files", "*.h5")]
+        )
     
     if not file_path:
         print("Execution cancelled.")
+        sys.exit(0)
+
+    if args.save_summary:
+        plot_cross_sensor_correlations(h5_path=file_path)
         sys.exit(0)
 
     comparisons = [
         {"name": "Landsat-8 vs Landsat-9", "s1": ["LANDSAT_8", "LANDSAT-8"], "s2": ["LANDSAT_9", "LANDSAT-9"]},
         {"name": "Sentinel-2A vs Sentinel-2B", "s1": ["Sentinel-2A", "SENTINEL-2A"], "s2": ["Sentinel-2B", "SENTINEL-2B"]},
         {"name": "Landsat 8/9 vs Tanager", "s1": ["LANDSAT_8", "LANDSAT-8", "LANDSAT_9", "LANDSAT-9"], "s2": ["Tanager-1", "TANAGER-1"]},
-        {"name": "Sentinel-2 vs Tanager", "s1": ["Sentinel-2A", "SENTINEL-2A", "Sentinel-2B", "SENTINEL-2B"], "s2": ["Tanager-1", "TANAGER-1"]}
+        {"name": "Sentinel-2 vs Tanager", "s1": ["Sentinel-2A", "SENTINEL-2A", "Sentinel-2B", "SENTINEL-2B"], "s2": ["Tanager-1", "TANAGER-1"]},
+        {"name": "Landsat 8/9 vs EnMAP", "s1": ["LANDSAT_8", "LANDSAT-8", "LANDSAT_9", "LANDSAT-9"], "s2": ["EnMAP", "ENMAP", "enmap"]},
+        {"name": "Sentinel-2 vs EnMAP", "s1": ["Sentinel-2A", "SENTINEL-2A", "Sentinel-2B", "SENTINEL-2B"], "s2": ["EnMAP", "ENMAP", "enmap"]}
     ]
 
     dashboards = []
@@ -395,4 +550,4 @@ if __name__ == "__main__":
         
     # Optional: ensure file closes. The last interface instance still holds the open file reference, but it's shared.
     if 'ard_interface' in locals() and hasattr(ard_interface, 'h5'):
-        ard_interface.h5.close()
+        ard_interface.h5.close()

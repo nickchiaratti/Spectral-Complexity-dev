@@ -8,11 +8,16 @@ from rasterio.transform import Affine
 from pathlib import Path
 from datetime import datetime
 from tqdm import tqdm
+import sys
+
+# Import centralized ODL generator
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+import hdfeos_odl
 
 # --- Configuration ---
 LOCATION='CentralGreece'
 TIME_THRESHOLD_SECONDS = 120  # Group acquisitions within 2 minutes into the same temporal pass
-SOURCE_DIR = "C:/satelliteImagery/enmap/SourceData"
+SOURCE_DIR = "C:/satelliteImagery/enmap"
 OUTPUT_DIR = SOURCE_DIR
 if not os.path.exists(OUTPUT_DIR):
     os.makedirs(OUTPUT_DIR)
@@ -22,85 +27,7 @@ TARGET_RED_NM = 680.0
 TARGET_GREEN_NM = 540.0
 TARGET_BLUE_NM = 480.0
 
-def generate_struct_metadata(grid_name, width, height, ul_coords, lr_coords, datasets_info, n_times, n_bands):
-    """
-    Generates standard HDF-EOS5 Object Definition Language (ODL) metadata.
-    """
-    data_fields_blocks = []
-    for i, (name, dtype, rank, dim_names) in enumerate(datasets_info):
-        eos_type = "H5T_NATIVE_FLOAT"
-        if "uint8" in str(dtype): eos_type = "H5T_NATIVE_UINT8"
-        elif "uint16" in str(dtype): eos_type = "H5T_NATIVE_UINT16"
-        elif "uint" in str(dtype): eos_type = "H5T_NATIVE_UINT"
-        elif "int" in str(dtype): eos_type = "H5T_NATIVE_INT"
-        elif "float64" in str(dtype) or "double" in str(dtype): eos_type = "H5T_NATIVE_DOUBLE"
-        
-        dims_list = ",".join([f"\"{d}\"" for d in dim_names])
-        block = f"""            OBJECT=DataField_{i+1}
-                DataFieldName="{name}"
-                DataType={eos_type}
-                DimList=({dims_list})
-                MaxdimList=({dims_list})
-                CompressionType=HE5_HDFE_COMP_DEFLATE
-                DeflateLevel=4
-            END_OBJECT=DataField_{i+1}"""
-        data_fields_blocks.append(block)
-    
-    # Projection HE5_GCTP_GEO is required for EPSG:4326 data in HDF-EOS
-    odl = f"""GROUP=SwathStructure
-END_GROUP=SwathStructure
-GROUP=GridStructure
-    GROUP=GRID_1
-        GridName="{grid_name}"
-        XDim={width}
-        YDim={height}
-        UpperLeftPointMtrs=({ul_coords[0]:.9f},{ul_coords[1]:.9f})
-        LowerRightMtrs=({lr_coords[0]:.9f},{lr_coords[1]:.9f})
-        Projection=HE5_GCTP_GEO
-        SphereCode=12
-        CompressionType=HE5_HDFE_COMP_DEFLATE
-        DeflateLevel=4
-        PixelRegistration=HE5_HDFE_CORNER
-        GridOrigin=HE5_HDFE_GD_UL
 
-        GROUP=Dimension
-            OBJECT=Dimension_1
-                DimensionName="Time"
-                Size={n_times}
-            END_OBJECT=Dimension_1
-            OBJECT=Dimension_2
-                DimensionName="Band"
-                Size={n_bands}
-            END_OBJECT=Dimension_2
-            OBJECT=Dimension_3
-                DimensionName="YDim"
-                Size={height}
-            END_OBJECT=Dimension_3
-            OBJECT=Dimension_4
-                DimensionName="XDim"
-                Size={width}
-            END_OBJECT=Dimension_4
-            OBJECT=Dimension_5
-                DimensionName="RGBBand"
-                Size=3
-            END_OBJECT=Dimension_5
-        END_GROUP=Dimension
-
-        GROUP=DataField
-{"\n".join(data_fields_blocks)}
-        END_GROUP=DataField
-
-        GROUP=MergedFields
-        END_GROUP=MergedFields
-    END_GROUP=GRID_1
-END_GROUP=GridStructure
-GROUP=PointStructure
-END_GROUP=PointStructure
-GROUP=ZaStructure
-END_GROUP=ZaStructure
-END
-"""
-    return odl
 
 def parse_enmap_stac(json_path):
     """Extracts metrology and file paths from the EnMAP STAC JSON."""
@@ -203,7 +130,7 @@ def calculate_global_geographic_grid(scenes):
 def process_native_stack(target_location):
     print(f"Discovering EnMAP STAC collections for location: {target_location}...")
     
-    location_dir = os.path.join(SOURCE_DIR, f"{target_location}_EnMAP")
+    location_dir = os.path.join(SOURCE_DIR, f"{target_location}_SourceData")
     if not os.path.exists(location_dir):
         raise FileNotFoundError(f"Location directory not found: {location_dir}")
 
@@ -380,7 +307,8 @@ def process_native_stack(target_location):
 
         ds_qmask.attrs["description"] = "EnMAP L2A Quality Classes Mask"
 
-        struct_meta = generate_struct_metadata("ENMAP", width, height, ul_coords, lr_coords, datasets_info, n_times, n_bands)
+        odl_grid = hdfeos_odl.generate_dynamic_odl_grid_string("ENMAP", width, height, tf_target, "HE5_GCTP_GEO", 0, (0,)*13, datasets_info, n_times, n_bands)
+        struct_meta = f"GROUP=SwathStructure\nEND_GROUP=SwathStructure\nGROUP=GridStructure\n{odl_grid}\nEND_GROUP=GridStructure\n"
         dt_str = h5py.string_dtype(encoding='ascii')
         info_grp.create_dataset("StructMetadata.0", (1,), dtype=dt_str, data=struct_meta)
 

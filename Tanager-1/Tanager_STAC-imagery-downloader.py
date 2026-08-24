@@ -4,53 +4,49 @@ import json
 from pathlib import Path
 from urllib.parse import urljoin
 
-# --- Pre-defined Regions of Interest (Bounding Boxes: [min_lon, min_lat, max_lon, max_lat]) ---
-REGIONS = {
-    "Southern_California": [-119.503784,33.582591,-117.686920,34.746126],
-    "Utah": [-114.05, 37.0, -109.0, 42.5],
-    "Rochester_NY": [-77.72, 43.04, -77.44, 43.28],
-    "BuenosAires": [ -65.0, -70.0, -41.0, -30.0],
-    "Global": [-180.0, -90.0, 180.0, 90.0],
-    "CentralGreece": [21, 40, 22, 41],
-}
+import yaml
+LOCATION = "SantaBarbara"  # Fallback location if not specified in YAML
 
-# --- Download Jobs Configuration ---
-# To build temporal series across different catalogs, point multiple jobs to the same 'output_dir'
-# and use the same 'include_bboxes'. The native stacker will combine them automatically.
-DOWNLOAD_JOBS = [
-    #{
-    #    "job_name": "Palisade",
-    #    "collection_url": "https://www.planet.com/data/stac/tanager-core-imagery/natural-lands/collection.json",#"https://www.planet.com/data/stac/tanager-core-imagery/fire/collection.json",
-    #    "output_dir": r"C:\satelliteImagery\Tanager\Palisades_SourceData",
-    #    "include_bboxes": [REGIONS["Southern_California"]],
-    #    "exclude_bboxes": [REGIONS["Utah"]],
-    #    "target_assets": ['basic_sr_hdf5'] 
-    #},
-    {
-        "job_name": "CentralGreece",
-        "collection_url": "https://www.planet.com/data/stac/tanager-core-imagery/coastal-water-bodies/collection.json",#"https://www.planet.com/data/stac/tanager-core-imagery/fire/collection.json",
-        "output_dir": r"C:\satelliteImagery\Tanager\CentralGreece_SourceData",
-        "include_bboxes": [REGIONS["CentralGreece"]],
-        "exclude_bboxes": [REGIONS["Utah"]],
+# --- Dynamic Configuration Loading ---
+script_dir = Path(__file__).resolve().parent
+config_path = os.path.join(script_dir, "locations_config.yaml")
+if not os.path.exists(config_path):
+    config_path = os.path.join(script_dir.parent, "locations_config.yaml")
+
+with open(config_path, "r") as f:
+    config_data = yaml.safe_load(f)
+
+DOWNLOAD_JOBS = []
+target_location = config_data.get("current_run", {}).get("location", LOCATION)
+
+locations_to_run = config_data.get("locations", {})
+if target_location and target_location in locations_to_run:
+    locations_to_run = {target_location: locations_to_run[target_location]}
+
+for loc_name, loc_data in locations_to_run.items():
+    source_cache = loc_data.get("SOURCE_CACHE")
+    if source_cache is None:
+        source_cache = loc_name
+        
+    bbox = [
+        loc_data["ROI_LON_MIN"],
+        loc_data["ROI_LAT_MIN"],
+        loc_data["ROI_LON_MAX"],
+        loc_data["ROI_LAT_MAX"]
+    ]
+    
+    # Use the top-level catalog to recursively find all items across all sub-collections
+    url = "https://www.planet.com/data/stac/tanager-core-imagery/catalog.json"
+    
+    job = {
+        "job_name": loc_name,
+        "collection_url": url,
+        "output_dir": f"C:/satelliteImagery/Tanager/{source_cache}_SourceData",
+        "include_bboxes": [bbox],
+        "exclude_bboxes": [],
         "target_assets": ['basic_sr_hdf5'] 
-    },
-    #{
-    #    "job_name": "BuenosAires",
-    #    "collection_url": "https://www.planet.com/data/stac/tanager-core-imagery/urban/collection.json",
-    #    "output_dir": r"C:\satelliteImagery\Tanager\BuenosAires_SourceData",
-    #    "include_bboxes": [REGIONS["BuenosAires"]],
-    #    "exclude_bboxes": [],
-    #    "target_assets": ['ortho_sr_hdf5','basic_sr_hdf5'] 
-    #},
-    #{
-    #    "job_name": "ROCX_Rochester",
-    #    "collection_url": "https://www.planet.com/data/stac/tanager-core-imagery/ROCX2025/collection.json",
-    #    "output_dir": "C:/satelliteImagery/Tanager/Rochesterv2_SourceData",
-    #    "include_bboxes": [REGIONS["Rochester_NY"]],
-    #    "exclude_bboxes": [],
-    #    "target_assets": ['ortho_sr_hdf5','ortho_radiance_hdf5','basic_sr_hdf5','basic_radiance_hdf5']
-    #}
-]
+    }
+    DOWNLOAD_JOBS.append(job)
 
 def intersects(bbox1, bbox2):
     """Evaluates whether two [min_lon, min_lat, max_lon, max_lat] bounding boxes intersect."""
@@ -111,22 +107,47 @@ def execute_job(job_config):
     print(f"{'='*50}")
 
     out_dir.mkdir(parents=True, exist_ok=True)
-
-    try:
-        response = requests.get(collection_url)
-        response.raise_for_status()
-        collection_data = response.json()
-    except Exception as e:
-        print(f"CRITICAL: Failed to fetch catalog at {collection_url}: {e}")
-        return
-
-    item_links = [link['href'] for link in collection_data.get('links', []) if link.get('rel') == 'item']
-    print(f"Discovered {len(item_links)} items in catalog.")
+    
+    def fetch_all_item_links(start_url, max_depth=3):
+        visited = set()
+        item_urls = []
+        
+        def crawl(url, depth):
+            if depth > max_depth or url in visited:
+                return
+            visited.add(url)
+            
+            try:
+                resp = requests.get(url)
+                resp.raise_for_status()
+                data = resp.json()
+            except Exception as e:
+                print(f"  [Warning] Failed to fetch {url}: {e}")
+                return
+                
+            links = data.get('links', [])
+            for link in links:
+                rel = link.get('rel')
+                href = link.get('href')
+                if not href:
+                    continue
+                
+                full_url = urljoin(url, href)
+                if rel == 'item':
+                    item_urls.append(full_url)
+                elif rel == 'child':
+                    crawl(full_url, depth + 1)
+                    
+        crawl(start_url, 0)
+        return list(set(item_urls)) # deduplicate
+        
+    print("Crawling STAC Catalog for items...")
+    item_urls = fetch_all_item_links(collection_url)
+    print(f"Discovered {len(item_urls)} items across the catalog.")
     
     matched_items = 0
 
-    for idx, item_href in enumerate(item_links):
-        item_url = urljoin(collection_url, item_href)
+    for idx, item_url in enumerate(item_urls):
         
         try:
             item_resp = requests.get(item_url)

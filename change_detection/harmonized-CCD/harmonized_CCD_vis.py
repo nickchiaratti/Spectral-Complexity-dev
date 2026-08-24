@@ -9,6 +9,10 @@ import scienceplots
 import matplotlib.dates as mdates
 plt.style.use(['science','no-latex'])
 
+# --- CONFIGURATION ---
+N_ENDMEMBERS = 4  # Number of endmembers extracted via MaxD per patch
+# ---------------------
+
 from harmonized_CCD_main import LOCATION, H5_PATH, ENABLE_CONSTANT, ENABLE_LINEAR, ENABLE_QUADRATIC, TEMPORAL_PERIODS, TARGET_METRIC, TARGET_NAME
 _term_str = f"C{int(ENABLE_CONSTANT)}L{int(ENABLE_LINEAR)}Q{int(ENABLE_QUADRATIC)}"
 _period_str = f"P{len(TEMPORAL_PERIODS)}"
@@ -299,6 +303,9 @@ def animate_pixel_endmembers(pixel_y, pixel_x, source_h5_path, inference_results
     titles_by_sensor = {}
     colors = plt.cm.turbo(np.linspace(0, 1, 7))
     
+    global_wl_min = np.min([np.nanmin(wl) for wl in wavelengths_over_time if len(wl) > 0]) * 0.95
+    global_wl_max = np.max([np.nanmax(wl) for wl in wavelengths_over_time if len(wl) > 0]) * 1.05
+    
     for row_idx, sensor in enumerate(unique_sensors):
         ax = axes[row_idx, 0]
         sensor_lines = []
@@ -334,6 +341,14 @@ def animate_pixel_endmembers(pixel_y, pixel_x, source_h5_path, inference_results
     from matplotlib.colors import LinearSegmentedColormap
     season_cmap = LinearSegmentedColormap.from_list('seasons', ['lightblue', 'lightgreen', 'lightyellow', 'navajowhite', 'lightblue'])
     
+    # Add colorbar for season underlay
+    cax = fig.add_axes([0.88, 0.15, 0.02, 0.7])
+    sm = plt.cm.ScalarMappable(cmap=season_cmap, norm=plt.Normalize(vmin=1, vmax=365))
+    cbar = fig.colorbar(sm, cax=cax)
+    cbar.set_ticks([1, 91, 182, 274, 365])
+    cbar.set_ticklabels(['Jan 1', 'Apr 1', 'Jul 1', 'Oct 1', 'Dec 31'])
+    cbar.set_label('Season of Image Acquisition (Day of Year)')
+    
     def update(frame):
         em = endmembers_over_time[frame]
         dt = dates_over_time[frame]
@@ -360,10 +375,10 @@ def animate_pixel_endmembers(pixel_y, pixel_x, source_h5_path, inference_results
         
         frame_text.set_text(f"Frame: {frame+1}/{len(endmembers_over_time)}")
         
-        ax.set_xlim(np.min(wl) * 0.95, np.max(wl) * 1.05)
+        ax.set_xlim(global_wl_min, global_wl_max)
         max_r = np.nanmax(em)
         if np.isnan(max_r) or max_r < 0.1: max_r = 1.0
-        ax.set_ylim(0, min(1.2, max_r * 1.1))
+        ax.set_ylim(0, max_r * 1.1)
         
         all_artists = []
         for lines in lines_by_sensor.values():
@@ -381,17 +396,11 @@ def animate_pixel_endmembers(pixel_y, pixel_x, source_h5_path, inference_results
     btn_save = Button(ax_save_btn, 'Export Animation')
     
     def save_animation(event):
-        try:
-            out_name = f"Endmembers_x{pixel_x}_y{pixel_y}.mp4"
-            print(f"Exporting animation (MP4) to {out_name}...")
-            ani.save(out_name, writer='ffmpeg', fps=2)
-            print("Export complete.")
-        except Exception as e:
-            print(f"FFMpeg not available, falling back to GIF export...")
-            out_name = f"Endmembers_x{pixel_x}_y{pixel_y}.gif"
-            print(f"Exporting animation (GIF) to {out_name}...")
-            ani.save(out_name, writer='pillow', fps=2)
-            print("Export complete.")
+        print(f"FFMpeg not available, falling back to GIF export...")
+        out_name = f"Endmembers_x{pixel_x}_y{pixel_y}.gif"
+        print(f"Exporting animation (GIF) to {out_name}...")
+        ani.save(out_name, writer='pillow', fps=5)
+        print("Export complete.")
             
     btn_save.on_clicked(save_animation)
     fig._btn_save = btn_save
@@ -480,7 +489,7 @@ def plot_segment_spectra(pixel_y, pixel_x, source_h5_path, inference_results_h5)
     sensors = sorted(list(present_sensors))
     
     fig, axes = plt.subplots(len(sensors), len(segments), figsize=(6*len(segments), 4*len(sensors)), squeeze=False)
-    fig.suptitle(f"Segment Spectra Overview (Median & IQR)\nPixel: x={pixel_x}, y={pixel_y}", fontsize=14)
+    fig.suptitle(f"Segment Spectra Overview (All Frames)\nPixel: x={pixel_x}, y={pixel_y}", fontsize=14)
     
     with h5py.File(raw_h5_path, 'r') as f_raw:
         for col_idx, seg in enumerate(segments):
@@ -514,7 +523,7 @@ def plot_segment_spectra(pixel_y, pixel_x, source_h5_path, inference_results_h5)
                     seg_wl[sensor] = wavelengths
                     
                 patch = np.transpose(patch, (1, 2, 0))
-                em, _ = sc.maximumDistance(patch, 7, strict_nan=False)
+                em, _ = sc.maximumDistance(patch, N_ENDMEMBERS, strict_nan=False)
                 if not np.isnan(em).all():
                     seg_data[sensor].append(em)
                     
@@ -569,31 +578,34 @@ def plot_segment_spectra(pixel_y, pixel_x, source_h5_path, inference_results_h5)
                     
                 cube = np.stack(aligned_data, axis=0) # (time, bands, 7)
                 wl = seg_wl[sensor]
-                colors = plt.cm.turbo(np.linspace(0, 1, 7))
+                colors = plt.cm.turbo(np.linspace(0, 1, N_ENDMEMBERS))
                 
-                for j in range(7):
-                    # Robust non-parametric bounds: Median and IQR
+                for j in range(N_ENDMEMBERS):
                     em_series = cube[:, :, j]
                     
-                    # Suppress All-NaN slice warnings for bands that might be fully masked across time
-                    import warnings
-                    with warnings.catch_warnings():
-                        warnings.simplefilter("ignore", category=RuntimeWarning)
-                        median = np.nanmedian(em_series, axis=0)
-                        p25 = np.nanpercentile(em_series, 25, axis=0)
-                        p75 = np.nanpercentile(em_series, 75, axis=0)
-                    
-                    if not np.isnan(median).all():
-                        label = f'EM {j+1} (Rank {j+1})' if (row_idx==0 and col_idx==len(segments)-1) else ""
-                        ax.plot(wl, median, color=colors[j], label=label)
-                        ax.fill_between(wl, p25, p75, color=colors[j], alpha=0.15)
+                    if np.isnan(em_series).all():
+                        continue
+                        
+                    label = f'EM {j+1} (Rank {j+1})' if (row_idx==0 and col_idx==len(segments)-1) else ""
+                    if label:
+                        ax.plot([], [], color=colors[j], alpha=1.0, label=label)
+                        
+                    for t in range(em_series.shape[0]):
+                        if not np.isnan(em_series[t]).all():
+                            ax.plot(wl, em_series[t], color=colors[j], alpha=0.15)
                 
                 ax.set_xlabel("Wavelength (nm)")
                 max_val = np.nanmax(cube)
-                ax.set_ylim(0, min(1.2, max_val * 1.1) if not np.isnan(max_val) else 1.0)
+                ax.set_ylim(0, max_val * 1.1 if not np.isnan(max_val) else 1.0)
                 
                 if col_idx == len(segments)-1 and row_idx == 0:
                     ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+
+    global_y_max = 0
+    for ax in axes.flat:
+        global_y_max = max(global_y_max, ax.get_ylim()[1])
+    for ax in axes.flat:
+        ax.set_ylim(0, global_y_max)
 
     plt.tight_layout()
     plt.subplots_adjust(top=0.90, right=0.85)
@@ -691,7 +703,7 @@ def plot_season_spectra(pixel_y, pixel_x, source_h5_path, inference_results_h5):
     sensors = sorted(list(present_sensors))
     
     fig, axes = plt.subplots(len(sensors), len(segments) * 4, figsize=(6*len(segments)*4, 4*len(sensors)), squeeze=False)
-    fig.suptitle(f"Season Spectra Overview (Median & IQR)\nPixel: x={pixel_x}, y={pixel_y}", fontsize=14)
+    fig.suptitle(f"Season Spectra Overview (All Frames)\nPixel: x={pixel_x}, y={pixel_y}", fontsize=14)
     
     with h5py.File(raw_h5_path, 'r') as f_raw:
         for seg_idx, seg in enumerate(segments):
@@ -727,7 +739,7 @@ def plot_season_spectra(pixel_y, pixel_x, source_h5_path, inference_results_h5):
                     seg_wl[sensor] = wavelengths
                     
                 patch = np.transpose(patch, (1, 2, 0))
-                em, _ = sc.maximumDistance(patch, 7, strict_nan=False)
+                em, _ = sc.maximumDistance(patch, N_ENDMEMBERS, strict_nan=False)
                 if not np.isnan(em).all():
                     seg_data[sensor][season].append(em)
                     
@@ -782,28 +794,25 @@ def plot_season_spectra(pixel_y, pixel_x, source_h5_path, inference_results_h5):
                         
                     cube = np.stack(aligned_data, axis=0) # (time, bands, 7)
                     wl = seg_wl[sensor]
-                    colors = plt.cm.turbo(np.linspace(0, 1, 7))
+                    colors = plt.cm.turbo(np.linspace(0, 1, N_ENDMEMBERS))
                     
-                    for j in range(7):
-                        # Robust non-parametric bounds: Median and IQR
+                    for j in range(N_ENDMEMBERS):
                         em_series = cube[:, :, j]
                         
-                        # Suppress All-NaN slice warnings for bands that might be fully masked across time
-                        import warnings
-                        with warnings.catch_warnings():
-                            warnings.simplefilter("ignore", category=RuntimeWarning)
-                            median = np.nanmedian(em_series, axis=0)
-                            p25 = np.nanpercentile(em_series, 25, axis=0)
-                            p75 = np.nanpercentile(em_series, 75, axis=0)
-                        
-                        if not np.isnan(median).all():
-                            label = f'EM {j+1} (Rank {j+1})' if (row_idx==0 and col_idx==len(segments)*4 - 1) else ""
-                            ax.plot(wl, median, color=colors[j], label=label)
-                            ax.fill_between(wl, p25, p75, color=colors[j], alpha=0.15)
+                        if np.isnan(em_series).all():
+                            continue
+                            
+                        label = f'EM {j+1} (Rank {j+1})' if (row_idx==0 and col_idx==len(segments)*4 - 1) else ""
+                        if label:
+                            ax.plot([], [], color=colors[j], alpha=1.0, label=label)
+                            
+                        for t in range(em_series.shape[0]):
+                            if not np.isnan(em_series[t]).all():
+                                ax.plot(wl, em_series[t], color=colors[j], alpha=0.15)
                     
                     ax.set_xlabel("Wavelength (nm)")
                     max_val = np.nanmax(cube)
-                    ax.set_ylim(0, min(1.2, max_val * 1.1) if not np.isnan(max_val) else 1.0)
+                    ax.set_ylim(0, max_val * 1.1 if not np.isnan(max_val) else 1.0)
                     
                     if col_idx == len(segments)*4 - 1 and row_idx == 0:
                         ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
@@ -967,31 +976,216 @@ def plot_segment_endmembers(pixel_y, pixel_x, source_h5_path, inference_results_
                 # Combine patches spatially: from list of (3,3,B) to (3, 3*V, B)
                 combined_patch = np.concatenate(patches_list, axis=1)
                 
-                em, _ = sc.maximumDistance(combined_patch, 7, strict_nan=False)
+                em, _ = sc.maximumDistance(combined_patch, N_ENDMEMBERS, strict_nan=False)
                 if np.isnan(em).all():
                     ax.text(0.5, 0.5, "No Valid Endmembers", ha='center', va='center', transform=ax.transAxes)
                     continue
                     
                 wl = seg_wl[sensor]
-                colors = plt.cm.turbo(np.linspace(0, 1, 7))
+                colors = plt.cm.turbo(np.linspace(0, 1, N_ENDMEMBERS))
                 
-                for j in range(7):
+                for j in range(N_ENDMEMBERS):
                     em_signature = em[:, j]
                     label = f'EM {j+1} (Rank {j+1})' if (row_idx==0 and col_idx==len(segments)-1) else ""
                     ax.plot(wl, em_signature, color=colors[j], label=label)
                 
                 ax.set_xlabel("Wavelength (nm)")
                 max_val = np.nanmax(em)
-                ax.set_ylim(0, min(1.2, max_val * 1.1) if not np.isnan(max_val) else 1.0)
+                ax.set_ylim(0, max_val * 1.1 if not np.isnan(max_val) else 1.0)
                 
                 if col_idx == len(segments)-1 and row_idx == 0:
                     ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+
+    global_y_max = 0
+    for ax in axes.flat:
+        global_y_max = max(global_y_max, ax.get_ylim()[1])
+    for ax in axes.flat:
+        ax.set_ylim(0, global_y_max)
 
     plt.tight_layout()
     plt.subplots_adjust(top=0.90, right=0.85)
     plt.show(block=False)
 
 
+
+
+def plot_seasonal_separability(pixel_y, pixel_x, source_h5_path, inference_results_h5):
+    """
+    Plots the spectral density clouds for each season, overlaid by segment.
+    This provides a direct visual representation of intra-season variance vs inter-segment change.
+    """
+    import sys, os, re
+    import numpy as np
+    import h5py
+    from datetime import datetime, timezone
+    import matplotlib.pyplot as plt
+    root_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    if root_dir not in sys.path:
+        sys.path.append(root_dir)
+    import SpecComplex as sc
+
+    def get_season(dt):
+        m = dt.month
+        if m in [12, 1, 2]: return 'Winter'
+        if m in [3, 4, 5]: return 'Spring'
+        if m in [6, 7, 8]: return 'Summer'
+        return 'Fall'
+
+    def get_sensor_group(sc_str):
+        s = str(sc_str).upper()
+        if 'LANDSAT' in s: return 'Landsat'
+        if 'SENTINEL' in s: return 'Sentinel'
+        if 'TANAGER' in s: return 'Tanager'
+        return s
+
+    with h5py.File(inference_results_h5, 'r') as f_inf:
+        rmse = f_inf['rmse_series'][:, pixel_y, pixel_x]
+        
+    with h5py.File(source_h5_path, 'r') as f_sc:
+        harm_grp = f_sc['/HDFEOS/GRIDS/HARMONIZED/Data Fields']
+        target_metric = f_sc.attrs.get('TARGET_METRIC', 'sliding_volume_z_score')
+        if target_metric not in harm_grp:
+            target_metric = list(harm_grp.keys())[0]
+            
+        attrs = harm_grp[target_metric].attrs
+        acq_time = attrs['acquisition_time'][:]
+        source_grids = [s.decode('utf-8') if isinstance(s, bytes) else str(s) for s in attrs['source_grid'][:]]
+        source_frames = attrs['source_frame_index'][:]
+        spacecrafts = [s.decode('utf-8') if isinstance(s, bytes) else str(s) for s in attrs['source_spacecraft'][:]]
+        unified_masks = harm_grp['common_mask'][:, pixel_y, pixel_x]
+        
+        _, H, W = harm_grp['common_mask'].shape
+
+    y_start = max(0, pixel_y - 1)
+    y_end = min(H, pixel_y + 2)
+    x_start = max(0, pixel_x - 1)
+    x_end = min(W, pixel_x + 2)
+    
+    segments = []
+    current_segment = []
+    current_rmse = None
+    for i in range(len(acq_time)):
+        if unified_masks[i]: continue
+        r = rmse[i]
+        if np.isnan(r): continue
+        if current_rmse is None:
+            current_rmse = r
+            current_segment.append(i)
+        elif abs(r - current_rmse) < 1e-6:
+            current_segment.append(i)
+        else:
+            segments.append(current_segment)
+            current_segment = [i]
+            current_rmse = r
+    if current_segment:
+        segments.append(current_segment)
+        
+    if not segments:
+        print("No valid structural segments found for this pixel.")
+        return
+
+    raw_h5_path = re.sub(r'_SC_.*?\.h5$', '.h5', source_h5_path)
+    target_seasons = ['Spring', 'Summer', 'Fall']
+    target_sensors = ['Landsat', 'Sentinel-2', 'Tanager']
+    n_sensors = len(target_sensors)
+    
+    fig, axes = plt.subplots(n_sensors, 3, figsize=(18, 5 * n_sensors), squeeze=False)
+    fig.suptitle(f"Seasonal Separability Across Segments (Centroid vs Variance)\nPixel: x={pixel_x}, y={pixel_y}", fontsize=14)
+    
+    segment_colors = ['blue', 'green', 'purple', 'orange', 'cyan', 'magenta', 'brown']
+    
+    global_y_max = 0
+    global_wl_min = float('inf')
+    global_wl_max = float('-inf')
+    
+    def get_sensor_cat(s_str):
+        s_str = str(s_str).lower()
+        if 'landsat' in s_str: return 'Landsat'
+        if 'sentinel' in s_str: return 'Sentinel-2'
+        if 'tanager' in s_str: return 'Tanager'
+        return None
+    
+    with h5py.File(raw_h5_path, 'r') as f_raw:
+        for row_idx, sensor_cat in enumerate(target_sensors):
+            for sea_idx, season in enumerate(target_seasons):
+                ax = axes[row_idx, sea_idx]
+                ax.set_title(f"{sensor_cat} - {season}")
+                ax.set_xlabel("Wavelength (nm)")
+                if sea_idx == 0:
+                    ax.set_ylabel("Surface Reflectance")
+                    
+                for seg_idx, seg in enumerate(segments):
+                    seg_color = segment_colors[seg_idx % len(segment_colors)]
+                    
+                    season_spectra = []
+                    
+                    for i in seg:
+                        if get_sensor_cat(spacecrafts[i]) != sensor_cat:
+                            continue
+                            
+                        dt = datetime.fromtimestamp(acq_time[i], timezone.utc)
+                        if get_season(dt) != season:
+                            continue
+                            
+                        grid = source_grids[i]
+                        frame_idx = source_frames[i]
+                        
+                        sr_ds = f_raw[f"/HDFEOS/GRIDS/{grid}/Data Fields/surface_reflectance"]
+                        patch = sr_ds[frame_idx, :, y_start:y_end, x_start:x_end]
+                        
+                        w_attr = sr_ds.attrs.get('wavelengths')
+                        if w_attr is None: w_attr = sr_ds.attrs.get('wavelength')
+                        if w_attr is not None:
+                            wavelengths = w_attr[:]
+                        else:
+                            wavelengths = np.arange(1, patch.shape[0] + 1, dtype=float)
+                            
+                        if np.max(wavelengths) < 10:
+                            wavelengths = wavelengths * 1000
+                            
+                        patch = np.transpose(patch, (1, 2, 0))
+                        em, _ = sc.maximumDistance(patch, N_ENDMEMBERS, strict_nan=False)
+                        if not np.isnan(em).all():
+                            season_spectra.append((wavelengths, em))
+                    
+                    if not season_spectra:
+                        continue
+                        
+                    # Plot the density cloud
+                    lines_by_len = {}
+                    for wavelengths, em in season_spectra:
+                        l = len(wavelengths)
+                        if l not in lines_by_len:
+                            lines_by_len[l] = []
+                        for j in range(em.shape[1]):
+                            if not np.isnan(em[:, j]).all():
+                                ax.plot(wavelengths, em[:, j], color=seg_color, alpha=0.1)
+                                lines_by_len[l].append((wavelengths, em[:, j]))
+                                
+                    # Plot the segment centroid for this season
+                    for l, items in lines_by_len.items():
+                        wl_arr = items[0][0]
+                        arr = np.array([itm[1] for itm in items])
+                        centroid = np.nanmean(arr, axis=0)
+                        ax.plot(wl_arr, centroid, color=seg_color, linewidth=2.5, label=f"Seg {seg_idx+1} Centroid")
+                        max_val = np.nanmax(arr)
+                        if not np.isnan(max_val):
+                            global_y_max = max(global_y_max, max_val * 1.1)
+                        if len(wl_arr) > 0:
+                            global_wl_min = min(global_wl_min, np.nanmin(wl_arr))
+                            global_wl_max = max(global_wl_max, np.nanmax(wl_arr))
+    
+                handles, labels = ax.get_legend_handles_labels()
+                if handles:
+                    ax.legend(loc='upper left')
+    
+    for ax in axes.flat:
+        ax.set_ylim(0, global_y_max if global_y_max > 0 else 1.0)
+        if global_wl_min < float('inf') and global_wl_max > float('-inf'):
+            ax.set_xlim(global_wl_min, global_wl_max)
+        
+    plt.tight_layout()
+    plt.show(block=False)
 
 def plot_lcmap_classes(pixel_y, pixel_x, source_h5_path, inference_results_h5):
     import os
@@ -1180,8 +1374,8 @@ def plot_spatial_anomaly_overlay(source_h5_path, inference_results_h5):
             
     btn_endmembers.on_clicked(on_endmembers_click)
     
-    ax_lcmap_btn = fig.add_axes([0.79, 0.02, 0.15, 0.06])
-    btn_lcmap = Button(ax_lcmap_btn, 'LCMAP Classes')
+    ax_lcmap_btn = fig.add_axes([0.79, 0.02, 0.10, 0.06])
+    btn_lcmap = Button(ax_lcmap_btn, 'LCMAP')
     fig._btn_lcmap = btn_lcmap
     
     def on_lcmap_click(event):
@@ -1191,6 +1385,18 @@ def plot_spatial_anomaly_overlay(source_h5_path, inference_results_h5):
             plot_lcmap_classes(y, x, source_h5_path, inference_results_h5)
             
     btn_lcmap.on_clicked(on_lcmap_click)
+    
+    ax_sep_btn = fig.add_axes([0.90, 0.02, 0.08, 0.06])
+    btn_sep = Button(ax_sep_btn, 'Separability')
+    fig._btn_sep = btn_sep
+    
+    def on_sep_click(event):
+        x = current_selected['x']
+        y = current_selected['y']
+        if x is not None and y is not None:
+            plot_seasonal_separability(y, x, source_h5_path, inference_results_h5)
+            
+    btn_sep.on_clicked(on_sep_click)
 
     ax_img.imshow(base_frame)
     ax_img.set_title(f"{base_sg} Acquisition: {base_date.strftime('%Y-%m-%d %H:%M:%S')} UTC")

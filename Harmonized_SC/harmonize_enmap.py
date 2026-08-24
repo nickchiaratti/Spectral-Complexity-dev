@@ -187,13 +187,16 @@ def process_enmap_scenes_to_grid(h5f, enmap_source_dir, master_height, master_wi
                     if t_idx == 0 and scene == group[0] and base_wv[0] == 0.0:
                         scene['wavelengths'] = np.zeros(band_count, dtype=np.float32)
                         base_wv = scene['wavelengths']
+                    incoming_rad = np.full((band_count, master_height, master_width), rad_nodata, dtype='float32')
                     reproject(
                         source=rasterio.band(src, list(range(1, src.count + 1))),
-                        destination=canvas_rad,
+                        destination=incoming_rad,
                         src_transform=src.transform, src_crs=src.crs, dst_transform=master_transform, dst_crs=master_crs,
                         resampling=Resampling.nearest,
                         src_nodata=rad_nodata, dst_nodata=rad_nodata
                     )
+                    valid_mask = (incoming_rad != rad_nodata)
+                    canvas_rad[valid_mask] = incoming_rad[valid_mask]
             except rasterio.errors.RasterioIOError:
                 print(f"    Failed to read {scene['reflectance_tif']}")
                 continue
@@ -202,20 +205,23 @@ def process_enmap_scenes_to_grid(h5f, enmap_source_dir, master_height, master_wi
                 if scene.get(mk) and os.path.exists(scene[mk]):
                     try:
                         with rasterio.open(scene[mk]) as src:
+                            incoming_mask = np.full((1, master_height, master_width), 255, dtype='uint8')
                             reproject(
                                 source=rasterio.band(src, 1),
-                                destination=mask_canvases[mk],
+                                destination=incoming_mask,
                                 src_transform=src.transform, src_crs=src.crs, dst_transform=master_transform, dst_crs=master_crs,
                                 resampling=Resampling.nearest,
                                 src_nodata=255, dst_nodata=255
                             )
+                            valid_mask = (incoming_mask != 255)
+                            mask_canvases[mk][valid_mask] = incoming_mask[valid_mask]
                     except rasterio.errors.RasterioIOError:
                         pass 
         
-        valid = ~np.isclose(canvas_rad[0], rad_nodata, equal_nan=True)
+        valid = ~((canvas_rad[0] == rad_nodata) | np.isnan(canvas_rad[0]))
         sr_valid_pixels = np.sum(valid)
         
-        frame_good_wv = ~np.all(np.isclose(canvas_rad, rad_nodata, equal_nan=True), axis=(1, 2))
+        frame_good_wv = ~np.all((canvas_rad == rad_nodata) | np.isnan(canvas_rad), axis=(1, 2))
         meta_lists['good_wavelengths'].append(frame_good_wv)
         
         # Check for -32768 (EnMAP hardcoded bad pixel) and add to defective_pixel_mask
@@ -227,7 +233,7 @@ def process_enmap_scenes_to_grid(h5f, enmap_source_dir, master_height, master_wi
         
         # EnMAP Native Reflectance is stored as scaled Int16 (scale factor 10000)
         # We must convert valid pixels to a [0.0, 1.0] float representation
-        valid_rad_3d = ~np.isclose(canvas_rad, rad_nodata, equal_nan=True) & ~bad_pixel_locs
+        valid_rad_3d = ~((canvas_rad == rad_nodata) | np.isnan(canvas_rad)) & ~bad_pixel_locs
         canvas_rad[valid_rad_3d] /= 10000.0
         
         # Set bad pixels to nodata to prevent skewing downstream numerics

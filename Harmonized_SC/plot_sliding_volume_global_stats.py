@@ -106,15 +106,19 @@ def plot_global_stats(target_location=None, h5_path=None, location=None, metric=
             counts = np.sum(~np.isnan(dset[:]), axis=(1, 2))
 
         grids_str = [g if isinstance(g, str) else g.decode('utf-8') for g in grids]
-        sensors = {'Landsat (HLSL30)': [], 'Sentinel (HLSS30)': [], 'Tanager': []}
+        sensors = {'Landsat (HLSL30)': [], 'Sentinel (HLSS30)': [], 'Tanager': [], 'EnMAP': []}
         for i, g in enumerate(grids_str):
             gu = g.upper()
             if 'HLSL30' in gu:
                 sensors['Landsat (HLSL30)'].append(i)
             elif 'HLSS30' in gu:
                 sensors['Sentinel (HLSS30)'].append(i)
-            else:
+            elif 'ENMAP' in gu:
+                sensors['EnMAP'].append(i)
+            elif 'TANAGER' in gu:
                 sensors['Tanager'].append(i)
+            else:
+                sensors.setdefault(g, []).append(i)
 
         # Extract strided voxel samples per sensor for log-normal distribution validation
         sensor_z_samples = {}
@@ -173,12 +177,14 @@ def plot_global_stats(target_location=None, h5_path=None, location=None, metric=
     colors = {
         'Landsat (HLSL30)': '#1f77b4',
         'Sentinel (HLSS30)': '#2ca02c',
-        'Tanager': '#d62728'
+        'Tanager': '#d62728',
+        'EnMAP': '#9467bd'
     }
     markers = {
         'Landsat (HLSL30)': '^',
         'Sentinel (HLSS30)': 'o',
-        'Tanager': 's'
+        'Tanager': 's',
+        'EnMAP': 'D'
     }
 
     global_sort_idx = np.argsort(dates)
@@ -321,23 +327,25 @@ def plot_global_stats(target_location=None, h5_path=None, location=None, metric=
 
     # --- Plot Window 3: Log-Transformed Distribution Validation ---
     fig3 = plt.figure(figsize=(16, 9.5))
-    gs3 = fig3.add_gridspec(3, 2, width_ratios=[1.1, 1.0], hspace=0.28, wspace=0.18)
     fig3.suptitle(
         r"Empirical Log-Normal \& 90\% Parametric Interval Distribution Validation" + "\n" +
         f"Source: {clean_fname}",
         fontsize=13, fontweight='bold', y=0.96
     )
 
-    # Left Panel: Standardized Log Spectral Complexity (Z-Score) Density across sensors (Spans all 3 rows)
+    # Right Panel: Dynamically stacked subplots for active sensors
+    active_sensor_names = [s for s in ['Landsat (HLSL30)', 'Sentinel (HLSS30)', 'Tanager', 'EnMAP'] if s in sensors and len(sensors[s]) > 0]
+    if not active_sensor_names:
+        active_sensor_names = [s for s in sensors.keys() if len(sensors[s]) > 0]
+    
+    num_active_sensors = max(1, len(active_sensor_names))
+    gs3 = fig3.add_gridspec(num_active_sensors, 2, width_ratios=[1.1, 1.0], hspace=0.28, wspace=0.18)
+    
+    # Left Panel: Standardized Log Spectral Complexity (Z-Score) Density across sensors (Spans all rows)
     ax_dist_z = fig3.add_subplot(gs3[:, 0])
     z_grid = np.linspace(-4, 4, 200)
     norm_pdf = (1.0 / np.sqrt(2 * np.pi)) * np.exp(-0.5 * z_grid**2)
     ax_dist_z.plot(z_grid, norm_pdf, 'k--', linewidth=2, label=r"Theoretical Normal $\mathcal{N}(0, 1)$", zorder=4)
-
-    # Shaded 90% parametric interval [-1.645, +1.645]
-    #ax_dist_z.axvline(-1.645, color='gray', linestyle=':', linewidth=1.5)
-    #ax_dist_z.axvline(1.645, color='gray', linestyle=':', linewidth=1.5)
-    #ax_dist_z.axvspan(-1.645, 1.645, color='gray', alpha=0.15, label=r"Parametric 90\% Interval ($\pm 1.645\sigma$)")
 
     for s_name, s_vals in sensor_z_samples.items():
         if len(s_vals) == 0: continue
@@ -362,10 +370,11 @@ def plot_global_stats(target_location=None, h5_path=None, location=None, metric=
         except Exception:
             w_stat = np.nan
             
-        label_str = fr"{s_name} (Skew: {skew_val:.2f}, Kurt: {kurt_val:.2f}, WD: {wd:.3f}, K² p: {k2_p:.1e}, S-W $W$: {w_stat:.3f})"
+        label_str = fr"{s_name} (Skew: {skew_val:.2f}, Kurt: {kurt_val:.2f}, WD: {wd:.3f})"
         counts_hist, bins = np.histogram(s_vals, bins=80, range=(-4, 4), density=True)
         bin_centers = 0.5 * (bins[:-1] + bins[1:])
-        ax_dist_z.plot(bin_centers, counts_hist, color=colors[s_name], linewidth=1.8, label=label_str, alpha=0.85)
+        s_color = colors.get(s_name, '#333333')
+        ax_dist_z.plot(bin_centers, counts_hist, color=s_color, linewidth=1.8, label=label_str, alpha=0.85)
 
     dist_title = "Standardized Log Spectral Complexity ($Z$-Score) Density" if metric == 'zscore' else "Standardized Robust Scaled Complexity Density"
     ax_dist_z.set_title(dist_title, fontsize=11, fontweight='bold', pad=8)
@@ -376,8 +385,6 @@ def plot_global_stats(target_location=None, h5_path=None, location=None, metric=
     ax_dist_z.grid(True, linestyle='--', alpha=0.4)
     ax_dist_z.set_xlim(-4, 4)
 
-    # Right Panel: 3 Vertically Stacked Subplots separated by sensor source
-    sensor_names_order = ['Landsat (HLSL30)', 'Sentinel (HLSS30)', 'Tanager']
     axes_log = []
 
     # Determine global x-range across all log samples for consistent bin alignment
@@ -387,10 +394,11 @@ def plot_global_stats(target_location=None, h5_path=None, location=None, metric=
     else:
         x_min_log, x_max_log = -15, 15
 
-    for idx, s_name in enumerate(sensor_names_order):
+    for idx, s_name in enumerate(active_sensor_names):
         ax = fig3.add_subplot(gs3[idx, 1], sharex=axes_log[0] if idx > 0 else None)
         axes_log.append(ax)
 
+        s_color = colors.get(s_name, '#333333')
         if s_name in sensor_raw_log_samples and len(sensor_raw_log_samples[s_name]) > 0:
             s_vals = sensor_raw_log_samples[s_name]
             mu_s = np.mean(s_vals)
@@ -400,7 +408,7 @@ def plot_global_stats(target_location=None, h5_path=None, location=None, metric=
 
             counts_s, bins_s = np.histogram(s_vals, bins=60, range=(x_min_log, x_max_log), density=True)
             bin_c_s = 0.5 * (bins_s[:-1] + bins_s[1:])
-            ax.plot(bin_c_s, counts_s, color=colors[s_name], linewidth=2.0, label=r"Empirical $\ln V$", alpha=0.9)
+            ax.plot(bin_c_s, counts_s, color=s_color, linewidth=2.0, label=r"Empirical $\ln V$", alpha=0.9)
 
             grid_s = np.linspace(x_min_log, x_max_log, 200)
             fit_s = (1.0 / (std_s * np.sqrt(2 * np.pi))) * np.exp(-0.5 * ((grid_s - mu_s) / std_s)**2)
@@ -426,7 +434,7 @@ def plot_global_stats(target_location=None, h5_path=None, location=None, metric=
         ax.set_title(fr"{s_name} $\ln V$ Distribution", fontsize=10, fontweight='bold', loc='left', pad=4)
         ax.set_ylabel("Density", fontsize=9, fontweight='bold')
         ax.grid(True, linestyle='--', alpha=0.4)
-        if idx < 2:
+        if idx < num_active_sensors - 1:
             ax.tick_params(labelbottom=False)
         else:
             ax.set_xlabel(r"Natural Log of Scene Complexity ($\ln V$)", fontsize=11, fontweight='bold')

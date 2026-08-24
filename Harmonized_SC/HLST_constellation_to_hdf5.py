@@ -99,7 +99,7 @@ def main(target_location=None):
     ENMAP_SOURCE_DIR = f"C:/satelliteImagery/Enmap/{SOURCE_CACHE}_SourceData"
     COMBINED_OUTPUT_DIR = "C:/satelliteImagery/HLST30/"
  
-    INPUT_NATIVE_HDF5 = os.path.join(HLS_SOURCE_DIR, f"HLS_{Location}_STAC_Native_2025.h5")
+    INPUT_NATIVE_HDF5 = os.path.join(HLS_SOURCE_DIR, f"HLS_MGRS_Stack_{Location}.h5")
     if TANAGER_AVAILABLE:
         INPUT_NATIVE_TANAGER_HDF5 = os.path.join(TANAGER_SOURCE_DIR, f"Tanager_Native_Stack_{SOURCE_CACHE}.h5")
     else:

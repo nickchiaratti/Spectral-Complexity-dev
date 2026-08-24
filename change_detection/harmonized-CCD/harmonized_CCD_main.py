@@ -31,7 +31,7 @@ def tqdm_joblib(tqdm_object):
 # 1. CONFIGURATION
 # ==========================================
 # Input/Output
-LOCATION = "Rochesterv2"
+LOCATION = "Tait"
 H5_PATH = f"C:/satelliteImagery/HLST30/HLST_{LOCATION}_Harmonized_SC_EM-7_Norm-None.h5"
 TARGET_METRIC = 'sliding_volume_z_score'
 

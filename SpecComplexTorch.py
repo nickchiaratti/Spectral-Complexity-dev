@@ -123,98 +123,102 @@ def process_volume_sliding_tile(frame_data, tile_size, stride, num_endmembers, g
     # 1. Load data onto CPU only — system RAM absorbs the full unfold allocation
     tensor_data = torch.from_numpy(frame_data).to('cpu', dtype=COMPUTE_DTYPE)
     
-    # 2. Extract all spatial sliding windows in system RAM
-    # Shape: (1, C * tile_size * tile_size, L) where L = num_windows
-    unfolded = torch.nn.functional.unfold(
-        tensor_data.unsqueeze(0), 
-        kernel_size=tile_size, 
-        stride=stride
-    )
-    
-    # Reshape and Permute to (L, C, N_pixels) — remains on CPU
-    N_pixels = tile_size * tile_size
-    unfolded = unfolded.view(bands, N_pixels, -1)
-    windows = unfolded.permute(2, 0, 1)  # (L, C, N_pixels) on CPU
-    L = windows.shape[0]
-    
-    # 3. Calculate dynamic batch size to maximize GPU utilization without exceeding
+    # 2. Calculate dynamic batch size to maximize GPU utilization without exceeding
     #    60% VRAM. The overhead multiplier accounts for the peak intermediate tensors
     #    created during MaxD (data_proj clone, diff broadcasts) and QR (Q, R, workspace).
+    N_pixels = tile_size * tile_size
     if device == 'cuda':
         total_vram = torch.cuda.get_device_properties(device).total_memory
         target_vram = total_vram * 0.60
-        
-        # Peak VRAM per window: input tensor + data_proj clone + endmembers + QR workspace
-        # Empirical multiplier of 20x covers all intermediate allocations safely
         overhead_multiplier = 20
         bytes_per_window = overhead_multiplier * bands * N_pixels * BYTES_PER_ELEMENT
         batch_size = max(1, int(target_vram // bytes_per_window))
     else:
         batch_size = 5000 
     
+    # 3. Extract spatial sliding windows in chunks to avoid OOM on large images (e.g. EnMAP/Tanager)
+    out_h = (height - tile_size) // stride + 1
+    out_w = (width - tile_size) // stride + 1
+    L = out_h * out_w
+    
     # Accumulators live on CPU to prevent VRAM growth across iterations
     vol_vals = torch.zeros(L, dtype=COMPUTE_DTYPE, device='cpu')
     valid_mask = torch.zeros(L, dtype=torch.bool, device='cpu')
     
+    chunk_rows = 100 # Process up to 100 rows of output windows at a time
+    
     # 4. Process windows in memory-safe batches — transfer chunk to GPU, compute, return to CPU
     with torch.no_grad():
-        for i in range(0, L, batch_size):
-            # Slice from CPU tensor, transfer to GPU
-            batch_windows = windows[i:i+batch_size].to(device)  # (B, C, N)
-        
-            # Find windows that have enough valid pixels to extract endmembers
-            # A pixel is valid if all its band values are not NaN.
-            pixel_validity = ~torch.isnan(batch_windows).any(dim=1)  # (B, N)
-            valid_pixels_per_window = pixel_validity.sum(dim=1)  # (B)
-        
-            # Strict Validity: Window is only processed if ALL pixels are valid.
-            # This matches the Docstring specification of SpecComplex.py 
-            # "Window is only processed if ALL pixels are valid."
-            batch_valid = valid_pixels_per_window == N_pixels
-        
-            # Store validity on CPU
-            valid_mask[i:i+batch_size] = batch_valid.cpu()
-        
-            if not batch_valid.any():
-                continue
+        for y_start in range(0, out_h, chunk_rows):
+            y_end = min(y_start + chunk_rows, out_h)
             
-            valid_data = batch_windows[batch_valid].clone()
-            valid_pixel_mask = pixel_validity[batch_valid]  # (B_valid, N)
+            row_start = y_start * stride
+            row_end = (y_end - 1) * stride + tile_size
+            
+            chunk_data = tensor_data[:, row_start:row_end, :].unsqueeze(0)
+            
+            chunk_unfold = torch.nn.functional.unfold(chunk_data, kernel_size=tile_size, stride=stride)
+            chunk_windows = chunk_unfold.view(bands, N_pixels, -1).permute(2, 0, 1) # (L_chunk, C, N_pixels)
+            L_chunk = chunk_windows.shape[0]
+            
+            global_start_idx = y_start * out_w
+            
+            for i in range(0, L_chunk, batch_size):
+                batch_windows = chunk_windows[i:i+batch_size].to(device)  # (B, C, N)
         
-            # Zero out NaNs to prevent NaN propagation during tensor math
-            valid_data[torch.isnan(valid_data)] = 0.0
-        
-            # 4a. Batched Maximum Distance Simplices
-            endmembers = maximumDistance_torch(valid_data, num_endmembers, valid_pixel_mask)  # (B_valid, C, E)
-        
-            # 4b. Batched Gram Volumes (QR Decomposition)
-            if gram_type == 'datasetMean':
-                meanVector = valid_data.mean(dim=2)  # (B_valid, C)
-                volume = calcGramLocalVolumes_QR_torch(endmembers, meanVector)
-            elif gram_type == 'minEndmember':
-                localizationVec = endmembers[:, :, 1]
-                remainingEndmembers = torch.cat((endmembers[:, :, 0:1], endmembers[:, :, 2:]), dim=2)
-                volume = calcGramLocalVolumes_QR_torch(remainingEndmembers, localizationVec)
+                # Find windows that have enough valid pixels to extract endmembers
+                # A pixel is valid if all its band values are not NaN.
+                pixel_validity = ~torch.isnan(batch_windows).any(dim=1)  # (B, N)
+                valid_pixels_per_window = pixel_validity.sum(dim=1)  # (B)
             
-                # Prepend 0.0 volume for mathematical consistency
-                zeros = torch.zeros(volume.shape[0], 1, dtype=COMPUTE_DTYPE, device=device)
-                volume = torch.cat((zeros, volume), dim=1)
-            else:
-                origin = torch.zeros(bands, dtype=COMPUTE_DTYPE, device=device)
-                volume = calcGramLocalVolumes_QR_torch(endmembers, origin)
+                # Strict Validity: Window is only processed if ALL pixels are valid.
+                # This matches the Docstring specification of SpecComplex.py 
+                # "Window is only processed if ALL pixels are valid."
+                batch_valid = valid_pixels_per_window == N_pixels
             
-            # 4c. Optional Normalization
-            if norm_type == 'bandCount':
-                m_array = torch.arange(1, volume.shape[1] + 1, dtype=COMPUTE_DTYPE, device=device)
-                volume = volume / torch.pow(bands, (m_array / 2.0))
+                # Store validity on CPU
+                valid_mask[global_start_idx + i : global_start_idx + i + batch_windows.shape[0]] = batch_valid.cpu()
             
-            # 4d. Extract target metric and immediately move result to CPU
-            if volume.shape[1] > 2:
-                vol_val = torch.max(volume[:, 2:], dim=1)[0]
-            else:
-                vol_val = torch.zeros(volume.shape[0], dtype=COMPUTE_DTYPE, device=device)
+                if not batch_valid.any():
+                    continue
+                
+                valid_data = batch_windows[batch_valid].clone()
+                valid_pixel_mask = pixel_validity[batch_valid]  # (B_valid, N)
             
-            vol_vals[i:i+batch_size][batch_valid.cpu()] = vol_val.cpu()
+                # Zero out NaNs to prevent NaN propagation during tensor math
+                valid_data[torch.isnan(valid_data)] = 0.0
+            
+                # 4a. Batched Maximum Distance Simplices
+                endmembers = maximumDistance_torch(valid_data, num_endmembers, valid_pixel_mask)  # (B_valid, C, E)
+            
+                # 4b. Batched Gram Volumes (QR Decomposition)
+                if gram_type == 'datasetMean':
+                    meanVector = valid_data.mean(dim=2)  # (B_valid, C)
+                    volume = calcGramLocalVolumes_QR_torch(endmembers, meanVector)
+                elif gram_type == 'minEndmember':
+                    localizationVec = endmembers[:, :, 1]
+                    remainingEndmembers = torch.cat((endmembers[:, :, 0:1], endmembers[:, :, 2:]), dim=2)
+                    volume = calcGramLocalVolumes_QR_torch(remainingEndmembers, localizationVec)
+                
+                    # Prepend 0.0 volume for mathematical consistency
+                    zeros = torch.zeros(volume.shape[0], 1, dtype=COMPUTE_DTYPE, device=device)
+                    volume = torch.cat((zeros, volume), dim=1)
+                else:
+                    origin = torch.zeros(bands, dtype=COMPUTE_DTYPE, device=device)
+                    volume = calcGramLocalVolumes_QR_torch(endmembers, origin)
+                
+                # 4c. Optional Normalization
+                if norm_type == 'bandCount':
+                    m_array = torch.arange(1, volume.shape[1] + 1, dtype=COMPUTE_DTYPE, device=device)
+                    volume = volume / torch.pow(bands, (m_array / 2.0))
+                
+                # 4d. Extract target metric and immediately move result to CPU
+                if volume.shape[1] > 2:
+                    vol_val = torch.max(volume[:, 2:], dim=1)[0]
+                else:
+                    vol_val = torch.zeros(volume.shape[0], dtype=COMPUTE_DTYPE, device=device)
+                
+                vol_vals[global_start_idx + i : global_start_idx + i + batch_windows.shape[0]][batch_valid.cpu()] = vol_val.cpu()
         
     # 5. Fold spatial output map on CPU — overlap-add reconstruction
     vol_vals_expanded = vol_vals.unsqueeze(0).unsqueeze(1).expand(1, N_pixels, L)

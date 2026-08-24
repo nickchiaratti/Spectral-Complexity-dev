@@ -330,7 +330,7 @@ def calcGramLocalVolumes(endmembers, localization_vector):
         
     return volumes
 
-def generate_rgba_image(r_band, g_band, b_band, low=2, high=98, gamma=1.2):
+def generate_rgba_image(r_band, g_band, b_band, low=0.5, high=99.5, gamma=1.2):
     """
     Extracts, stretches, and gamma-corrects the RGB bands from a surface 
     reflectance frame to create a true color image with an alpha channel.
@@ -358,15 +358,19 @@ def generate_rgba_image(r_band, g_band, b_band, low=2, high=98, gamma=1.2):
     # 2. Extract, Stretch, and Gamma Correct RGB bands
     rgb = np.zeros((height, width, 3), dtype=np.float32)
 
+    # Calculate global percentiles across all 3 bands to preserve relative color balance
+    all_valid_pixels = np.concatenate([
+        r_band[valid_mask],
+        g_band[valid_mask],
+        b_band[valid_mask]
+    ])
+    
+    if all_valid_pixels.size == 0:
+        return np.zeros((height, width, 4), dtype=np.uint8)
+        
+    p_low, p_high = np.percentile(all_valid_pixels, (low, high))
+
     for i, band_data in enumerate([r_band, g_band, b_band]):
-        # Calculate percentiles ONLY on valid pixels to bypass slow NaN handling
-        valid_pixels = band_data[valid_mask]
-        
-        if valid_pixels.size == 0:
-            continue # Leave as 0 if band is entirely empty
-            
-        p_low, p_high = np.percentile(valid_pixels, (low, high))
-        
         if p_low < p_high: 
             # Manual linear stretch (highly optimized)
             stretched = np.clip((band_data - p_low) / (p_high - p_low), 0.0, 1.0)

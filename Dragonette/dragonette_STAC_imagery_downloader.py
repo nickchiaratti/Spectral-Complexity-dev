@@ -5,37 +5,47 @@ from urllib3.util.retry import Retry
 import json
 from pathlib import Path
 from urllib.parse import urljoin
+import yaml
+LOCATION = "SantaBarbara"  # Fallback location if not specified in YAML
 
-# --- Pre-defined Regions of Interest (Bounding Boxes: [min_lon, min_lat, max_lon, max_lat]) ---
-REGIONS = {
-    "Southern_California": [-121.5, 32, -113, 35.5],
-    "Utah": [-114.05, 37.0, -109.0, 42.5],
-    "Rochester_NY": [-77.72, 43.04, -77.44, 43.28],
-    "Buenos_Aires": [ -65.0, -70.0, -41.0, -30.0],
-    "Global": [-180.0, -90.0, 180.0, 90.0]
-}
+# --- Dynamic Configuration Loading ---
+script_dir = Path(__file__).resolve().parent
+config_path = os.path.join(script_dir, "locations_config.yaml")
+if not os.path.exists(config_path):
+    config_path = os.path.join(script_dir.parent, "locations_config.yaml")
 
-# --- Download Jobs Configuration ---
-DOWNLOAD_JOBS = [
-    #{
-    #    "job_name": "Palisades_fire",
-    #    "collection_url": "https://wyvern-odp.com/product-type/standard/collection.json",
-    #    "output_dir": "C:/satelliteImagery/dragonette/Palisades_SourceData",
-    #    "include_bboxes": [REGIONS["Southern_California"]],
-    #    "target_assets": ['zip_file'] 
-    #},
-    {
-        "job_name": "ROCX",
-        # Extracted the true machine-readable STAC endpoint from the item's 'parent' links
-        "collection_url": "https://wyvern-odp.com/industry/spatio_temporal/collection.json",
-        "output_dir": "C:/satelliteImagery/dragonette/ROCX_SourceData",
-        "include_bboxes": [REGIONS["Rochester_NY"]],
-        # Specifically targeting the zip archive as requested
+with open(config_path, "r") as f:
+    config_data = yaml.safe_load(f)
+
+DOWNLOAD_JOBS = []
+target_location = config_data.get("current_run", {}).get("location", LOCATION)
+
+locations_to_run = config_data.get("locations", {})
+if target_location and target_location in locations_to_run:
+    locations_to_run = {target_location: locations_to_run[target_location]}
+
+for loc_name, loc_data in locations_to_run.items():
+    source_cache = loc_data.get("SOURCE_CACHE")
+    if source_cache is None:
+        source_cache = loc_name
+        
+    bbox = [
+        loc_data["ROI_LON_MIN"],
+        loc_data["ROI_LAT_MIN"],
+        loc_data["ROI_LON_MAX"],
+        loc_data["ROI_LAT_MAX"]
+    ]
+    # Use the top-level catalog to recursively find all items across all sub-collections
+    url = "https://wyvern-odp.com/year/catalog.json"
+    
+    job = {
+        "job_name": loc_name,
+        "collection_url": url,
+        "output_dir": f"C:/satelliteImagery/dragonette/{source_cache}_SourceData",
+        "include_bboxes": [bbox],
         "target_assets": ['zip_file'] 
     }
-
-
-]
+    DOWNLOAD_JOBS.append(job)
 
 def create_retry_session():
     """
@@ -111,17 +121,46 @@ def execute_job(job_config, session):
 
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    response = session.get(collection_url)
-    response.raise_for_status()
-    collection_data = response.json()
-
-    item_links = [link['href'] for link in collection_data.get('links', []) if link.get('rel') == 'item']
-    print(f"Discovered {len(item_links)} items in catalog.")
+    def fetch_all_item_links(start_url, max_depth=3):
+        visited = set()
+        item_urls = []
+        
+        def crawl(url, depth):
+            if depth > max_depth or url in visited:
+                return
+            visited.add(url)
+            
+            try:
+                resp = session.get(url)
+                resp.raise_for_status()
+                data = resp.json()
+            except Exception as e:
+                print(f"  [Warning] Failed to fetch {url}: {e}")
+                return
+                
+            links = data.get('links', [])
+            for link in links:
+                rel = link.get('rel')
+                href = link.get('href')
+                if not href:
+                    continue
+                
+                full_url = urljoin(url, href)
+                if rel == 'item':
+                    item_urls.append(full_url)
+                elif rel == 'child':
+                    crawl(full_url, depth + 1)
+                    
+        crawl(start_url, 0)
+        return list(set(item_urls)) # deduplicate
+        
+    print("Crawling STAC Catalog for items...")
+    item_urls = fetch_all_item_links(collection_url)
+    print(f"Discovered {len(item_urls)} items across the catalog.")
     
     matched_items = 0
 
-    for idx, item_href in enumerate(item_links):
-        item_url = urljoin(collection_url, item_href)
+    for idx, item_url in enumerate(item_urls):
         
         item_resp = session.get(item_url)
         item_resp.raise_for_status()
@@ -159,6 +198,15 @@ def execute_job(job_config, session):
                 dest_path = item_folder / file_name
                 print(f"    -> Downloading {asset_key} ({file_name})...")
                 download_file(asset_url, dest_path, session)
+                
+                if file_name.endswith('.zip'):
+                    import zipfile
+                    print(f"    -> Extracting {file_name}...")
+                    try:
+                        with zipfile.ZipFile(dest_path, 'r') as zip_ref:
+                            zip_ref.extractall(item_folder)
+                    except zipfile.BadZipFile:
+                        print(f"    -> WARNING: Bad zip file {file_name}")
             else:
                 # Explicitly raise an error if the expected asset structure changes
                 raise KeyError(f"CRITICAL: Asset '{asset_key}' not present in item {item_id}. Available assets: {available_keys}")

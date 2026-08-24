@@ -22,6 +22,7 @@ import Harmonized_SC.HLST_specComplex_viewer as HLST_specComplex_viewer
 import Harmonized_SC.plot_sampling_rate as plot_sampling_rate
 import Harmonized_SC.plot_water_mask as plot_water_mask
 import Harmonized_SC.plot_sliding_volume_global_stats as plot_sliding_volume_global_stats
+import Harmonized_SC.SpecComplex_cross_sensor_correlation as SpecComplex_cross_sensor_correlation
 import Harmonized_SC.mgrs_view as mgrs_view
 
 # ==========================================
@@ -84,6 +85,7 @@ def main():
         ("plot_sampling_rate", plot_sampling_rate.analyze_sampling_rate),
         ("plot_water_mask", plot_water_mask.main),
         ("plot_sliding_volume_global_stats", plot_sliding_volume_global_stats.plot_global_stats),
+        ("plot_cross_sensor_correlations", SpecComplex_cross_sensor_correlation.plot_cross_sensor_correlations),
         ("HLST_specComplex_viewer", HLST_specComplex_viewer.main)
     ]
 
@@ -126,6 +128,11 @@ def main():
             func(h5_path=file_path, metric='robust')
             print(f"Plotting sliding volume global stats (box_cox) for {location_name}...")
             func(h5_path=file_path, metric='box_cox')
+            continue
+        elif name == "plot_cross_sensor_correlations":
+            file_path = f"{SATELLITE_DATA_DIR}/HLST_{location_name}_Harmonized_SC_EM-{args.num_endmembers}_Norm-{args.norm_param}.h5"
+            print(f"Plotting cross-sensor correlation summary for {location_name}...")
+            func(h5_path=file_path)
             continue
         elif name == "HLST_specComplex_viewer":
             if not args.show_spec_viewer:

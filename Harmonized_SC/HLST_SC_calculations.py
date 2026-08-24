@@ -170,19 +170,34 @@ def compute_frame_metrics(payload):
         # --- 7. Ortho Visual Consolidation ---
         t0 = time.perf_counter()
         frame_ortho = raw_frame_ortho
-        if frame_ortho.shape[0] in [3, 4]:
-            frame_ortho = frame_ortho[:3, :, :]
-        else:
-            frame_ortho = np.transpose(frame_ortho[..., :3], (2, 0, 1))
+        
+        # Ensure channel-first format (Bands, Y, X)
+        if frame_ortho.shape[-1] in [3, 4]:
+            frame_ortho = np.transpose(frame_ortho, (2, 0, 1))
+            
+        # Ensure exactly 4 bands (RGBA)
+        if frame_ortho.shape[0] == 3:
+            if frame_ortho.dtype == np.uint8:
+                alpha = np.any(frame_ortho > 0, axis=0).astype(np.uint8) * 255
+            else:
+                alpha = np.any(frame_ortho > 0, axis=0).astype(frame_ortho.dtype)
+            frame_ortho = np.concatenate((frame_ortho, alpha[np.newaxis, ...]), axis=0)
+        elif frame_ortho.shape[0] > 4:
+            frame_ortho = frame_ortho[:4, :, :]
         
         if frame_ortho.dtype != np.uint8:
             fo = frame_ortho.astype(np.float32)
-            valid = fo > -9000
+            fo_rgb = fo[:3]
+            valid = fo_rgb > -9000
             if np.any(valid):
-                p1, p99 = np.percentile(fo[valid], (1, 99))
+                p1, p99 = np.percentile(fo_rgb[valid], (1, 99))
                 if p99 > p1:
-                    fo[valid] = (fo[valid] - p1) / (p99 - p1)
-            frame_ortho = np.clip(fo * 255, 0, 255).astype(np.uint8)
+                    fo_rgb[valid] = (fo_rgb[valid] - p1) / (p99 - p1)
+            fo[:3] = fo_rgb
+            
+            if np.max(fo[3]) <= 1.0:
+                fo[3] = fo[3] * 255.0
+            frame_ortho = np.clip(fo, 0, 255).astype(np.uint8)
         telemetry['Ortho_Visual'] = time.perf_counter() - t0
 
         telemetry['Total_Worker_Time'] = time.perf_counter() - t_start_total
@@ -318,12 +333,15 @@ def main(target_location=None, tile_size=3, num_endmembers=7, norm_param=None):
                 raise ValueError("CRITICAL ERROR: No sensor grids found to process.")
 
             timeline = []
+            grid_wavelengths = {}
             for grid in grids:
                 base_path = f"/HDFEOS/GRIDS/{grid}/Data Fields"
                 if base_path not in h5_orig:
                     raise ValueError(f"CRITICAL ERROR: Data Fields missing for {grid}")
                 
                 data_grp = h5_orig[base_path]
+                if 'wavelengths' in data_grp["surface_reflectance"].attrs:
+                    grid_wavelengths[grid] = data_grp["surface_reflectance"].attrs['wavelengths'][:]
             
                 for req_ds in ["surface_reflectance", "common_mask"]:
                     if req_ds not in data_grp:
@@ -391,7 +409,7 @@ def main(target_location=None, tile_size=3, num_endmembers=7, norm_param=None):
 
             # Pre-allocate ONLY requested datasets
             ds_harm_mask = overwrite_dset(harm_grp, 'common_mask', (total_frames, height, width), dtype='uint8', spatial_ref=spatial_ref, geo_transform=geo_transform, chunks=chunks_3d)
-            ds_harm_ortho = overwrite_dset(harm_grp, 'ortho_visual', (total_frames, 3, height, width), dtype='uint8', spatial_ref=spatial_ref, geo_transform=geo_transform, chunks=(1, 3, chunk_h, chunk_w))
+            ds_harm_ortho = overwrite_dset(harm_grp, 'ortho_visual', (total_frames, 4, height, width), dtype='uint8', spatial_ref=spatial_ref, geo_transform=geo_transform, chunks=(1, 4, chunk_h, chunk_w))
             ds_harm_slide = overwrite_dset(harm_grp, 'sliding_volume_map', (total_frames, height, width), spatial_ref=spatial_ref, geo_transform=geo_transform, chunks=chunks_3d) if CALC_SLIDING_VOLUME else None
             ds_harm_neighborhood = overwrite_dset(harm_grp, 'neighborhood_volume_map', (total_frames, height, width), spatial_ref=spatial_ref, geo_transform=geo_transform, chunks=chunks_3d) if CALC_NEIGHBORHOOD_VOLUME else None
             ds_harm_ndvi = overwrite_dset(harm_grp, 'ndvi_map', (total_frames, height, width), spatial_ref=spatial_ref, geo_transform=geo_transform, chunks=chunks_3d) if CALC_NDVI else None
@@ -433,10 +451,13 @@ def main(target_location=None, tile_size=3, num_endmembers=7, norm_param=None):
                 red_idx, nir_idx, swir_idx = 59, 97, 244
                 sensor_type = "TANAGER"
             elif "ENMAP" in grid_name:
-                wl = h5_orig[f"/HDFEOS/GRIDS/{grid_name}/Data Fields/surface_reflectance"].attrs['wavelengths']
-                red_idx = int(np.argmin(np.abs(wl - 650)))
-                nir_idx = int(np.argmin(np.abs(wl - 850)))
-                swir_idx = int(np.argmin(np.abs(wl - 1600)))
+                wl = grid_wavelengths.get(grid_name)
+                if wl is not None:
+                    red_idx = int(np.argmin(np.abs(wl - 650)))
+                    nir_idx = int(np.argmin(np.abs(wl - 850)))
+                    swir_idx = int(np.argmin(np.abs(wl - 1600)))
+                else:
+                    red_idx, nir_idx, swir_idx = 45, 73, 148
                 sensor_type = "ENMAP"
             else:
                 raise ValueError(f"CRITICAL ERROR: Unrecognized Sensor Grid Architecture: {grid_name}")

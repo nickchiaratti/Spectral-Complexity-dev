@@ -96,7 +96,7 @@ def main(target_location=None):
     os.makedirs(L30_TEMP_DIR, exist_ok=True)
     os.makedirs(COMBINED_OUTPUT_DIR, exist_ok=True)
 
-    OUTPUT_NATIVE_HDF5 = os.path.join(COMBINED_OUTPUT_DIR, f"HLS_{Location}_STAC_Native_2025.h5")
+    OUTPUT_NATIVE_HDF5 = os.path.join(COMBINED_OUTPUT_DIR, f"HLS_{Location}_STAC_Native.h5")
 
     ASSETS_S30 = ['B01', 'B02', 'B03', 'B04', 'B05', 'B06', 'B07', 'B8A', 'B11', 'B12', 'Fmask', 'SZA', 'SAA', 'VZA', 'VAA']
     ASSETS_L30 = ['B01', 'B02', 'B03', 'B04', 'B05', 'B06', 'B07', 'Fmask', 'SZA', 'SAA', 'VZA', 'VAA']

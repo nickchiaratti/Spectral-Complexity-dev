@@ -48,13 +48,14 @@ except Exception:
     Location = "Tait"
 
 # --- Configuration ---
-complexity_type = 'neighborhood_volume_z_score' #'sliding_volume_map' #'sliding_volume_z_score' # or 'sliding_volume_map'
-complexity_type_comparison = 'sliding_volume_map'
+complexity_type = 'sliding_volume_box_cox' #'sliding_volume_map' #'sliding_volume_z_score' # or 'sliding_volume_map'
+complexity_type_comparison = 'sliding_volume_z_score'
 
 COMPLEXITY_DICT = {
     'sliding_volume_map': 'Spectral Complexity',
     'neighborhood_volume_map': 'Spectral Complexity Neighborhood Map',
     'pixel_temporal_z_score': 'Spectral Complexity Pixel Temporal Z-Score',
+    'neighborhood_volume_box_cox': 'Spectral Complexity Neighborhood Z-Score (Box-Cox)',
     'temporal_z_score': 'Spectral Complexity Global Temporal Z-Score',
     'sliding_volume_z_score': 'Spectral Complexity Frame-based Z-Score',
     'neighborhood_volume_z_score': 'Spectral Complexity Neighborhood Z-Score',
@@ -64,12 +65,47 @@ COMPLEXITY_DICT = {
     'sliding_volume_map_7x7': 'Spectral Complexity 7x7 window',
 }
 LOG_SCALE = ('map' in complexity_type)
-START_YEAR = 2015
-END_YEAR = 2027
+START_YEAR = 2022
+END_YEAR = 2026
 TS_START_DATE = datetime(START_YEAR, 1, 1, tzinfo=timezone.utc)
-TS_END_DATE = datetime(END_YEAR, 12, 31, tzinfo=timezone.utc)
+TS_END_DATE = datetime(END_YEAR, 8, 31, tzinfo=timezone.utc)
 TWIN_Y_AXIS_DEFAULT = False
 MASKING = True # In Harmonized viewer, masking relies on pre-computed common_mask
+
+ADD_SEASONAL_UNDERLAY = True  # Configuration toggle for meteorological seasonal background spans
+
+def apply_seasonal_underlay(axes, dates):
+    if not ADD_SEASONAL_UNDERLAY or not dates:
+        return
+    if not isinstance(axes, (list, tuple, np.ndarray)):
+        axes = [axes]
+    min_year = min(d.year for d in dates)
+    max_year = max(d.year for d in dates)
+    
+    # Scientifically curated desaturated hex codes at light opacity (alpha=0.15)
+    # Preserves high luminance to maintain WCAG contrast against foreground satellite traces
+    season_config = [
+        (12, 3, '#D9D9D9', 'Winter'),  # Light gray
+        (3,  6, '#A8E6CF', 'Spring'),  # Light green
+        (6,  9, '#FFF275', 'Summer'),  # Yellow
+        (9, 12, '#FFB74D', 'Fall')     # Orange
+    ]
+    for ax in axes:
+        xlim = ax.get_xlim()
+        for y in range(min_year - 1, max_year + 2):
+            for start_m, end_m, color, label in season_config:
+                if start_m == 12:
+                    t0 = datetime(y - 1, 12, 1, tzinfo=timezone.utc)
+                    t1 = datetime(y, 3, 1, tzinfo=timezone.utc)
+                else:
+                    t0 = datetime(y, start_m, 1, tzinfo=timezone.utc)
+                    t1 = datetime(y, end_m, 1, tzinfo=timezone.utc)
+                t0_num = mdates.date2num(t0)
+                t1_num = mdates.date2num(t1)
+                if t1_num < xlim[0] or t0_num > xlim[1]:
+                    continue
+                ax.axvspan(t0, t1, color=color, alpha=0.15, zorder=0, label='_nolegend_')
+        ax.set_xlim(xlim)
 
 # Example default path (can be overridden by file dialog)
 default_harmonized_path = f"C:/satelliteImagery/HLST30/HLST_{Location}_Harmonized_SC_EM-7_Norm-bandCount.h5"
@@ -115,11 +151,14 @@ TS_LOCATIONS_MAP = {
         {'latlon': (-34.531445, -58.628554), 'label': "Landfill?",                    'color': 'tab:olive'},
         {'latlon': (-34.584266, -58.625117), 'label': "Farm?",                    'color': 'tab:blue'},
         {'latlon': (-34.611539, -58.603837), 'label': "El Palomar Airport",         'color': 'tab:red'},
+    ],
+    "SanRafael": [
+        {'latlon': (34.757710, -119.949640), 'label': "Forest Fire?",                     'color': 'tab:green'},
     ]
 }
 
 # Time Series Locations (Latitude, Longitude)
-TS_LOCATIONS = TS_LOCATIONS_MAP["Tait"]
+TS_LOCATIONS = TS_LOCATIONS_MAP.get(Location, TS_LOCATIONS_MAP.get("Tait", []))
 
 DISPLAY_NORMALIZATION = False
 DISPLAY_REDUNDANT_FIGURE = True 
@@ -268,7 +307,8 @@ class HarmonizedComplexityViewer:
                         if 'HLSL30' in grid_upper: key = 'LANDSAT'
                         elif 'HLSS30' in grid_upper: key = 'SENTINEL'
                         elif 'TANAGER' in grid_upper: key = 'TANAGER'
-                        else: key = 'ENMAP'
+                        elif 'ENMAP' in grid_upper: key = 'ENMAP'
+                        else: continue
                         ts_res[key][loc['label']]['t'].append(dt)
                         ts_res[key][loc['label']]['v'].append(vals[i])
         return ts_res
@@ -690,11 +730,12 @@ class HarmonizedComplexityViewer:
             self.ax_transect_t.tick_params(axis='x', rotation=45, labelsize=9)
             self.ax_transect_t.axvline(curr_dt, color='red', linestyle=':', alpha=0.8, linewidth=2, label='Current Frame')
             self.ax_transect_t.set_xlim(self.ts_start_date, self.ts_end_date)
+            apply_seasonal_underlay(self.ax_transect_t, [self.ts_start_date, self.ts_end_date])
             
             lines_1, labels_1 = self.ax_transect_t.get_legend_handles_labels()
             if self.use_twin_axis and self.ax_transect_t_twin is not None:
                 self.ax_transect_t.set_ylabel(f"HLS (L/S)", color='black', fontsize=10)
-                self.ax_transect_t_twin.set_ylabel(f"Tanager", color='black', fontsize=10)
+                self.ax_transect_t_twin.set_ylabel(f"Tanager/ENMAP", color='black', fontsize=10)
                 if LOG_SCALE:
                     self.ax_transect_t.set_yscale('log')
                     self.ax_transect_t_twin.set_yscale('log')
@@ -740,6 +781,7 @@ class HarmonizedComplexityViewer:
             ax_main.tick_params(axis='x', rotation=45, labelsize=8)
             ax_main.axvline(curr_dt, color='black', linestyle='--', alpha=0.8, linewidth=1.5)
             ax_main.set_xlim(self.ts_start_date, self.ts_end_date)
+            apply_seasonal_underlay(ax_main, [self.ts_start_date, self.ts_end_date])
             if title_label:
                 ax_main.set_title(title_label, fontsize=10, fontweight='bold')
             

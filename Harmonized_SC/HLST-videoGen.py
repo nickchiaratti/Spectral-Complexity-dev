@@ -18,15 +18,15 @@ background_color = 'w'
 text_color = 'black'
 TEXT_OVERLAY = True
 
-Location = "Tait"
+Location = "SanRafael"
 ARD_CUBE_PATH = f"C:/satelliteImagery/HLST30/HLST_{Location}_Harmonized_SC_EM-7_Norm-None.h5"
 OUTPUT_DIR = f"C:/satelliteImagery/HLST30/HLST_{Location}_Videos"
 
-COMPLEXITY_TYPE = 'sliding_volume_map'
+COMPLEXITY_TYPE = 'sliding_volume_box_cox' #'sliding_volume_map'
 SOURCE_GRID = 'HLSL30' #None # Set to a specific grid (e.g., 'HLSL30') or None for all
 
-START_DATE = datetime(2020, 4, 1, tzinfo=timezone.utc)
-END_DATE = datetime(2025, 12, 31, tzinfo=timezone.utc)
+START_DATE = datetime(2022, 4, 1, tzinfo=timezone.utc)
+END_DATE = datetime(2026, 8, 1, tzinfo=timezone.utc)
 
 if Location == "Tait" or Location == "Rochesterv2":
     TS_LOCATIONS = [
@@ -44,6 +44,8 @@ elif Location == "MtEtna" or Location == "MtEtna-Catania":
     {'latlon': (37.738, 15.04), 'label': "right",                'color': 'tab:olive'},
     {'latlon': (37.795, 15.005), 'label': "top",  'color': 'tab:blue'},
     ]
+else:
+    TS_LOCATIONS = []
 
 # ==========================================
 # --- Coverage & QA Filtering Configuration ---
@@ -134,7 +136,15 @@ def generate_videos():
         if qa_ds is None and ENFORCE_QA_MASKING:
             raise ValueError(f"CRITICAL ERROR: 'common_mask' missing from HARMONIZED group. Cannot perform QA masking.")
             
-        mapped_locs = map_locations(vol_ds)
+        geo_ds = vol_ds
+        if 'GeoTransform' not in geo_ds.attrs:
+            # Fallback to finding GeoTransform in source grids
+            for g in h5_ard['/HDFEOS/GRIDS'].keys():
+                if 'Data Fields' in h5_ard[f'/HDFEOS/GRIDS/{g}'] and 'GeoTransform' in h5_ard[f'/HDFEOS/GRIDS/{g}/Data Fields'].attrs:
+                    geo_ds = h5_ard[f'/HDFEOS/GRIDS/{g}/Data Fields']
+                    break
+
+        mapped_locs = map_locations(geo_ds)
         height, width = qa_ds.shape[1], qa_ds.shape[2]
         
         # Strict Geographic Bounds Guardrail
