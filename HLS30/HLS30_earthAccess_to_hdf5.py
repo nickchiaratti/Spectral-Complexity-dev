@@ -24,7 +24,7 @@ import re
 import yaml
 import sys
 
-LOCATION_DEFAULT="SantaBarbara"
+LOCATION_DEFAULT="CentralGreece"
 
 # Add parent folder to sys.path to find hdfeos_odl
 script_dir = Path(__file__).resolve().parent

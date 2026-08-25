@@ -20,7 +20,7 @@ import SpecComplex as sc
 from PIL import Image
 
 # --- Configuration ---
-LOCATION = 'CentralGreece'
+LOCATION = 'Tait'
 TIME_THRESHOLD_SECONDS = 120  # Group acquisitions within 2 minutes into the same temporal pass
 SOURCE_DIR = "C:/satelliteImagery/enmap"
 OUTPUT_DIR = SOURCE_DIR
@@ -173,6 +173,7 @@ def calculate_mgrs_aligned_grid(scenes, roi_bbox=None):
     transformer = Transformer.from_crs("EPSG:4326", target_crs, always_xy=True)
     all_xs = []
     all_ys = []
+
     if roi_bbox:
         xs, ys = zip(*corners)
         proj_xs, proj_ys = transformer.transform(xs, ys)

@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 from urllib.parse import urljoin
 import yaml
-LOCATION = "SantaBarbara"  # Fallback location if not specified in YAML
+LOCATION = "CentralGreece"  # Fallback location if not specified in YAML
 
 # --- Dynamic Configuration Loading ---
 script_dir = Path(__file__).resolve().parent
@@ -213,13 +213,18 @@ def execute_job(job_config, session):
 
     print(f"\nJob '{job_name}' completed. Successfully downloaded {matched_items} scenes.")
 
-def main():
+def main(target_location=None):
     print("Initializing Wyvern STAC Job Queue...\n")
     
     # Initialize the robust network session once and pass it to all jobs
     session = create_retry_session()
     
-    for job in DOWNLOAD_JOBS:
+    # Filter jobs if target_location is provided
+    jobs_to_run = DOWNLOAD_JOBS
+    if target_location:
+        jobs_to_run = [job for job in DOWNLOAD_JOBS if job["job_name"] == target_location]
+        
+    for job in jobs_to_run:
         execute_job(job, session)
         
     print("\nAll download jobs finished.")

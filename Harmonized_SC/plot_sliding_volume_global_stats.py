@@ -117,6 +117,8 @@ def plot_global_stats(target_location=None, h5_path=None, location=None, metric=
                 sensors['EnMAP'].append(i)
             elif 'TANAGER' in gu:
                 sensors['Tanager'].append(i)
+            elif 'DRAGONETTE' in gu or 'WYVERN' in gu:
+                sensors.setdefault('Dragonette', []).append(i)
             else:
                 sensors.setdefault(g, []).append(i)
 
@@ -178,13 +180,15 @@ def plot_global_stats(target_location=None, h5_path=None, location=None, metric=
         'Landsat (HLSL30)': '#1f77b4',
         'Sentinel (HLSS30)': '#2ca02c',
         'Tanager': '#d62728',
-        'EnMAP': '#9467bd'
+        'EnMAP': '#9467bd',
+        'Dragonette': '#ff7f0e'
     }
     markers = {
         'Landsat (HLSL30)': '^',
         'Sentinel (HLSS30)': 'o',
         'Tanager': 's',
-        'EnMAP': 'D'
+        'EnMAP': 'D',
+        'Dragonette': 'p'
     }
 
     global_sort_idx = np.argsort(dates)
@@ -208,14 +212,14 @@ def plot_global_stats(target_location=None, h5_path=None, location=None, metric=
 
         if ax_lambda is not None:
             s_lambdas = [lambdas[i] for i in idxs]
-            ax_lambda.plot(s_dates, s_lambdas, marker=markers[name], color=colors[name], label=f"{name} ($n={len(idxs)}$)",
+            ax_lambda.plot(s_dates, s_lambdas, marker=markers.get(name, 'X'), color=colors.get(name, '#555555'), label=f"{name} ($n={len(idxs)}$)",
                            linestyle='', markersize=4, alpha=0.7)
 
-        ax_mean.plot(s_dates, s_means, marker=markers[name], color=colors[name], label=f"{name} ($n={len(idxs)}$)",
+        ax_mean.plot(s_dates, s_means, marker=markers.get(name, 'X'), color=colors.get(name, '#555555'), label=f"{name} ($n={len(idxs)}$)",
                      linestyle='', markersize=4, alpha=0.7)
-        ax_std.plot(s_dates, s_stds, marker=markers[name], color=colors[name], label=f"{name} ($n={len(idxs)}$)",
+        ax_std.plot(s_dates, s_stds, marker=markers.get(name, 'X'), color=colors.get(name, '#555555'), label=f"{name} ($n={len(idxs)}$)",
                     linestyle='', markersize=4, alpha=0.7)
-        ax_count.plot(s_dates, s_counts, marker=markers[name], color=colors[name], label=f"{name} ($n={len(idxs)}$)",
+        ax_count.plot(s_dates, s_counts, marker=markers.get(name, 'X'), color=colors.get(name, '#555555'), label=f"{name} ($n={len(idxs)}$)",
                       linestyle='', markersize=3, alpha=0.7)
 
     axes_to_shade = [ax_mean, ax_std, ax_count]
@@ -334,7 +338,12 @@ def plot_global_stats(target_location=None, h5_path=None, location=None, metric=
     )
 
     # Right Panel: Dynamically stacked subplots for active sensors
-    active_sensor_names = [s for s in ['Landsat (HLSL30)', 'Sentinel (HLSS30)', 'Tanager', 'EnMAP'] if s in sensors and len(sensors[s]) > 0]
+    known_order = ['Landsat (HLSL30)', 'Sentinel (HLSS30)', 'Tanager', 'EnMAP', 'Dragonette']
+    active_sensor_names = [s for s in known_order if s in sensors and len(sensors[s]) > 0]
+    for s in sensors.keys():
+        if s not in active_sensor_names and len(sensors[s]) > 0:
+            active_sensor_names.append(s)
+    
     if not active_sensor_names:
         active_sensor_names = [s for s in sensors.keys() if len(sensors[s]) > 0]
     

@@ -49,13 +49,13 @@ except Exception:
 
 # --- Configuration ---
 complexity_type = 'sliding_volume_box_cox' #'sliding_volume_map' #'sliding_volume_z_score' # or 'sliding_volume_map'
-complexity_type_comparison = 'sliding_volume_z_score'
+complexity_type_comparison = 'pixel_temporal_z_score'
 
 COMPLEXITY_DICT = {
     'sliding_volume_map': 'Spectral Complexity',
     'neighborhood_volume_map': 'Spectral Complexity Neighborhood Map',
     'pixel_temporal_z_score': 'Spectral Complexity Pixel Temporal Z-Score',
-    'neighborhood_volume_box_cox': 'Spectral Complexity Neighborhood Z-Score (Box-Cox)',
+    'sliding_volume_box_cox': 'Spectral Complexity Neighborhood Z-Score (Box-Cox)',
     'temporal_z_score': 'Spectral Complexity Global Temporal Z-Score',
     'sliding_volume_z_score': 'Spectral Complexity Frame-based Z-Score',
     'neighborhood_volume_z_score': 'Spectral Complexity Neighborhood Z-Score',

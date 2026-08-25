@@ -16,6 +16,8 @@ import subprocess
 from pathlib import Path
 
 import HLS30.HLS30_earthAccess_to_hdf5 as HLS30_earthAccess_to_hdf5
+import Harmonized_SC.constellation_to_MGRS_HDFEOS5 as constellation_to_MGRS_HDFEOS5
+import Harmonized_SC.MGRS_grid_constellation as MGRS_grid_constellation
 import Harmonized_SC.HLST_constellation_to_hdf5 as HLST_constellation_to_hdf5
 import Harmonized_SC.HLST_SC_calculations as HLST_SC_calculations
 import Harmonized_SC.HLST_specComplex_viewer as HLST_specComplex_viewer
@@ -57,10 +59,12 @@ def main():
                         help='Do not skip the interactive mgrs_view step')
     parser.add_argument('--show-spec-viewer', action='store_true',
                         help='Do not skip the interactive SpecComplex viewer step')
+    parser.add_argument('--albers-grid', action='store_true',
+                        help='Use the legacy Albers grid harmonization script instead of the new MGRS virtual constellation linker')
     parser.add_argument('--skip-earthaccess', action='store_true',
                         help='Skip HLS30_earthAccess_to_hdf5 download step')
     parser.add_argument('--skip-constellation', action='store_true',
-                        help='Skip HLST_constellation_to_hdf5 harmonization step')
+                        help='Skip constellation harmonization step')
     parser.add_argument('--skip-ingest', action='store_true',
                         help='Skip both HLS30_earthAccess_to_hdf5 and HLST_constellation_to_hdf5 steps')
     parser.add_argument('--tile-size', type=int, default=3,
@@ -77,10 +81,21 @@ def main():
     target_location = args.location if args.location else location_name
     print(f"Starting pipeline for location: {location_name}")    
     # Define the execution order
+    if args.albers_grid:
+        download_step = ("HLS30_earthAccess_to_hdf5", HLS30_earthAccess_to_hdf5.main)
+        constellation_step = ("HLST_constellation_to_hdf5", HLST_constellation_to_hdf5.main)
+        base_h5_path = f"C:/satelliteImagery/HLST30/HLST_{location_name}_Harmonized.h5"
+        calc_output_path = f"C:/satelliteImagery/HLST30/HLST_{location_name}_Harmonized_SC_EM-{args.num_endmembers}_Norm-{args.norm_param}.h5"
+    else:
+        download_step = ("MGRS_grid_constellation", MGRS_grid_constellation.main)
+        constellation_step = ("constellation_to_MGRS_HDFEOS5", constellation_to_MGRS_HDFEOS5.main)
+        base_h5_path = f"C:/satelliteImagery/MGRS30mConstellation/Harmonized_MGRS_Stack_{location_name}.h5"
+        calc_output_path = f"C:/satelliteImagery/MGRS30mConstellation/Harmonized_MGRS_Stack_{location_name}_SC_EM-{args.num_endmembers}_Norm-{args.norm_param}.h5"
+        
     steps = [
         ("mgrs_view.py", None),
-        ("HLS30_earthAccess_to_hdf5", HLS30_earthAccess_to_hdf5.main),
-        ("HLST_constellation_to_hdf5", HLST_constellation_to_hdf5.main),
+        download_step,
+        constellation_step,
         ("HLST_SC_calculations", HLST_SC_calculations.main),
         ("plot_sampling_rate", plot_sampling_rate.analyze_sampling_rate),
         ("plot_water_mask", plot_water_mask.main),
@@ -104,35 +119,32 @@ def main():
                 print("Please interact with the browser window, then click 'Close App & Continue Pipeline' to proceed.")
                 subprocess.run([sys.executable, "-m", "streamlit", "run", script_path], check=True)
                 continue
-        elif name == "HLS30_earthAccess_to_hdf5":
+        elif name in ("HLS30_earthAccess_to_hdf5", "MGRS_grid_constellation"):
             if args.skip_earthaccess or args.skip_ingest:
-                print("Skipping HLS30_earthAccess_to_hdf5 as requested.")
+                print(f"Skipping {name} as requested.")
                 continue
-        elif name == "HLST_constellation_to_hdf5":
+        elif name in ("HLST_constellation_to_hdf5", "constellation_to_MGRS_HDFEOS5"):
             if args.skip_constellation or args.skip_ingest:
-                print("Skipping HLST_constellation_to_hdf5 as requested.")
+                print(f"Skipping {name} as requested.")
                 continue
         elif name == "HLST_SC_calculations":
-            func(target_location=target_location, tile_size=args.tile_size, num_endmembers=args.num_endmembers, norm_param=args.norm_param)
+            func(target_location=target_location, tile_size=args.tile_size, num_endmembers=args.num_endmembers, norm_param=args.norm_param, file_path=base_h5_path)
             continue
         elif name == "plot_sampling_rate":
             print(f"Plotting sampling rate for {location_name}...")
-            file_path = f"{SATELLITE_DATA_DIR}/HLST_{location_name}_Harmonized_SC_EM-{args.num_endmembers}_Norm-{args.norm_param}.h5"
-            func(h5_path=file_path)
+            func(h5_path=calc_output_path)
             continue
         elif name == "plot_sliding_volume_global_stats":
-            file_path = f"{SATELLITE_DATA_DIR}/HLST_{location_name}_Harmonized_SC_EM-{args.num_endmembers}_Norm-{args.norm_param}.h5"
             print(f"Plotting sliding volume global stats (zscore) for {location_name}...")
-            func(h5_path=file_path, metric='zscore')
+            func(h5_path=calc_output_path, metric='zscore')
             print(f"Plotting sliding volume global stats (robust) for {location_name}...")
-            func(h5_path=file_path, metric='robust')
+            func(h5_path=calc_output_path, metric='robust')
             print(f"Plotting sliding volume global stats (box_cox) for {location_name}...")
-            func(h5_path=file_path, metric='box_cox')
+            func(h5_path=calc_output_path, metric='box_cox')
             continue
         elif name == "plot_cross_sensor_correlations":
-            file_path = f"{SATELLITE_DATA_DIR}/HLST_{location_name}_Harmonized_SC_EM-{args.num_endmembers}_Norm-{args.norm_param}.h5"
             print(f"Plotting cross-sensor correlation summary for {location_name}...")
-            func(h5_path=file_path)
+            func(h5_path=calc_output_path)
             continue
         elif name == "HLST_specComplex_viewer":
             if not args.show_spec_viewer:
@@ -140,8 +152,6 @@ def main():
                 continue
                 
             print(f"Launching SpecComplex Viewer for {location_name}...")
-            # Compute file path based on default naming convention in calculation script
-            file_path = f"{SATELLITE_DATA_DIR}/HLST_{location_name}_Harmonized_SC_EM-{args.num_endmembers}_Norm-{args.norm_param}.h5"
             
             # Extract start and end year from config
             start_date_str = loc_config.get("START_DATE", "2024-01-01")
@@ -149,7 +159,7 @@ def main():
             start_year = int(start_date_str.split("-")[0])
             end_year = int(end_date_str.split("-")[0])
             
-            func(target_location=target_location, file_path=file_path, start_year=start_year, end_year=end_year)
+            func(target_location=target_location, file_path=calc_output_path, start_year=start_year, end_year=end_year)
             continue
             
         func(target_location=target_location)

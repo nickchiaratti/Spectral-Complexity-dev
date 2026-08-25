@@ -16,7 +16,7 @@ import hdfeos_odl
 
 # --- Configuration ---
 LOCATION='CentralGreece'
-TIME_THRESHOLD_SECONDS = 120  # Group acquisitions within 2 minutes into the same temporal pass
+TIME_THRESHOLD_SECONDS = 300  # Group acquisitions within 2 minutes into the same temporal pass
 SOURCE_DIR = "C:/satelliteImagery/enmap"
 OUTPUT_DIR = SOURCE_DIR
 if not os.path.exists(OUTPUT_DIR):

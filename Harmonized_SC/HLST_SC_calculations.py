@@ -59,10 +59,16 @@ def compute_frame_metrics(payload):
         # --- 1. Data Ingestion ---
         t0 = time.perf_counter()
         with h5py.File(orig_filepath, 'r') as h5_in:
-            data_grp = h5_in[f"/HDFEOS/GRIDS/{grid_name}/Data Fields"]
-            frame_sr = data_grp["surface_reflectance"][t_local, ...]
-            frame_mask = data_grp["common_mask"][t_local, ...]
-            raw_frame_ortho = data_grp["ortho_visual"][t_local, ...]
+            data_grp = h5_in[payload['data_grp_path']]
+            
+            r_s = payload['row_offset']
+            r_e = r_s + height
+            c_s = payload['col_offset']
+            c_e = c_s + width
+            
+            frame_sr = data_grp["surface_reflectance"][t_local, :, r_s:r_e, c_s:c_e]
+            frame_mask = data_grp["common_mask"][t_local, r_s:r_e, c_s:c_e]
+            raw_frame_ortho = data_grp["ortho_visual"][t_local, :, r_s:r_e, c_s:c_e]
 
             persistent_water_mask = payload.get('persistent_water_mask', None)
             if persistent_water_mask is not None:
@@ -76,13 +82,15 @@ def compute_frame_metrics(payload):
             
             # Dependency Resolution: Read existing volume map if Z-Score requires it but we aren't calculating it
             if flags['z_score'] and not flags['volume'] and not flags['neighborhood_volume']:
-                slide_map = h5_in["/HDFEOS/GRIDS/HARMONIZED/Data Fields/sliding_volume_map"][payload['global_idx'], ...]
+                with h5py.File(payload['constellation_filepath'], 'r') as h5_const:
+                    slide_map = h5_const["/HDFEOS/GRIDS/HARMONIZED/Data Fields/sliding_volume_map"][payload['global_idx'], ...]
             else:
                 slide_map = None
                 
             if flags['neighborhood_z_score'] and not flags['neighborhood_volume']:
                 try:
-                    neighborhood_map = h5_in["/HDFEOS/GRIDS/HARMONIZED/Data Fields/neighborhood_volume_map"][payload['global_idx'], ...]
+                    with h5py.File(payload['constellation_filepath'], 'r') as h5_const:
+                        neighborhood_map = h5_const["/HDFEOS/GRIDS/HARMONIZED/Data Fields/neighborhood_volume_map"][payload['global_idx'], ...]
                 except KeyError:
                     neighborhood_map = None
             else:
@@ -233,7 +241,7 @@ def compute_frame_metrics(payload):
             'telemetry': telemetry
         }
 
-def main(target_location=None, tile_size=3, num_endmembers=7, norm_param=None):
+def main(target_location=None, tile_size=3, num_endmembers=7, norm_param=None, file_path=None):
 
     # ==========================================
     # 1. CONFIGURATION & FEATURE TOGGLES
@@ -290,13 +298,22 @@ def main(target_location=None, tile_size=3, num_endmembers=7, norm_param=None):
         with h5py.File(out_path, mode) as h5_out:
             if mode == 'w':
                 with h5py.File(worker_cache_path, 'r') as h5_in:
-                    for g in h5_in['/HDFEOS/GRIDS'].keys():
+                    grids_grp = h5_in['/HDFEOS/GRIDS']
+                    for g in grids_grp.keys():
                         if g == 'HARMONIZED': continue
                         grp_out = h5_out.create_group(f'/HDFEOS/GRIDS/{g}/Data Fields')
-                        sr = h5_in[f'/HDFEOS/GRIDS/{g}/Data Fields/surface_reflectance']
-                        if 'spatial_ref' in sr.attrs: grp_out.attrs['spatial_ref'] = sr.attrs['spatial_ref']
-                        if 'GeoTransform' in sr.attrs: grp_out.attrs['GeoTransform'] = sr.attrs['GeoTransform']
-                        if 'wavelengths' in sr.attrs: grp_out.attrs['wavelengths'] = sr.attrs['wavelengths']
+                        link = grids_grp.get(g, getlink=True)
+                        if isinstance(link, h5py.ExternalLink):
+                            with h5py.File(link.filename, 'r') as f_direct:
+                                sr = f_direct[f'{link.path}/Data Fields/surface_reflectance']
+                                if 'spatial_ref' in sr.attrs: grp_out.attrs['spatial_ref'] = sr.attrs['spatial_ref']
+                                if 'GeoTransform' in sr.attrs: grp_out.attrs['GeoTransform'] = sr.attrs['GeoTransform']
+                                if 'wavelengths' in sr.attrs: grp_out.attrs['wavelengths'] = sr.attrs['wavelengths']
+                        else:
+                            sr = h5_in[f'/HDFEOS/GRIDS/{g}/Data Fields/surface_reflectance']
+                            if 'spatial_ref' in sr.attrs: grp_out.attrs['spatial_ref'] = sr.attrs['spatial_ref']
+                            if 'GeoTransform' in sr.attrs: grp_out.attrs['GeoTransform'] = sr.attrs['GeoTransform']
+                            if 'wavelengths' in sr.attrs: grp_out.attrs['wavelengths'] = sr.attrs['wavelengths']
 
             print("\n" + "="*50)
             print("Initializing Chronological Multi-Sensor Fusion (Parallel)")
@@ -328,18 +345,39 @@ def main(target_location=None, tile_size=3, num_endmembers=7, norm_param=None):
         nonlocal CALC_SLIDING_VOLUME, CALC_NEIGHBORHOOD_VOLUME
 
         with h5py.File(orig_filepath, 'r') as h5_orig:
-            grids = [g for g in h5_orig['/HDFEOS/GRIDS'].keys() if g != 'HARMONIZED']
+            grids_grp = h5_orig['/HDFEOS/GRIDS']
+            grids = [g for g in grids_grp.keys() if g != 'HARMONIZED']
             if not grids:
                 raise ValueError("CRITICAL ERROR: No sensor grids found to process.")
 
+            sensor_sources = {}
+            for grid in grids:
+                link = grids_grp.get(grid, getlink=True)
+                if isinstance(link, h5py.ExternalLink):
+                    sensor_sources[grid] = {
+                        'file': link.filename,
+                        'path': link.path
+                    }
+                else:
+                    sensor_sources[grid] = {
+                        'file': orig_filepath,
+                        'path': f"/HDFEOS/GRIDS/{grid}"
+                    }
+
+        # Open direct file handles for metadata discovery and processing
+        direct_handles = {g: h5py.File(sensor_sources[g]['file'], 'r') for g in grids}
+        try:
             timeline = []
             grid_wavelengths = {}
+            grid_geotransforms = {}
             for grid in grids:
-                base_path = f"/HDFEOS/GRIDS/{grid}/Data Fields"
-                if base_path not in h5_orig:
-                    raise ValueError(f"CRITICAL ERROR: Data Fields missing for {grid}")
+                base_path = f"{sensor_sources[grid]['path']}/Data Fields"
+                f_direct = direct_handles[grid]
+                if base_path not in f_direct:
+                    raise ValueError(f"CRITICAL ERROR: Data Fields missing for {grid} in {sensor_sources[grid]['file']}")
                 
-                data_grp = h5_orig[base_path]
+                data_grp = f_direct[base_path]
+                grid_geotransforms[grid] = data_grp["surface_reflectance"].attrs.get('GeoTransform')
                 if 'wavelengths' in data_grp["surface_reflectance"].attrs:
                     grid_wavelengths[grid] = data_grp["surface_reflectance"].attrs['wavelengths'][:]
             
@@ -373,10 +411,13 @@ def main(target_location=None, tile_size=3, num_endmembers=7, norm_param=None):
                 print("  -> Dependency Warning: Neighborhood Z-score requested but 'neighborhood_volume_map' not found in file. Forcing CALC_NEIGHBORHOOD_VOLUME = True.")
                 CALC_NEIGHBORHOOD_VOLUME = True
 
-            ref_sr = h5_orig[f"/HDFEOS/GRIDS/{grids[0]}/Data Fields/surface_reflectance"]
+            ref_f = direct_handles[grids[0]]
+            ref_sr = ref_f[f"{sensor_sources[grids[0]]['path']}/Data Fields/surface_reflectance"]
             _, _, height, width = ref_sr.shape
             spatial_ref = ref_sr.attrs.get('spatial_ref')
-            geo_transform = ref_sr.attrs.get('GeoTransform')
+            master_gt = ref_sr.attrs.get('GeoTransform')
+            master_x = master_gt[0]
+            master_y = master_gt[3]
 
             print("Pre-calculating global persistent water mask from Fmask history...")
             water_sum = np.zeros((height, width), dtype=np.int32)
@@ -385,9 +426,15 @@ def main(target_location=None, tile_size=3, num_endmembers=7, norm_param=None):
             for meta in timeline:
                 g_name = meta['grid']
                 l_idx = meta['local_idx']
-                fmask_path = f"/HDFEOS/GRIDS/{g_name}/Data Fields/Fmask"
-                if fmask_path in h5_orig:
-                    fmask_frame = h5_orig[fmask_path][l_idx, :, :]
+                f_direct = direct_handles[g_name]
+                fmask_path = f"{sensor_sources[g_name]['path']}/Data Fields/Fmask"
+                
+                if fmask_path in f_direct:
+                    grid_gt = grid_geotransforms[g_name]
+                    col_offset = int(round((master_x - grid_gt[0]) / 30.0))
+                    row_offset = int(round((grid_gt[3] - master_y) / 30.0))
+                    
+                    fmask_frame = f_direct[fmask_path][l_idx, row_offset:row_offset+height, col_offset:col_offset+width]
                     valid_pixels = (fmask_frame != 255)
                     water_pixels = ((fmask_frame & 32) > 0)
                     water_sum[valid_pixels] += water_pixels[valid_pixels]
@@ -408,34 +455,38 @@ def main(target_location=None, tile_size=3, num_endmembers=7, norm_param=None):
                 harm_grp = h5_out.create_group(harm_path)
 
             # Pre-allocate ONLY requested datasets
-            ds_harm_mask = overwrite_dset(harm_grp, 'common_mask', (total_frames, height, width), dtype='uint8', spatial_ref=spatial_ref, geo_transform=geo_transform, chunks=chunks_3d)
-            ds_harm_ortho = overwrite_dset(harm_grp, 'ortho_visual', (total_frames, 4, height, width), dtype='uint8', spatial_ref=spatial_ref, geo_transform=geo_transform, chunks=(1, 4, chunk_h, chunk_w))
-            ds_harm_slide = overwrite_dset(harm_grp, 'sliding_volume_map', (total_frames, height, width), spatial_ref=spatial_ref, geo_transform=geo_transform, chunks=chunks_3d) if CALC_SLIDING_VOLUME else None
-            ds_harm_neighborhood = overwrite_dset(harm_grp, 'neighborhood_volume_map', (total_frames, height, width), spatial_ref=spatial_ref, geo_transform=geo_transform, chunks=chunks_3d) if CALC_NEIGHBORHOOD_VOLUME else None
-            ds_harm_ndvi = overwrite_dset(harm_grp, 'ndvi_map', (total_frames, height, width), spatial_ref=spatial_ref, geo_transform=geo_transform, chunks=chunks_3d) if CALC_NDVI else None
-            ds_harm_ndbi = overwrite_dset(harm_grp, 'ndbi_map', (total_frames, height, width), spatial_ref=spatial_ref, geo_transform=geo_transform, chunks=chunks_3d) if CALC_NDBI else None
-            ds_harm_msd = overwrite_dset(harm_grp, 'msd_map', (total_frames, height, width), spatial_ref=spatial_ref, geo_transform=geo_transform, chunks=chunks_3d) if CALC_MSD else None
-            ds_harm_z = overwrite_dset(harm_grp, 'sliding_volume_z_score', (total_frames, height, width), spatial_ref=spatial_ref, geo_transform=geo_transform, chunks=chunks_3d) if CALC_Z_SCORE else None
-            ds_harm_robust = overwrite_dset(harm_grp, 'sliding_volume_robust_scale', (total_frames, height, width), spatial_ref=spatial_ref, geo_transform=geo_transform, chunks=chunks_3d) if CALC_ROBUST_SCALE else None
-            ds_harm_box_cox = overwrite_dset(harm_grp, 'sliding_volume_box_cox', (total_frames, height, width), spatial_ref=spatial_ref, geo_transform=geo_transform, chunks=chunks_3d) if CALC_BOX_COX else None
-            ds_harm_neighborhood_z = overwrite_dset(harm_grp, 'neighborhood_volume_z_score', (total_frames, height, width), spatial_ref=spatial_ref, geo_transform=geo_transform, chunks=chunks_3d) if CALC_NEIGHBORHOOD_Z_SCORE else None
-            ds_harm_temp_z = overwrite_dset(harm_grp, 'temporal_z_score', (total_frames, height, width), spatial_ref=spatial_ref, geo_transform=geo_transform, chunks=chunks_3d) if CALC_TEMPORAL_Z_SCORE else None
-            ds_harm_pixel_temp_z = overwrite_dset(harm_grp, 'pixel_temporal_z_score', (total_frames, height, width), spatial_ref=spatial_ref, geo_transform=geo_transform, chunks=chunks_3d) if CALC_PIXEL_TEMPORAL_Z_SCORE else None
+            ds_harm_mask = overwrite_dset(harm_grp, 'common_mask', (total_frames, height, width), dtype='uint8', spatial_ref=spatial_ref, geo_transform=master_gt, chunks=chunks_3d)
+            ds_harm_ortho = overwrite_dset(harm_grp, 'ortho_visual', (total_frames, 4, height, width), dtype='uint8', spatial_ref=spatial_ref, geo_transform=master_gt, chunks=(1, 4, chunk_h, chunk_w))
+            ds_harm_slide = overwrite_dset(harm_grp, 'sliding_volume_map', (total_frames, height, width), spatial_ref=spatial_ref, geo_transform=master_gt, chunks=chunks_3d) if CALC_SLIDING_VOLUME else None
+            ds_harm_neighborhood = overwrite_dset(harm_grp, 'neighborhood_volume_map', (total_frames, height, width), spatial_ref=spatial_ref, geo_transform=master_gt, chunks=chunks_3d) if CALC_NEIGHBORHOOD_VOLUME else None
+            ds_harm_ndvi = overwrite_dset(harm_grp, 'ndvi_map', (total_frames, height, width), spatial_ref=spatial_ref, geo_transform=master_gt, chunks=chunks_3d) if CALC_NDVI else None
+            ds_harm_ndbi = overwrite_dset(harm_grp, 'ndbi_map', (total_frames, height, width), spatial_ref=spatial_ref, geo_transform=master_gt, chunks=chunks_3d) if CALC_NDBI else None
+            ds_harm_msd = overwrite_dset(harm_grp, 'msd_map', (total_frames, height, width), spatial_ref=spatial_ref, geo_transform=master_gt, chunks=chunks_3d) if CALC_MSD else None
+            ds_harm_z = overwrite_dset(harm_grp, 'sliding_volume_z_score', (total_frames, height, width), spatial_ref=spatial_ref, geo_transform=master_gt, chunks=chunks_3d) if CALC_Z_SCORE else None
+            ds_harm_robust = overwrite_dset(harm_grp, 'sliding_volume_robust_scale', (total_frames, height, width), spatial_ref=spatial_ref, geo_transform=master_gt, chunks=chunks_3d) if CALC_ROBUST_SCALE else None
+            ds_harm_box_cox = overwrite_dset(harm_grp, 'sliding_volume_box_cox', (total_frames, height, width), spatial_ref=spatial_ref, geo_transform=master_gt, chunks=chunks_3d) if CALC_BOX_COX else None
+            ds_harm_neighborhood_z = overwrite_dset(harm_grp, 'neighborhood_volume_z_score', (total_frames, height, width), spatial_ref=spatial_ref, geo_transform=master_gt, chunks=chunks_3d) if CALC_NEIGHBORHOOD_Z_SCORE else None
+            ds_harm_temp_z = overwrite_dset(harm_grp, 'temporal_z_score', (total_frames, height, width), spatial_ref=spatial_ref, geo_transform=master_gt, chunks=chunks_3d) if CALC_TEMPORAL_Z_SCORE else None
+            ds_harm_pixel_temp_z = overwrite_dset(harm_grp, 'pixel_temporal_z_score', (total_frames, height, width), spatial_ref=spatial_ref, geo_transform=master_gt, chunks=chunks_3d) if CALC_PIXEL_TEMPORAL_Z_SCORE else None
 
             sensor_dsets = {}
             if CALC_GLOBAL_ENDMEMBERS:
                 for grid in grids:
-                    orig_data_grp = h5_orig[f"/HDFEOS/GRIDS/{grid}/Data Fields"]
+                    f_direct = direct_handles[grid]
+                    orig_data_grp = f_direct[f"{sensor_sources[grid]['path']}/Data Fields"]
                     sr_shape = orig_data_grp["surface_reflectance"].shape
                     n_frames, n_bands = sr_shape[0], sr_shape[1]
                 
                     data_grp = h5_out[f"/HDFEOS/GRIDS/{grid}/Data Fields"]
-                    em_ds = overwrite_dset(data_grp, 'frame_endmembers', (n_frames, n_bands, NUM_ENDMEMBERS), spatial_ref=spatial_ref, geo_transform=geo_transform, chunks=(1, n_bands, NUM_ENDMEMBERS))
+                    em_ds = overwrite_dset(data_grp, 'frame_endmembers', (n_frames, n_bands, NUM_ENDMEMBERS), spatial_ref=spatial_ref, geo_transform=master_gt, chunks=(1, n_bands, NUM_ENDMEMBERS))
                     em_ds.attrs['wavelengths'] = orig_data_grp["surface_reflectance"].attrs['wavelengths']
                     idx_ds = overwrite_dset(data_grp, 'frame_endmember_indices', (n_frames, NUM_ENDMEMBERS), dtype='int32', chunks=(1, NUM_ENDMEMBERS))
                     vol_ds = overwrite_dset(data_grp, 'frame_endmember_volumes', (n_frames, NUM_ENDMEMBERS), chunks=(1, NUM_ENDMEMBERS))
                 
                     sensor_dsets[grid] = {'em': em_ds, 'idx': idx_ds, 'vol': vol_ds, 'num_bands': n_bands}
+        finally:
+            for f in direct_handles.values():
+                f.close()
 
         payloads = []
         for global_idx, meta in enumerate(timeline):
@@ -459,11 +510,22 @@ def main(target_location=None, tile_size=3, num_endmembers=7, norm_param=None):
                 else:
                     red_idx, nir_idx, swir_idx = 45, 73, 148
                 sensor_type = "ENMAP"
+            elif "DRAGONETTE" in grid_name:
+                wl = grid_wavelengths.get(grid_name)
+                if wl is not None:
+                    red_idx = int(np.argmin(np.abs(wl - 650)))
+                    nir_idx = int(np.argmin(np.abs(wl - 850)))
+                    swir_idx = int(np.argmin(np.abs(wl - 1600)))
+                else:
+                    red_idx, nir_idx, swir_idx = 10, 20, 30
+                sensor_type = "DRAGONETTE"
             else:
                 raise ValueError(f"CRITICAL ERROR: Unrecognized Sensor Grid Architecture: {grid_name}")
 
             payloads.append({
-                'orig_filepath': orig_filepath,
+                'orig_filepath': sensor_sources[grid_name]['file'],
+                'data_grp_path': f"{sensor_sources[grid_name]['path']}/Data Fields",
+                'constellation_filepath': orig_filepath,
                 'global_idx': global_idx,
                 'grid_name': grid_name,
                 't_local': meta['local_idx'],
@@ -474,6 +536,8 @@ def main(target_location=None, tile_size=3, num_endmembers=7, norm_param=None):
                 'num_bands': sensor_dsets[grid_name]['num_bands'] if CALC_GLOBAL_ENDMEMBERS else 0,
                 'height': height,
                 'width': width,
+                'row_offset': int(round((grid_geotransforms[grid_name][3] - master_y) / 30.0)),
+                'col_offset': int(round((master_x - grid_geotransforms[grid_name][0]) / 30.0)),
                 'persistent_water_mask': persistent_water_mask,
                 'calc_flags': {
                     'ndvi': CALC_NDVI, 'ndbi': CALC_NDBI, 'msd': CALC_MSD,
@@ -592,7 +656,7 @@ def main(target_location=None, tile_size=3, num_endmembers=7, norm_param=None):
             print("\nCalculating Temporal Z-Scores per Sensor...")
             
             # Group frame indices by sensor
-            sensor_indices = {"Landsat": [], "Sentinel": [], "Tanager": [], "EnMAP": []}
+            sensor_indices = {"Landsat": [], "Sentinel": [], "Tanager": [], "EnMAP": [], "Dragonette": []}
             for idx, meta in enumerate(timeline):
                 grid = meta['grid']
                 if "HLSL30" in grid:
@@ -603,6 +667,8 @@ def main(target_location=None, tile_size=3, num_endmembers=7, norm_param=None):
                     sensor_indices["Tanager"].append(idx)
                 elif "ENMAP" in grid:
                     sensor_indices["EnMAP"].append(idx)
+                elif "DRAGONETTE" in grid:
+                    sensor_indices["Dragonette"].append(idx)
                     
             for sensor, indices in sensor_indices.items():
                 if len(indices) == 0: continue
@@ -619,14 +685,24 @@ def main(target_location=None, tile_size=3, num_endmembers=7, norm_param=None):
                 
                 # Calculate temporal z-score using SpecComplex
                 if CALC_TEMPORAL_Z_SCORE:
-                    temp_z_cube = sc.calculate_temporal_z_score(sensor_volumes, sensor_masks)
-                    for i, idx in enumerate(indices):
-                        ds_harm_temp_z[idx, :, :] = temp_z_cube[i]
+                    try:
+                        temp_z_cube = sc.calculate_temporal_z_score(sensor_volumes, sensor_masks)
+                        for i, idx in enumerate(indices):
+                            ds_harm_temp_z[idx, :, :] = temp_z_cube[i]
+                    except ValueError as e:
+                        print(f"    -> Warning: Skipping {sensor} temporal Z-score: {e}")
+                        for i, idx in enumerate(indices):
+                            ds_harm_temp_z[idx, :, :] = np.nan
                         
                 if CALC_PIXEL_TEMPORAL_Z_SCORE:
-                    pixel_temp_z_cube = sc.calculate_pixel_temporal_z_score(sensor_volumes, sensor_masks)
-                    for i, idx in enumerate(indices):
-                        ds_harm_pixel_temp_z[idx, :, :] = pixel_temp_z_cube[i]
+                    try:
+                        pixel_temp_z_cube = sc.calculate_pixel_temporal_z_score(sensor_volumes, sensor_masks)
+                        for i, idx in enumerate(indices):
+                            ds_harm_pixel_temp_z[idx, :, :] = pixel_temp_z_cube[i]
+                    except ValueError as e:
+                        print(f"    -> Warning: Skipping {sensor} pixel temporal Z-score: {e}")
+                        for i, idx in enumerate(indices):
+                            ds_harm_pixel_temp_z[idx, :, :] = np.nan
             
             print(f"Temporal Z-Scores completed in {time.perf_counter() - t0_temp_z:.2f}s")
 
@@ -716,12 +792,12 @@ def main(target_location=None, tile_size=3, num_endmembers=7, norm_param=None):
     import argparse
     import yaml
     
-    file_path = None
     if __name__ == "__main__":
         parser = argparse.ArgumentParser(description="Calculate Spectral Complexity Metrics")
         parser.add_argument("--file", type=str, help="Path to HLST ARD Master Grid HDF5 Cube")
         args = parser.parse_args()
-        file_path = args.file
+        if args.file:
+            file_path = args.file
 
     if not file_path:
         if target_location is not None:

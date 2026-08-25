@@ -193,9 +193,15 @@ def execute_job(job_config):
 
     print(f"\nJob '{job_name}' completed. Successfully downloaded {matched_items} scenes.")
 
-def main():
+def main(target_location=None):
     print("Initializing Tanager STAC Job Queue...\n")
-    for job in DOWNLOAD_JOBS:
+    
+    # Filter jobs if target_location is provided
+    jobs_to_run = DOWNLOAD_JOBS
+    if target_location:
+        jobs_to_run = [job for job in DOWNLOAD_JOBS if job["job_name"] == target_location]
+        
+    for job in jobs_to_run:
         execute_job(job)
     print("\nAll download jobs finished.")
 

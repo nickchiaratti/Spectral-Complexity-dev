@@ -20,6 +20,7 @@ import SpecComplex as sc
 
 SOURCE_DIR = r"C:\satelliteImagery\Tanager"
 OUTPUT_DIR = r"C:\satelliteImagery\Tanager"
+LOCATION='Tait'
 
 MIN_ROI_COVERAGE_PERCENT = 25.0 
 SUN_ELEVATION_THRESHOLD = 30
@@ -400,6 +401,6 @@ def process_tanager_mgrs_stack(target_location):
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument("--location", type=str, default="Rochesterv2", help="Target location prefix")
+    parser.add_argument("--location", type=str, default=LOCATION, help="Target location prefix")
     args = parser.parse_args()
     process_tanager_mgrs_stack(args.location)

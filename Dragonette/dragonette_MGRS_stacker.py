@@ -13,7 +13,7 @@ from datetime import datetime
 import rasterio
 from PIL import Image
 
-LOCATION='Rochesterv2'
+LOCATION='Tait'
 # Add parent folder to sys.path to find SpecComplex
 script_dir = Path(__file__).resolve().parent
 if str(script_dir.parent) not in sys.path:
@@ -242,7 +242,7 @@ def process_dragonette_mgrs_stack(target_location):
     output_file = os.path.join(OUTPUT_DIR, f"Dragonette_MGRS_Stack_{target_location}.h5")
     
     with h5py.File(output_file, 'w') as out_h5:
-        grp_wyvern = out_h5.create_group("HDFEOS/GRIDS/WYVERN/Data Fields")
+        grp_wyvern = out_h5.create_group("HDFEOS/GRIDS/DRAGONETTE/Data Fields")
         
         rad_nodata = raw_scenes[0]['nodata']
         ds_rad = grp_wyvern.create_dataset("surface_reflectance", shape=(n_times, n_bands, height, width), dtype='float32', compression="gzip", compression_opts=5, fillvalue=rad_nodata)
@@ -375,8 +375,8 @@ def process_dragonette_mgrs_stack(target_location):
 
     print("  Exporting visual frames as PNGs...")
     with h5py.File(output_file, 'r') as out_h5:
-        vis = out_h5["HDFEOS/GRIDS/WYVERN/Data Fields/ortho_visual"]
-        mask = out_h5["HDFEOS/GRIDS/WYVERN/Data Fields/common_mask"]
+        vis = out_h5["HDFEOS/GRIDS/DRAGONETTE/Data Fields/ortho_visual"]
+        mask = out_h5["HDFEOS/GRIDS/DRAGONETTE/Data Fields/common_mask"]
         for t_idx in range(n_times):
             pass_ts = raw_scenes[t_idx]['time'].strftime("%Y%m%dT%H%M%S")
             frame_rgba = vis[t_idx, ...]
