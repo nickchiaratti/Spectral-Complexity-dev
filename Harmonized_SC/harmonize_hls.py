@@ -39,7 +39,7 @@ def process_hls_master_stack(
         print("    [Pass 1] Evaluating ROI coverage...", flush=True)
         for date_str in sorted_dates:
             entries = daily_groups[date_str]
-            accum_sr_band0 = np.full((1, master_height, master_width), np.nan, dtype=np.float32)
+            accum_sr_band0 = np.full((1, master_height, master_width), -9999, dtype=np.int16)
             
             for entry in entries:
                 fidx = entry['frame_idx']
@@ -53,13 +53,13 @@ def process_hls_master_stack(
                 # Load only the first band
                 src_sr = sr_node[fidx, 0:1, :, :]
                 
-                tmp_sr_band0 = np.full((1, master_height, master_width), np.nan, dtype=np.float32)
-                reproject(source=src_sr, destination=tmp_sr_band0, src_transform=src_tf, src_crs=src_crs, dst_transform=master_transform, dst_crs=master_crs, resampling=Resampling.nearest, src_nodata=np.nan, dst_nodata=np.nan)
+                tmp_sr_band0 = np.full((1, master_height, master_width), -9999, dtype=np.int16)
+                reproject(source=src_sr, destination=tmp_sr_band0, src_transform=src_tf, src_crs=src_crs, dst_transform=master_transform, dst_crs=master_crs, resampling=Resampling.nearest, src_nodata=-9999, dst_nodata=-9999)
                 
-                mask_sr = ~np.isnan(tmp_sr_band0)
+                mask_sr = (tmp_sr_band0 != -9999)
                 accum_sr_band0[mask_sr] = tmp_sr_band0[mask_sr]
             
-            valid_pixels = np.sum(~np.isnan(accum_sr_band0[0]))
+            valid_pixels = np.sum(accum_sr_band0[0] != -9999)
             coverage = (valid_pixels / (master_height * master_width)) * 100
             if coverage >= min_roi_coverage:
                 valid_dates.append(date_str)
@@ -72,7 +72,7 @@ def process_hls_master_stack(
 
     # ---- PASS 2: Extract and process ONLY valid frames ----
     print(f"    [Pass 2] Allocating memory for {num_valid} valid frames...", flush=True)
-    stk_sr = np.full((num_valid, expected_sr, master_height, master_width), np.nan, dtype=np.float32)
+    stk_sr = np.full((num_valid, expected_sr, master_height, master_width), -9999, dtype=np.int16)
     stk_fm = np.full((num_valid, 1, master_height, master_width), 255, dtype=np.uint8)
     stk_ag = np.full((num_valid, 4, master_height, master_width), np.nan, dtype=np.float32)
     stk_mask = np.ones((num_valid, master_height, master_width), dtype=bool)
@@ -80,6 +80,11 @@ def process_hls_master_stack(
     meta_arrays = {'acq': [], 'space': [], 'saz': [], 'sel': [], 'cc': []}
 
     with h5py.File(native_h5_path, 'r') as h5f:
+        # Get scale_to_float from the first valid frame's surface_reflectance attribute
+        base_grid = daily_groups[valid_dates[0]][0]['grid_id']
+        base_path = f'HDFEOS/GRIDS/{base_grid}/Data Fields/surface_reflectance'
+        meta_arrays['scale_to_float'] = h5f[base_path].attrs.get('scale_to_float', 0.0001)
+
         for idx, date_str in enumerate(tqdm(valid_dates, desc="    Reprojecting Frames", unit="frame")):
             entries = daily_groups[date_str]
         
@@ -104,9 +109,9 @@ def process_hls_master_stack(
                 src_crs = CRS.from_wkt(sr_node.attrs['spatial_ref'])
             
                 src_sr = sr_node[fidx]
-                tmp_sr = np.full((expected_sr, master_height, master_width), np.nan, dtype=np.float32)
-                reproject(source=src_sr, destination=tmp_sr, src_transform=src_tf, src_crs=src_crs, dst_transform=master_transform, dst_crs=master_crs, resampling=Resampling.nearest, src_nodata=np.nan, dst_nodata=np.nan)
-                mask_sr = ~np.isnan(tmp_sr)
+                tmp_sr = np.full((expected_sr, master_height, master_width), -9999, dtype=np.int16)
+                reproject(source=src_sr, destination=tmp_sr, src_transform=src_tf, src_crs=src_crs, dst_transform=master_transform, dst_crs=master_crs, resampling=Resampling.nearest, src_nodata=-9999, dst_nodata=-9999)
+                mask_sr = (tmp_sr != -9999)
                 stk_sr[idx][mask_sr] = tmp_sr[mask_sr]
             
                 src_fm = h5f[f'{df_path}/Fmask'][fidx]
@@ -136,7 +141,7 @@ def process_hls_master_stack(
                                             qa_reject_mask=qa_reject_mask,
                                             aerosol_accept_level=aerosol_accept_level).astype(bool)
         
-            rgba_img = sc.generate_rgba_image(r_band = stk_sr[idx, 3, :, :], g_band = stk_sr[idx, 2, :, :], b_band = stk_sr[idx, 1, :, :])
+            rgba_img = sc.generate_rgba_image(r_band = stk_sr[idx, 3, :, :], g_band = stk_sr[idx, 2, :, :], b_band = stk_sr[idx, 1, :, :], nodata=-9999)
             vis_data[idx, ...] = np.transpose(rgba_img, (2, 0, 1))
 
     return {'sr': stk_sr, 'fm': stk_fm, 'ag': stk_ag, 'vis': vis_data, 'mask': stk_mask, 'meta': meta_arrays, 'count': num_valid}

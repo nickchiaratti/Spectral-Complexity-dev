@@ -107,25 +107,25 @@ def write_hdf_sensor_group(h5f, group_path, data_dict, wavelengths, crs_wkt, tra
     num_frames, bands, h, w = data_dict['sr'].shape
     chunk_h, chunk_w = min(h, 256), min(w, 256)
 
-    sr_ds = grp.create_dataset('surface_reflectance', data=data_dict['sr'], compression='gzip', compression_opts=5, chunks=(1, bands, chunk_h, chunk_w))
+    sr_ds = grp.create_dataset('surface_reflectance', data=data_dict['sr'], dtype='int16', compression='gzip', compression_opts=5, shuffle=True, fillvalue=-9999, chunks=(1, bands, chunk_h, chunk_w))
     sr_ds.attrs['units'] = "Reflectance"
-    sr_ds.attrs['_FillValue'] = np.nan
+    sr_ds.attrs['_FillValue'] = -9999
     sr_ds.attrs['wavelengths'] = wavelengths
     sr_ds.attrs['spatial_ref'] = crs_wkt
     sr_ds.attrs['GeoTransform'] = gdal_transform
 
-    fmask_ds = grp.create_dataset('Fmask', data=data_dict['fm'][:, 0, :, :], dtype='uint8', compression='gzip', compression_opts=5, chunks=(1, chunk_h, chunk_w))
+    fmask_ds = grp.create_dataset('Fmask', data=data_dict['fm'][:, 0, :, :], dtype='uint8', compression='gzip', shuffle=True, compression_opts=5, chunks=(1, chunk_h, chunk_w))
     fmask_ds.attrs['_FillValue'] = 255
     
-    ang_ds = grp.create_dataset('solar_view_angles', data=data_dict['ag'], compression='gzip', compression_opts=5, chunks=(1, 4, chunk_h, chunk_w))
+    ang_ds = grp.create_dataset('solar_view_angles', data=data_dict['ag'], compression='gzip', shuffle=True, compression_opts=5, chunks=(1, 4, chunk_h, chunk_w))
     ang_ds.attrs['_FillValue'] = np.nan
     ang_ds.attrs['band_order'] = ["SZA", "SAA", "VZA", "VAA"]
 
-    vis_ds = grp.create_dataset('ortho_visual', data=data_dict['vis'], dtype='uint8', compression='gzip', compression_opts=5, chunks=(1, 4, chunk_h, chunk_w))
+    vis_ds = grp.create_dataset('ortho_visual', data=data_dict['vis'], dtype='uint8', compression='gzip', shuffle=True, compression_opts=5, chunks=(1, 4, chunk_h, chunk_w))
     vis_ds.attrs['spatial_ref'] = crs_wkt
     vis_ds.attrs['GeoTransform'] = gdal_transform
 
-    mask_ds = grp.create_dataset('common_mask', data=data_dict['mask'], dtype=bool, compression='gzip', compression_opts=5, chunks=(1, chunk_h, chunk_w))
+    mask_ds = grp.create_dataset('common_mask', data=data_dict['mask'], dtype=bool, compression='gzip', compression_opts=5, shuffle=True, chunks=(1, chunk_h, chunk_w))
     mask_ds.attrs['description'] = "True = Invalid/Masked, False = Valid."
     mask_ds.attrs['spatial_ref'] = crs_wkt
     mask_ds.attrs['GeoTransform'] = gdal_transform
@@ -138,7 +138,7 @@ def write_hdf_sensor_group(h5f, group_path, data_dict, wavelengths, crs_wkt, tra
     # Extract Bit 5 (value 32) from Fmask
     fmask_data = data_dict['fm'][:, 0, :, :]
     water_mask_data = (fmask_data & 0b100000) != 0
-    water_ds = grp.create_dataset('water_mask', data=water_mask_data, dtype=bool, compression='gzip', compression_opts=5, chunks=(1, chunk_h, chunk_w))
+    water_ds = grp.create_dataset('water_mask', data=water_mask_data, dtype=bool, compression='gzip', shuffle=True, compression_opts=5, chunks=(1, chunk_h, chunk_w))
     water_ds.attrs['description'] = "True = Water, False = Non-Water. Derived from HLS Fmask Bit 5."
     water_ds.attrs['spatial_ref'] = crs_wkt
     water_ds.attrs['GeoTransform'] = gdal_transform
@@ -148,6 +148,10 @@ def write_hdf_sensor_group(h5f, group_path, data_dict, wavelengths, crs_wkt, tra
     sr_ds.attrs['sun_azimuth'] = np.array(data_dict['meta']['saz'], dtype='float32')
     sr_ds.attrs['sun_elevation'] = np.array(data_dict['meta']['sel'], dtype='float32')
     sr_ds.attrs['cloud_cover'] = np.array(data_dict['meta']['cc'], dtype='float32')
+    if 'scale_to_float' in data_dict['meta']:
+        sr_ds.attrs['scale_to_float'] = data_dict['meta']['scale_to_float']
+    else:
+        warnings.warn(f"scale_to_float not found in metadata for {group_path}")
     
     # Export PNGs
     print(f"  Exporting visual frames as PNGs for {group_path}...")

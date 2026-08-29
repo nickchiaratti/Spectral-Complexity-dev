@@ -240,15 +240,7 @@ def process_tanager_swaths_to_grid(h5f, tanager_source_dir, master_height, maste
             sr_fill = sr_dset_ref.fillvalue
             if isinstance(sr_fill, (np.ndarray, list)): sr_fill = sr_fill[0]
             for out_idx in range(total_num_frames):
-                r_band = sr_dset_ref[out_idx, r_idx, :, :]
-                g_band = sr_dset_ref[out_idx, g_idx, :, :]
-                b_band = sr_dset_ref[out_idx, b_idx, :, :]
-                
-                r_input = np.where(r_band < -1, np.nan, r_band)
-                g_input = np.where(g_band < -1, np.nan, g_band)
-                b_input = np.where(b_band < -1, np.nan, b_band)
-                
-                rgba_img = sc.generate_rgba_image(r_input, g_input, b_input)
+                rgba_img = sc.generate_rgba_from_hsi(frame_data=sr_dset_ref[out_idx, :, :, :], wavelengths=master_wv)
                 ortho_vis_dset[out_idx, ...] = np.transpose(rgba_img, (2, 0, 1))
         
         return datasets_created_info, total_num_frames, band_count

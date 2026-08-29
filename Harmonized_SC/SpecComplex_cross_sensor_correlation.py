@@ -23,6 +23,12 @@ from scipy import stats
 from datetime import datetime, timezone
 import tkinter as tk
 from tkinter import filedialog
+import sys
+from pathlib import Path
+script_dir = Path(__file__).resolve().parent
+if str(script_dir.parent) not in sys.path:
+    sys.path.insert(0, str(script_dir.parent))
+import SpecComplex as sc
 
 # ==========================================
 # 1. CONFIGURATION
@@ -110,10 +116,10 @@ class HLST_Statistical_Extractor:
         self.pair_data = []
         
         for i, pair in enumerate(self.matched_pairs):
-            vol_1 = self.ds_vol[pair['idx_1'], :, :]
-            vol_2 = self.ds_vol[pair['idx_2'], :, :]
-            z_1 = self.ds_zscore[pair['idx_1'], :, :]
-            z_2 = self.ds_zscore[pair['idx_2'], :, :]
+            vol_1 = sc.read_scaled_int16(self.ds_vol, np.s_[pair['idx_1'], :, :])
+            vol_2 = sc.read_scaled_int16(self.ds_vol, np.s_[pair['idx_2'], :, :])
+            z_1 = sc.read_scaled_int16(self.ds_zscore, np.s_[pair['idx_1'], :, :])
+            z_2 = sc.read_scaled_int16(self.ds_zscore, np.s_[pair['idx_2'], :, :])
             
             mask_1 = self.ds_mask[pair['idx_1'], :, :]
             mask_2 = self.ds_mask[pair['idx_2'], :, :]

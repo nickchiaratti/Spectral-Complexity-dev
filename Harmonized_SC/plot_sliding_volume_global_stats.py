@@ -8,6 +8,13 @@ import matplotlib.dates as mdates
 from datetime import datetime, timezone
 from scipy import stats
 import scienceplots
+import sys
+from pathlib import Path
+script_dir = Path(__file__).resolve().parent
+if str(script_dir.parent) not in sys.path:
+    sys.path.insert(0, str(script_dir.parent))
+import SpecComplex as sc
+
 plt.style.use(['science', 'ieee', 'no-latex'])
 
 # --- Configuration ---
@@ -100,10 +107,11 @@ def plot_global_stats(target_location=None, h5_path=None, location=None, metric=
         common_mask = h5_file[mask_dset_path] if mask_dset_path in h5_file else None
 
         # Calculate valid (unmasked / non-NaN) pixel counts per frame
+        dset_full = sc.read_scaled_int16(dset)
         if common_mask is not None:
-            counts = np.sum((common_mask[:] == 0) & ~np.isnan(dset[:]), axis=(1, 2))
+            counts = np.sum((common_mask[:] == 0) & ~np.isnan(dset_full), axis=(1, 2))
         else:
-            counts = np.sum(~np.isnan(dset[:]), axis=(1, 2))
+            counts = np.sum(~np.isnan(dset_full), axis=(1, 2))
 
         grids_str = [g if isinstance(g, str) else g.decode('utf-8') for g in grids]
         sensors = {'Landsat (HLSL30)': [], 'Sentinel (HLSS30)': [], 'Tanager': [], 'EnMAP': []}
@@ -128,7 +136,7 @@ def plot_global_stats(target_location=None, h5_path=None, location=None, metric=
             if not s_idx: continue
             step = 1#max(1, len(s_idx))
             sampled_frames = s_idx[::step]
-            arr = dset[sampled_frames]
+            arr = sc.read_scaled_int16(dset, np.s_[sampled_frames])
             if common_mask is not None:
                 m_arr = common_mask[sampled_frames]
                 valid_z = arr[(m_arr == 0) & ~np.isnan(arr)]
@@ -149,7 +157,7 @@ def plot_global_stats(target_location=None, h5_path=None, location=None, metric=
                 if not s_idx: continue
                 step = 1#max(1, len(s_idx))
                 sampled_frames = s_idx[::step]
-                raw_arr = raw_dset[sampled_frames]
+                raw_arr = sc.read_scaled_int16(raw_dset, np.s_[sampled_frames])
                 mask_arr = mask_dset[sampled_frames]
                 valid_raw = raw_arr[(mask_arr == 0) & ~np.isnan(raw_arr) & (raw_arr > 0)]
                 if len(valid_raw) > 0:
@@ -169,7 +177,7 @@ def plot_global_stats(target_location=None, h5_path=None, location=None, metric=
     else:
         fig, (ax_lambda, ax_mean, ax_std, ax_count) = plt.subplots(4, 1, figsize=(14, 13.5), sharex=True, gridspec_kw={'height_ratios': [1.0, 1.2, 1.0, 0.45]})
     
-    title1 = r"Global Spatio-Temporal Scene Complexity Profile (Standardized Log-Volume $Z$-Score)" if metric == 'zscore' else r"Global Spatio-Temporal Scene Complexity Profile (Robust Scaled Volume)"
+    title1 = r"Global Spatio-Temporal Scene Complexity Profile (Standardized Log-Volume $Z$-Score)" if metric == 'zscore' else (r"Global Spatio-Temporal Scene Complexity Profile (Box-Cox Transformed Volume)" if metric == 'box_cox' else r"Global Spatio-Temporal Scene Complexity Profile (Robust Scaled Volume)")
     fig.suptitle(
         title1 + "\n" +
         f"Source: {clean_fname}",
@@ -235,14 +243,14 @@ def plot_global_stats(target_location=None, h5_path=None, location=None, metric=
         ax_lambda.grid(True, linestyle='--', alpha=0.4)
 
     # Styling Means Panel
-    y_label_mean = r"Scene Mean Log Volume ($\mu_{\mathrm{global}}$)" if metric == 'zscore' else r"Scene Median Transformed Volume ($\tilde{x}_{\mathrm{global}}$)"
+    y_label_mean = r"Scene Mean Log Volume ($\mu_{\mathrm{global}}$)" if metric == 'zscore' else (r"Scene Mean Box-Cox Volume ($\mu_{\mathrm{global}}$)" if metric == 'box_cox' else r"Scene Median Transformed Volume ($\tilde{x}_{\mathrm{global}}$)")
     ax_mean.set_ylabel(y_label_mean, fontsize=11, fontweight='bold')
     ax_mean.set_title("Empirical Spatial Scene Mean Complexity across Multi-Sensor Timeline", fontsize=11, loc='left', pad=8)
     ax_mean.legend(loc='upper left', frameon=True, facecolor='white', framealpha=0.95, fontsize=9)
     ax_mean.grid(True, linestyle='--', alpha=0.4)
 
     # Styling Stds Panel
-    y_label_std = r"Scene Std Dev Log Volume ($\sigma_{\mathrm{global}}$)" if metric == 'zscore' else r"Scene IQR Transformed Volume ($\mathrm{IQR}_{\mathrm{global}}$)"
+    y_label_std = r"Scene Std Dev Log Volume ($\sigma_{\mathrm{global}}$)" if metric == 'zscore' else (r"Scene Std Dev Box-Cox Volume ($\sigma_{\mathrm{global}}$)" if metric == 'box_cox' else r"Scene IQR Transformed Volume ($\mathrm{IQR}_{\mathrm{global}}$)")
     ax_std.set_ylabel(y_label_std, fontsize=11, fontweight='bold')
     ax_std.set_title(r"Empirical Spatial Scene Heterogeneity ($\sigma_{\mathrm{global}}$)", fontsize=11, loc='left', pad=8)
     ax_std.legend(loc='upper left', frameon=True, facecolor='white', framealpha=0.95, fontsize=9)
@@ -265,7 +273,7 @@ def plot_global_stats(target_location=None, h5_path=None, location=None, metric=
 
     # --- Plot Window 2: Connected Multi-Sensor Series with Bounding Bars ---
     fig2, (ax_series, ax_count2) = plt.subplots(2, 1, figsize=(14, 8.5), sharex=True, gridspec_kw={'height_ratios': [1.2, 0.35]})
-    title2 = r"Global Scene Mean Log Spectral Complexity (90\% of Values Interval)" if metric == 'zscore' else r"Global Scene Median Transformed Complexity (90\% of Values Interval)"
+    title2 = r"Global Scene Mean Log Spectral Complexity (90\% of Values Interval)" if metric == 'zscore' else (r"Global Scene Mean Box-Cox Transformed Complexity (90\% of Values Interval)" if metric == 'box_cox' else r"Global Scene Median Transformed Complexity (90\% of Values Interval)")
     fig2.suptitle(
         title2 + "\n" +
         f"Source: {clean_fname}",
@@ -308,7 +316,7 @@ def plot_global_stats(target_location=None, h5_path=None, location=None, metric=
     apply_seasonal_underlay([ax_series, ax_count2], dates)
 
     # Styling Plot Window 2 Main Panel
-    y_label2_mean = r"Frame Mean Log(Spectral Complexity) (90\% of Values)" if metric == 'zscore' else r"Frame Median Transformed Complexity (90\% of Values)"
+    y_label2_mean = r"Frame Mean Log(Spectral Complexity) (90\% of Values)" if metric == 'zscore' else (r"Frame Mean Box-Cox Complexity (90\% of Values)" if metric == 'box_cox' else r"Frame Median Transformed Complexity (90\% of Values)")
     ax_series.set_ylabel(y_label2_mean, fontsize=11, fontweight='bold')
     ax_series.set_title("Cross-Sensor Scene Complexity Dynamics across Multi-Sensor Timeline", fontsize=11, loc='left', pad=8)
     ax_series.legend(loc='upper left', frameon=True, facecolor='white', framealpha=0.95, fontsize=9)
@@ -380,14 +388,14 @@ def plot_global_stats(target_location=None, h5_path=None, location=None, metric=
             w_stat = np.nan
             
         label_str = fr"{s_name} (Skew: {skew_val:.2f}, Kurt: {kurt_val:.2f}, WD: {wd:.3f})"
-        counts_hist, bins = np.histogram(s_vals, bins=80, range=(-4, 4), density=True)
+        counts_hist, bins = np.histogram(s_vals, bins=90, range=(-4, 4), density=True)
         bin_centers = 0.5 * (bins[:-1] + bins[1:])
         s_color = colors.get(s_name, '#333333')
         ax_dist_z.plot(bin_centers, counts_hist, color=s_color, linewidth=1.8, label=label_str, alpha=0.85)
 
-    dist_title = "Standardized Log Spectral Complexity ($Z$-Score) Density" if metric == 'zscore' else "Standardized Robust Scaled Complexity Density"
+    dist_title = "Standardized Log Spectral Complexity ($Z$-Score) Density" if metric == 'zscore' else ("Standardized Box-Cox Transformed Complexity Density" if metric == 'box_cox' else "Standardized Robust Scaled Complexity Density")
     ax_dist_z.set_title(dist_title, fontsize=11, fontweight='bold', pad=8)
-    dist_xlabel = r"Standardized $Z$-Score ($\frac{\ln V - \mu}{\sigma}$)" if metric == 'zscore' else r"Robust Scaled Volume"
+    dist_xlabel = r"Standardized $Z$-Score ($\frac{\ln V - \mu}{\sigma}$)" if metric == 'zscore' else (r"Standardized Box-Cox $Z$-Score" if metric == 'box_cox' else r"Robust Scaled Volume")
     ax_dist_z.set_xlabel(dist_xlabel, fontsize=11, fontweight='bold')
     ax_dist_z.set_ylabel("Probability Density", fontsize=11, fontweight='bold')
     ax_dist_z.legend(loc='upper right', frameon=True, facecolor='white', framealpha=0.95, fontsize=9)
@@ -398,7 +406,7 @@ def plot_global_stats(target_location=None, h5_path=None, location=None, metric=
 
     # Determine global x-range across all log samples for consistent bin alignment
     if len(raw_log_samples) > 0:
-        _, global_bins = np.histogram(raw_log_samples, bins=80)
+        _, global_bins = np.histogram(raw_log_samples, bins=90)
         x_min_log, x_max_log = global_bins[0], global_bins[-1]
     else:
         x_min_log, x_max_log = -15, 15
@@ -414,8 +422,10 @@ def plot_global_stats(target_location=None, h5_path=None, location=None, metric=
             std_s = np.std(s_vals)
             skew_s = stats.skew(s_vals)
             kurt_s = stats.kurtosis(s_vals)
+            n_px = len(s_vals)
+            n_frames = len(sensors.get(s_name, []))
 
-            counts_s, bins_s = np.histogram(s_vals, bins=60, range=(x_min_log, x_max_log), density=True)
+            counts_s, bins_s = np.histogram(s_vals, bins=90, range=(x_min_log, x_max_log), density=True)
             bin_c_s = 0.5 * (bins_s[:-1] + bins_s[1:])
             ax.plot(bin_c_s, counts_s, color=s_color, linewidth=2.0, label=r"Empirical $\ln V$", alpha=0.9)
 
@@ -428,6 +438,7 @@ def plot_global_stats(target_location=None, h5_path=None, location=None, metric=
             ax.axvspan(mu_s - 1.645*std_s, mu_s + 1.645*std_s, color='gray', alpha=0.15, label=r"90\% Interval")
 
             stats_text = (
+                fr"$N = {n_px:,}$ pixels ($n = {n_frames}$ frames)" + "\n" +
                 fr"$\mu = {mu_s:.2f}, \sigma = {std_s:.2f}$" + "\n" +
                 fr"Skewness $= {skew_s:.2f}$" + "\n" +
                 fr"Ex. Kurtosis $= {kurt_s:.2f}$"
@@ -436,11 +447,11 @@ def plot_global_stats(target_location=None, h5_path=None, location=None, metric=
                     fontsize=9, verticalalignment='top',
                     bbox=dict(boxstyle='round,pad=0.4', facecolor='white', alpha=0.9, edgecolor='gray'))
             ax.legend(loc='upper right', frameon=True, facecolor='white', framealpha=0.9, fontsize=8)
+            ax.set_title(fr"{s_name} $\ln V$ Distribution ($N = {n_px:,}$ pixels)", fontsize=10, fontweight='bold', loc='left', pad=4)
         else:
-            ax.text(0.5, 0.5, f"No Valid Acquisitions for {s_name}", transform=ax.transAxes,
+            ax.text(0.5, 0.5, f"No Valid Acquisitions for {s_name} (N = 0)", transform=ax.transAxes,
                     ha='center', va='center', fontsize=10, fontstyle='italic', color='gray')
-
-        ax.set_title(fr"{s_name} $\ln V$ Distribution", fontsize=10, fontweight='bold', loc='left', pad=4)
+            ax.set_title(fr"{s_name} $\ln V$ Distribution ($N = 0$ pixels)", fontsize=10, fontweight='bold', loc='left', pad=4)
         ax.set_ylabel("Density", fontsize=9, fontweight='bold')
         ax.grid(True, linestyle='--', alpha=0.4)
         if idx < num_active_sensors - 1:
@@ -479,14 +490,24 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Plot sliding volume global stats")
     parser.add_argument('--file', '-f', type=str, default=None, help="Path to specific HDF5 file")
     parser.add_argument('--location', '-l', type=str, default=None, help="Target location name")
+    parser.add_argument('--metric', '-m', type=str, default=None, help="Metric to plot ('zscore', 'robust', 'box_cox', or 'all')")
     args = parser.parse_args()
 
+    if args.metric:
+        if args.metric.lower() == 'all':
+            metrics_to_plot = ['zscore', 'robust', 'box_cox']
+        else:
+            metrics_to_plot = [args.metric]
+    else:
+        metrics_to_plot = ['zscore', 'robust', 'box_cox']
+
     if args.file or args.location:
-        plot_global_stats(target_location=args.location, h5_path=args.file)
+        for m in metrics_to_plot:
+            plot_global_stats(target_location=args.location, h5_path=args.file, metric=m)
     else:
         print(f"Starting batch processing across {len(LOCATIONS)} locations: {LOCATIONS}")
         for loc in LOCATIONS:
             print(f"\n========================================\nProcessing location: {loc} ...")
-            plot_global_stats(target_location=loc, metric='zscore')
-            plot_global_stats(target_location=loc, metric='robust')
+            for m in metrics_to_plot:
+                plot_global_stats(target_location=loc, metric=m)
         print("\n========================================\nBatch processing completed successfully.")

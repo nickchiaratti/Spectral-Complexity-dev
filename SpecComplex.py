@@ -325,12 +325,213 @@ def calcGramLocalVolumes(endmembers, localization_vector):
         if det < 0:
             det = 0.0
             
-        # Volume is the square root of the Gramian determinant
+    # Volume is the square root of the Gramian determinant
         volumes[i-1] = np.sqrt(det)
         
     return volumes
 
-def generate_rgba_image(r_band, g_band, b_band, low=0.5, high=99.5, gamma=1.2):
+def load_scaled_reflectance(dataset, slice_obj=np.s_[...]):
+    """
+    Helper to safely load a hyperspectral surface reflectance dataset from HDF5,
+    detect if it's scaled int16, and convert it to true float32 reflectance.
+    Converts any nodata values into np.nan.
+    """
+    data = dataset[slice_obj]
+    scale = dataset.attrs.get("scale_to_float")
+    
+    if data.dtype in (np.int16, np.uint16, np.int32, np.int8, np.uint8):
+        nodata = dataset.fillvalue if dataset.fillvalue is not None else -32768
+        float_data = data.astype(np.float32)
+        float_data[data == nodata] = np.nan
+        
+        if scale is not None:
+            float_data *= scale
+        return float_data
+        
+    # If it's already float, just apply scale if it somehow exists
+    if scale is not None:
+        data = data * scale
+    return data
+
+def scale_to_int16(float_data, scale_factor=10000.0, nodata_value=-32768):
+    """
+    Scales a float32 array to int16 to reduce storage size.
+    NaNs are converted to the specified nodata_value.
+    """
+    if float_data is None:
+        return None
+        
+    # Create output array with nodata
+    int_data = np.full(float_data.shape, nodata_value, dtype=np.int16)
+    
+    # Valid mask
+    valid_mask = ~np.isnan(float_data)
+    
+    # Scale, round, and clip to int16 limits
+    scaled_valid = np.round(float_data[valid_mask] * scale_factor)
+    scaled_valid = np.clip(scaled_valid, -32767, 32767)
+    
+    int_data[valid_mask] = scaled_valid.astype(np.int16)
+    return int_data
+
+def read_scaled_int16(dataset, slice_obj=np.s_[...]):
+    """
+    Reads an HDF5 dataset, checks for 'scale_factor' and '_FillValue' attributes,
+    and returns a float32 array if scaled or float.
+    """
+    data = dataset[slice_obj]
+    scale_factor = dataset.attrs.get("scale_factor")
+    fill_value = dataset.attrs.get("_FillValue")
+    if fill_value is None:
+        fill_value = dataset.attrs.get("fill_value")
+        
+    if scale_factor is not None and data.dtype == np.int16:
+        float_data = data.astype(np.float32)
+        if fill_value is not None:
+            float_data[data == fill_value] = np.nan
+        return float_data / scale_factor
+    
+    # If floating point and fill_value attribute is explicitly set, mask it with NaN
+    if np.issubdtype(data.dtype, np.floating) and fill_value is not None:
+        data = data.copy()
+        data[data == fill_value] = np.nan
+        return data
+        
+    return data
+
+
+def generate_rgba_from_hsi(frame_data, wavelengths, low=0.5, high=99.5, gamma=1.1, nodata=None, scale=None):
+    """
+    Extracts, stretches, and gamma-corrects a full hyperspectral 
+    frame (using CIE 1931 CMFs) to create a true color image with an alpha channel.
+    
+    The alpha channel follows standard RGBA opacity conventions:
+    255 (Opaque) where pixels are valid, and 0 (Transparent) where 
+    pixels are invalid (all 0s or all NaNs).
+    
+    Returns:
+        rgba_8bit (np.ndarray): Shape (height, width, 4), dtype uint8.
+    """
+    import colour
+    from scipy.interpolate import interp1d
+    
+    bands, height, width = frame_data.shape
+    
+    wavelengths = np.asarray(wavelengths, dtype=np.float32)
+    if not np.any(wavelengths > 0):
+        raise ValueError("Invalid wavelengths provided to generate_rgba_from_hsi: all wavelengths are <= 0.")
+        
+    # Automatically convert micrometers to nanometers if needed
+    if np.nanmax(wavelengths) < 50.0:
+        wavelengths = wavelengths * 1000.0
+        
+    # Cast to float internally for color math if it's an integer array
+    if frame_data.dtype.kind in 'iu':
+        frame_data = frame_data.astype(np.float32)
+        if nodata is not None:
+            frame_data[frame_data == nodata] = np.nan
+        # If integer data with scale factor (e.g. int16 scaled by 10000 or custom scale)
+        if scale is not None:
+            frame_data = frame_data * scale
+        elif np.nanmax(frame_data) > 100.0:
+            frame_data = frame_data * 0.0001
+    elif nodata is not None:
+        frame_data = frame_data.copy()
+        frame_data[frame_data == nodata] = np.nan
+        if scale is not None:
+            frame_data = frame_data * scale
+            
+    # 1. Determine Invalid Pixel Mask
+    # A pixel is invalid only if all bands are NaN or all bands are 0
+    all_nan_mask = np.all(np.isnan(frame_data), axis=0)
+    all_zero_mask = np.all(frame_data == 0, axis=0)
+    invalid_pixel_mask = all_nan_mask | all_zero_mask
+    valid_mask = ~invalid_pixel_mask
+    valid_mask_flat = valid_mask.reshape(-1)
+    
+    if not np.any(valid_mask):
+        return np.zeros((height, width, 4), dtype=np.uint8)
+        
+    # 2. Get standard CMFs and illuminant
+    cmfs = colour.MSDS_CMFS['CIE 1931 2 Degree Standard Observer']
+    illuminant = colour.SDS_ILLUMINANTS['D65']
+    
+    # Create interpolation functions
+    interp_x = interp1d(cmfs.wavelengths, cmfs.values[:, 0], bounds_error=False, fill_value=0)
+    interp_y = interp1d(cmfs.wavelengths, cmfs.values[:, 1], bounds_error=False, fill_value=0)
+    interp_z = interp1d(cmfs.wavelengths, cmfs.values[:, 2], bounds_error=False, fill_value=0)
+    interp_ill = interp1d(illuminant.wavelengths, illuminant.values, bounds_error=False, fill_value=0)
+    
+    # Evaluate at sensor wavelengths
+    x_bar = interp_x(wavelengths)
+    y_bar = interp_y(wavelengths)
+    z_bar = interp_z(wavelengths)
+    ill_weights = interp_ill(wavelengths)
+    
+    # Compute relative weights for each band (Integration over wavelength)
+    weights = np.column_stack((x_bar, y_bar, z_bar)) * ill_weights[:, np.newaxis]
+    
+    # Normalize weights so that a perfectly white spectrum (all 1s) produces Y=100
+    white_spectrum = np.ones_like(wavelengths)
+    XYZ_white = weights.T @ white_spectrum
+    if XYZ_white[1] == 0:
+        return np.zeros((height, width, 4), dtype=np.uint8)
+    weights = (weights / XYZ_white[1]) * 100.0  # Scale relative to Y (luminance)
+    
+    # Apply CMFs to hyperspectral data (Matrix multiplication)
+    spectra = frame_data.reshape(bands, -1)
+    valid_spectra = spectra[:, valid_mask_flat]
+    # Replace individual missing band values with 0.0 for CMF integration and clip negative noise
+    valid_spectra = np.nan_to_num(valid_spectra, nan=0.0)
+    valid_spectra = np.clip(valid_spectra, 0.0, None)
+    
+    XYZ_valid = weights.T @ valid_spectra
+    
+    # Convert XYZ to sRGB
+    RGB_valid = colour.XYZ_to_sRGB(XYZ_valid.T).T
+    
+    # Place back into image
+    rgb_img = np.zeros((3, height * width), dtype=np.float32)
+    rgb_img[:, valid_mask_flat] = RGB_valid
+    rgb_img = rgb_img.reshape(3, height, width)
+    
+    rgb = np.transpose(rgb_img, (1, 2, 0)) # (height, width, 3)
+    all_valid_pixels = rgb[valid_mask].flatten()
+    
+    if all_valid_pixels.size == 0:
+        return np.zeros((height, width, 4), dtype=np.uint8)
+        
+    p_low, p_high = np.percentile(all_valid_pixels, (low, high))
+
+    for i in range(3):
+        band_data = rgb[:, :, i]
+        if p_low < p_high: 
+            # Manual linear stretch (highly optimized)
+            stretched = np.clip((band_data - p_low) / (p_high - p_low), 0.0, 1.0)
+            
+            # Non-linear Gamma Correction to improve mid-tone visibility
+            if gamma != 1.0:
+                # Prevent power warnings on 0 values
+                with np.errstate(invalid='ignore', divide='ignore'):
+                    stretched = np.power(stretched, 1.0 / gamma)
+                    # Clean up any potential inf/nan from power operation
+                    stretched = np.nan_to_num(stretched, nan=0.0, posinf=1.0, neginf=0.0)
+            
+            rgb[:, :, i] = stretched
+
+    # Scale to 8-bit for highly efficient HDF5 storage
+    rgb_8bit = (rgb * 255).astype(np.uint8)
+    
+    # 3. Construct the Alpha Channel
+    alpha = np.full((height, width), 255, dtype=np.uint8)
+    alpha[invalid_pixel_mask] = 0
+    
+    # 4. Stack alpha onto RGB to create RGBA
+    rgba_8bit = np.dstack((rgb_8bit, alpha))
+    
+    return rgba_8bit
+
+def generate_rgba_image(r_band, g_band, b_band, low=0.5, high=99.5, gamma=1.2, nodata=None):
     """
     Extracts, stretches, and gamma-corrects the RGB bands from a surface 
     reflectance frame to create a true color image with an alpha channel.
@@ -346,6 +547,12 @@ def generate_rgba_image(r_band, g_band, b_band, low=0.5, high=99.5, gamma=1.2):
 
     # Handle case where the entire frame is NaN
     frame_rgb = np.stack([r_band, g_band, b_band], axis=0)
+    
+    if frame_rgb.dtype.kind in 'iu':
+        frame_rgb = frame_rgb.astype(np.float32)
+        if nodata is not None:
+            frame_rgb[frame_rgb == nodata] = np.nan
+            
     if np.all(np.isnan(frame_rgb)): 
         return np.zeros((height, width, 4), dtype=np.uint8)
 

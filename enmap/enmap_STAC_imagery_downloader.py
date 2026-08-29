@@ -124,19 +124,24 @@ def download_file(url, destination_path, session):
         with session.get(url, stream=True) as r:
             if r.status_code in [401, 403]:
                 print(f"    -> Authentication failed or access denied (HTTP {r.status_code}) for {url}")
-                return False
+                raise PermissionError("EnMAP authentication token is expired or invalid. Please update ENMAP_COOKIE in your .env file.")
             r.raise_for_status()
 
             # Verify response is not an HTML login/error page instead of valid binary/data asset
             content_type = r.headers.get('Content-Type', '').lower()
             if 'text/html' in content_type and not destination_path.name.endswith('.html'):
                 print(f"    -> Download returned an HTML login page instead of asset file. Session authentication required for {url}")
-                return False
+                raise PermissionError("EnMAP authentication token is expired or invalid. Please update ENMAP_COOKIE in your .env file.")
 
             with open(destination_path, 'wb') as f:
                 for chunk in r.iter_content(chunk_size=8192):
                     f.write(chunk)
         return True
+    except PermissionError:
+        # Clean up partial file if we somehow created one
+        if destination_path.exists():
+            destination_path.unlink()
+        raise  # Bubble up to abort the pipeline
     except Exception as e:
         print(f"    -> Error downloading {url}: {e}")
         # Clean up partial file
@@ -161,35 +166,48 @@ def execute_job(job_config, session):
     print(f"{'='*50}")
     
     # 1. Query STAC
-    print("Querying DLR EOC STAC...")
+    dt_safe = dt_range.replace('/', '_').replace(':', '')
+    cache_file = out_dir / f"STAC_Search_Results_{job_name}_{dt_safe}.json"
     
-    # Target the collection directly instead of using the global /search endpoint
-    collection_items_url = f"{STAC_API_URL}/collections/{COLLECTION_ID}/items"
-    
-    params = {
-        "bbox": ",".join(map(str, bbox)),
-        "datetime": dt_range,
-        "limit": 500
-    }
-    
-    try:
-        response = session.get(collection_items_url, params=params)
-        response.raise_for_status()
-        feature_collection = response.json()
-        items = feature_collection.get("features", [])
+    if cache_file.exists():
+        print(f"Loading STAC results from cache: {cache_file}")
+        with open(cache_file, 'r') as f:
+            items = json.load(f)
+    else:
+        print("Querying DLR EOC STAC...")
         
-        # Handle simple pagination if there are more results
-        next_link = next((link['href'] for link in feature_collection.get('links', []) if link['rel'] == 'next'), None)
-        while next_link:
-            resp = session.get(next_link)
-            resp.raise_for_status()
-            fc = resp.json()
-            items.extend(fc.get("features", []))
-            next_link = next((link['href'] for link in fc.get('links', []) if link['rel'] == 'next'), None)
+        # Target the collection directly instead of using the global /search endpoint
+        collection_items_url = f"{STAC_API_URL}/collections/{COLLECTION_ID}/items"
+        
+        params = {
+            "bbox": ",".join(map(str, bbox)),
+            "datetime": dt_range,
+            "limit": 500
+        }
+        
+        try:
+            response = session.get(collection_items_url, params=params)
+            response.raise_for_status()
+            feature_collection = response.json()
+            items = feature_collection.get("features", [])
             
-    except Exception as e:
-        print(f"Failed to query STAC API: {e}")
-        return
+            # Handle simple pagination if there are more results
+            next_link = next((link['href'] for link in feature_collection.get('links', []) if link['rel'] == 'next'), None)
+            while next_link:
+                resp = session.get(next_link)
+                resp.raise_for_status()
+                fc = resp.json()
+                items.extend(fc.get("features", []))
+                next_link = next((link['href'] for link in fc.get('links', []) if link['rel'] == 'next'), None)
+                
+            # Save STAC results to cache
+            with open(cache_file, 'w') as f:
+                json.dump(items, f, indent=4)
+                print(f"Saved STAC results cache to: {cache_file}")
+                
+        except Exception as e:
+            print(f"Failed to query STAC API: {e}")
+            return
 
     filtered_items = items
     print(f"Found {len(filtered_items)} items matching query criteria.")
@@ -229,6 +247,12 @@ def execute_job(job_config, session):
             # Example Good: .../DT0000163932/05/ENMAP01-.../ENMAP01-...-METADATA.XML
             # We automatically fix the URL by injecting the item_id folder if it's missing.
             file_name = os.path.basename(href.split("?")[0])
+            
+            # Skip VNIR_COG.TIF and SWIR_COG.TIF assets (and thumbnails/quicklooks)
+            upper_name = file_name.upper()
+            if "VNIR_COG.TIF" in upper_name or "SWIR_COG.TIF" in upper_name:
+                continue
+
             if f"/{item_id}/" not in href:
                 parent_dir_path = href.rsplit('/', 1)[0]
                 href = f"{parent_dir_path}/{item_id}/{file_name}"

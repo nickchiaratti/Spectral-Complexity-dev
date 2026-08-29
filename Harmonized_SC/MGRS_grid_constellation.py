@@ -11,7 +11,7 @@ if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
 # Import downloaders and stackers
-from HLS30 import HLS30_earthAccess_to_hdf5, HLS_MGRS_stacker
+from HLS30 import HLS30_earthAccess_to_MGRS_grid
 from enmap import enmap_STAC_imagery_downloader, enmap_MGRS_stacker
 from Dragonette import dragonette_STAC_imagery_downloader, dragonette_MGRS_stacker
 
@@ -31,6 +31,8 @@ def check_h5_exists(sensor, location):
         return True
     return False
 
+import yaml
+
 def main(target_location=None, force=False):
     if target_location is None:
         parser = argparse.ArgumentParser(description="MGRS Grid Constellation Orchestrator")
@@ -45,44 +47,75 @@ def main(target_location=None, force=False):
     
     print(f"Starting MGRS Grid Constellation processing for location: {location}")
     print(f"Force regeneration: {force}")
+
+    # Load location configuration
+    config_path = os.path.join(project_root, "locations_config.yaml")
+    config_data = {}
+    if os.path.exists(config_path):
+        with open(config_path, "r") as f:
+            config_data = yaml.safe_load(f) or {}
+    loc_data = config_data.get("locations", {}).get(location, {})
     
     # HLS
-    if force or not check_h5_exists("HLS", location):
+    hls_avail = loc_data.get("HLS_AVAILABLE", True)
+    if not hls_avail:
+        print("\n--- Skipping HLS (HLS_AVAILABLE is False in config) ---")
+    elif force or not check_h5_exists("HLS", location):
         print("\n" + "="*40)
         print("--- Processing HLS ---")
         print("="*40)
-        HLS30_earthAccess_to_hdf5.main(target_location=location)
-        HLS_MGRS_stacker.process_hls_mgrs_stack(location)
+        try:
+            HLS30_earthAccess_to_MGRS_grid.main(target_location=location)
+        except (FileNotFoundError, ValueError) as e:
+            print(f"Warning: Skipping HLS stack generation: {e}")
     else:
         print("\n--- Skipping HLS (already exists) ---")
         
     # Tanager
-    if force or not check_h5_exists("Tanager", location):
+    tanager_avail = loc_data.get("TANAGER_AVAILABLE", True)
+    if not tanager_avail:
+        print("\n--- Skipping Tanager (TANAGER_AVAILABLE is False in config) ---")
+    elif force or not check_h5_exists("Tanager", location):
         print("\n" + "="*40)
         print("--- Processing Tanager ---")
         print("="*40)
-        Tanager_STAC_imagery_downloader.main(target_location=location)
-        tanager_MGRS_stacker.process_tanager_mgrs_stack(location)
+        try:
+            Tanager_STAC_imagery_downloader.main(target_location=location)
+            tanager_MGRS_stacker.process_tanager_mgrs_stack(location)
+        except (FileNotFoundError, ValueError) as e:
+            print(f"Warning: Skipping Tanager stack generation: {e}")
     else:
         print("\n--- Skipping Tanager (already exists) ---")
         
     # EnMAP
-    if force or not check_h5_exists("EnMAP", location):
+    enmap_avail = loc_data.get("ENMAP_AVAILABLE", True)
+    if not enmap_avail:
+        print("\n--- Skipping EnMAP (ENMAP_AVAILABLE is False in config) ---")
+    elif force or not check_h5_exists("EnMAP", location):
         print("\n" + "="*40)
         print("--- Processing EnMAP ---")
         print("="*40)
-        enmap_STAC_imagery_downloader.main(target_location=location)
-        enmap_MGRS_stacker.process_mgrs_stack(location)
+        try:
+            enmap_STAC_imagery_downloader.main(target_location=location)
+            enmap_MGRS_stacker.process_mgrs_stack(location)
+        except (FileNotFoundError, ValueError) as e:
+            print(f"Warning: Skipping EnMAP stack generation: {e}")
     else:
         print("\n--- Skipping EnMAP (already exists) ---")
         
     # Dragonette
-    if force or not check_h5_exists("Dragonette", location):
+    dragonette_avail = loc_data.get("DRAGONETTE_AVAILABLE", True)
+    if not dragonette_avail:
+        print("\n--- Skipping Dragonette (DRAGONETTE_AVAILABLE is False in config) ---")
+    elif force or not check_h5_exists("Dragonette", location):
         print("\n" + "="*40)
         print("--- Processing Dragonette ---")
         print("="*40)
-        dragonette_STAC_imagery_downloader.main(target_location=location)
-        dragonette_MGRS_stacker.process_dragonette_mgrs_stack(location)
+        try:
+            dragonette_STAC_imagery_downloader.main(target_location=location)
+            dragonette_MGRS_stacker.process_dragonette_mgrs_stack(location)
+        except (FileNotFoundError, ValueError) as e:
+            print(f"Warning: Skipping Dragonette stack generation: {e}")
     else:
         print("\n--- Skipping Dragonette (already exists) ---")
         

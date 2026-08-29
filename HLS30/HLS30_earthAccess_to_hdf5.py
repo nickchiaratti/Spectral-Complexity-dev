@@ -391,7 +391,7 @@ def main(target_location=None):
             
             sr_ds = grp.create_dataset('surface_reflectance', shape=(num_frames, expected_sr, h, w), 
                                        chunks=(1, expected_sr, chunk_h, chunk_w),
-                                       dtype=np.float32, compression='gzip', compression_opts=4)
+                                       dtype=np.int16, compression='gzip', compression_opts=4, shuffle=True, fillvalue=-9999)
             
             fm_ds = grp.create_dataset('Fmask', shape=(num_frames, 1, h, w), 
                                        chunks=(1, 1, chunk_h, chunk_w),
@@ -417,7 +417,7 @@ def main(target_location=None):
                     t_fm = src.read(expected_fmask_idx, window=read_window)
                     t_ag = src.read(list(range(expected_fmask_idx+1, expected_fmask_idx+5)), window=read_window)
 
-                    sr_ds[idx, ...] = np.where(t_sr != -9999, t_sr.astype(np.float32) * 0.0001, np.nan)
+                    sr_ds[idx, ...] = t_sr
                     
                     sr_valid = t_sr[0] != -9999
                     fm_pass = np.where((t_fm != 255) & sr_valid, t_fm, 255)
@@ -462,6 +462,7 @@ def main(target_location=None):
             sr_ds.attrs['sun_azimuth'] = np.array(meta_arrays['saz'], dtype='float32')
             sr_ds.attrs['sun_elevation'] = np.array(meta_arrays['sel'], dtype='float32')
             sr_ds.attrs['cloud_cover'] = np.array(meta_arrays['cc'], dtype='float32')
+            sr_ds.attrs['scale_to_float'] = 0.0001
             
             zone = tile_data.get('zone', 0)
             odl = hdfeos_odl.generate_earthaccess_hls_odl_grid_string(

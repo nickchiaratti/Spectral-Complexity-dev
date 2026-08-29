@@ -1,6 +1,6 @@
 locations:
   Rochesterv2:
-    SOURCE_CACHE: null
+    SOURCE_CACHE:
     ROI_LON_MIN: -77.770166
     ROI_LON_MAX: -77.376776
     ROI_LAT_MIN: 42.961778
@@ -11,6 +11,13 @@ locations:
     TANAGER_STAC_URL: https://www.planet.com/data/stac/tanager-core-imagery/ROCX2025/collection.json
     DRAGONETTE_AVAILABLE: true
     DRAGONETTE_STAC_URL: https://wyvern-odp.com/application/spatio_temporal/collection.json
+    ENMAP_AVAILABLE: true
+    MGRS_EPSG: 32618
+    MGRS_UL_X: 274050.0
+    MGRS_UL_Y: 4802550.0
+    MGRS_WIDTH: 1110
+    MGRS_HEIGHT: 1442
+    TARGET_GSD: 30.0
   Tait:
     SOURCE_CACHE: Rochesterv2
     ROI_LON_MIN: -77.516127
@@ -23,6 +30,13 @@ locations:
     TANAGER_STAC_URL: https://www.planet.com/data/stac/tanager-core-imagery/ROCX2025/collection.json
     DRAGONETTE_AVAILABLE: true
     DRAGONETTE_STAC_URL: https://wyvern-odp.com/application/spatio_temporal/collection.json
+    ENMAP_AVAILABLE: true
+    MGRS_EPSG: 32618
+    MGRS_UL_X: 274050.0
+    MGRS_UL_Y: 4802550.0
+    MGRS_WIDTH: 1110
+    MGRS_HEIGHT: 1442
+    TARGET_GSD: 30.0
   MtEtna:
     SOURCE_CACHE: MtEtna-Catania
     ROI_LON_MIN: 14.91
@@ -32,6 +46,12 @@ locations:
     START_DATE: '2020-08-01'
     END_DATE: '2021-07-31'
     TANAGER_AVAILABLE: false
+    MGRS_EPSG: 32633
+    MGRS_UL_X: 482280.0
+    MGRS_UL_Y: 4194780.0
+    MGRS_WIDTH: 1624
+    MGRS_HEIGHT: 1851
+    TARGET_GSD: 30.0
   MtEtna-Catania:
     SOURCE_CACHE: MtEtna-Catania
     ROI_LON_MIN: 14.8
@@ -41,6 +61,12 @@ locations:
     START_DATE: '2024-01-01'
     END_DATE: '2025-01-01'
     TANAGER_AVAILABLE: false
+    MGRS_EPSG: 32633
+    MGRS_UL_X: 482280.0
+    MGRS_UL_Y: 4194780.0
+    MGRS_WIDTH: 1624
+    MGRS_HEIGHT: 1851
+    TARGET_GSD: 30.0
   BuenosAires:
     SOURCE_CACHE: BuenosAires
     ROI_LON_MIN: -58.79
@@ -51,6 +77,12 @@ locations:
     END_DATE: '2026-06-01'
     TANAGER_AVAILABLE: true
     TANAGER_STAC_URL: https://www.planet.com/data/stac/tanager-core-imagery/urban/collection.json
+    MGRS_EPSG: 32721
+    MGRS_UL_X: 335190.0
+    MGRS_UL_Y: 6208080.0
+    MGRS_WIDTH: 1073
+    MGRS_HEIGHT: 2014
+    TARGET_GSD: 30.0
   Hurlingham:
     SOURCE_CACHE: BuenosAires
     ROI_LON_MIN: -58.738444
@@ -61,6 +93,12 @@ locations:
     END_DATE: '2026-06-01'
     TANAGER_AVAILABLE: true
     TANAGER_STAC_URL: https://www.planet.com/data/stac/tanager-core-imagery/urban/collection.json
+    MGRS_EPSG: 32721
+    MGRS_UL_X: 335190.0
+    MGRS_UL_Y: 6208080.0
+    MGRS_WIDTH: 1073
+    MGRS_HEIGHT: 2014
+    TARGET_GSD: 30.0
   Palisades:
     SOURCE_CACHE: Palisades
     ROI_LON_MIN: -118.92
@@ -70,7 +108,14 @@ locations:
     START_DATE: '2024-01-01'
     END_DATE: '2026-01-01'
     TANAGER_AVAILABLE: true
-    TANAGER_STAC_URL: https://www.planet.com/data/stac/browser/tanager-core-imagery/natural-lands/collection.json # https://www.planet.com/data/stac/tanager-core-imagery/fire/collection.json
+    TANAGER_STAC_URL: 
+      https://www.planet.com/data/stac/browser/tanager-core-imagery/natural-lands/collection.json                 # https://www.planet.com/data/stac/tanager-core-imagery/fire/collection.json
+    MGRS_EPSG: 32611
+    MGRS_UL_X: 322470.0
+    MGRS_UL_Y: 3858090.0
+    MGRS_WIDTH: 1728
+    MGRS_HEIGHT: 3540
+    TARGET_GSD: 30.0
   Malibu:
     SOURCE_CACHE: Palisades
     ROI_LON_MIN: -118.777313
@@ -80,9 +125,16 @@ locations:
     START_DATE: '2015-01-01'
     END_DATE: '2026-06-01'
     TANAGER_AVAILABLE: true
-    TANAGER_STAC_URL: https://www.planet.com/data/stac/browser/tanager-core-imagery/natural-lands/collection.json # https://www.planet.com/data/stac/tanager-core-imagery/fire/collection.json
+    TANAGER_STAC_URL: 
+      https://www.planet.com/data/stac/browser/tanager-core-imagery/natural-lands/collection.json                 # https://www.planet.com/data/stac/tanager-core-imagery/fire/collection.json
     DRAGONETTE_AVAILABLE: false
     DRAGONETTE_STAC_URL: https://wyvern-odp.com/application/spatio_temporal/collection.json
+    MGRS_EPSG: 32611
+    MGRS_UL_X: 322470.0
+    MGRS_UL_Y: 3858090.0
+    MGRS_WIDTH: 1728
+    MGRS_HEIGHT: 3540
+    TARGET_GSD: 30.0
   CentralGreece:
     SOURCE_CACHE: CentralGreece
     ROI_LON_MIN: 21.497883
@@ -94,7 +146,13 @@ locations:
     TANAGER_AVAILABLE: false
     DRAGONETTE_AVAILABLE: false
     ENMAP_AVAILABLE: true
-    ENMAP_STAC_URL: https://wyvern-odp.com/industry/spatio_temporal/collection.json  
+    ENMAP_STAC_URL: https://wyvern-odp.com/industry/spatio_temporal/collection.json
+    MGRS_EPSG: 32634
+    MGRS_UL_X: 541950.0
+    MGRS_UL_Y: 4524060.0
+    MGRS_WIDTH: 1205
+    MGRS_HEIGHT: 1584
+    TARGET_GSD: 30.0
   SantaBarbara:
     SOURCE_CACHE: SantaBarbara
     ROI_LON_MIN: -120.017395
@@ -108,6 +166,12 @@ locations:
     ENMAP_AVAILABLE: true
 
 
+    MGRS_EPSG: 32611
+    MGRS_UL_X: 222570.0
+    MGRS_UL_Y: 3895380.0
+    MGRS_WIDTH: 1509
+    MGRS_HEIGHT: 2902
+    TARGET_GSD: 30.0
   SanRafael:
     SOURCE_CACHE: SantaBarbara
     ROI_LON_MIN: -120.010853
@@ -119,3 +183,9 @@ locations:
     TANAGER_AVAILABLE: false
     DRAGONETTE_AVAILABLE: false
     ENMAP_AVAILABLE: true
+    MGRS_EPSG: 32611
+    MGRS_UL_X: 222570.0
+    MGRS_UL_Y: 3895380.0
+    MGRS_WIDTH: 1509
+    MGRS_HEIGHT: 2902
+    TARGET_GSD: 30.0

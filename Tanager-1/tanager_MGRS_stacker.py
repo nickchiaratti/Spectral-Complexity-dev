@@ -28,87 +28,18 @@ TANAGER_CLOUD_DILATION = 4
 TANAGER_UNCERTAINTY_THRESHOLD = 0.1
 TANAGER_AEROSOL_THRESHOLD = 0.35
 
-def get_utm_epsg_from_lonlat(lon, lat):
-    utm_band = str((math.floor((lon + 180) / 6) % 60) + 1)
-    if len(utm_band) == 1:
-        utm_band = '0' + utm_band
-    if lat >= 0:
-        epsg_code = '326' + utm_band
-    else:
-        epsg_code = '327' + utm_band
-    return int(epsg_code)
+
 
 def intersects(bbox1, bbox2):
     """Evaluates whether two [min_lon, min_lat, max_lon, max_lat] bounding boxes intersect."""
     return not (bbox1[2] < bbox2[0] or bbox1[0] > bbox2[2] or
                 bbox1[3] < bbox2[1] or bbox1[1] > bbox2[3])
 
-def calculate_mgrs_aligned_grid(chunks, roi_bbox=None):
-    """
-    Computes a collective 30-meter UTM grid mathematically matching the MGRS format used by HLS.
-    If roi_bbox is provided, forces the grid to strictly encapsulate the ROI instead of the chunks.
-    """
-    # 1. Aggregate all geographic coordinates to find the centroid and UTM zone
-    all_lons = []
-    all_lats = []
-    
-    if roi_bbox:
-        min_lon, min_lat, max_lon, max_lat = roi_bbox
-        all_lons = [min_lon, max_lon]
-        all_lats = [min_lat, max_lat]
-        corners = [
-            (min_lon, max_lat),
-            (max_lon, max_lat),
-            (max_lon, min_lat),
-            (min_lon, min_lat)
-        ]
-    else:
-        for chunk in chunks:
-            for lon, lat in chunk['bounds_lonlat']:
-                all_lons.append(lon)
-                all_lats.append(lat)
-            
-    center_lon = np.mean(all_lons)
-    center_lat = np.mean(all_lats)
-    
-    epsg_code = get_utm_epsg_from_lonlat(center_lon, center_lat)
-    target_crs = f"EPSG:{epsg_code}"
-    
-    # 2. Transform all corner points into the target UTM CRS
-    transformer = Transformer.from_crs("EPSG:4326", target_crs, always_xy=True)
-    all_xs = []
-    all_ys = []
-    if roi_bbox:
-        xs, ys = zip(*corners)
-        proj_xs, proj_ys = transformer.transform(xs, ys)
-        all_xs.extend(proj_xs)
-        all_ys.extend(proj_ys)
-    else:
-        for chunk in chunks:
-            xs, ys = zip(*chunk['bounds_lonlat'])
-            proj_xs, proj_ys = transformer.transform(xs, ys)
-            all_xs.extend(proj_xs)
-            all_ys.extend(proj_ys)
-        
-    min_x, max_x = min(all_xs), max(all_xs)
-    min_y, max_y = min(all_ys), max(all_ys)
-    
-    # 3. Snap boundaries to exact 30-meter multiples (MGRS HLS standard)
-    ul_x = math.floor(min_x / 30.0) * 30.0
-    ul_y = math.ceil(max_y / 30.0) * 30.0
-    lr_x = math.ceil(max_x / 30.0) * 30.0
-    lr_y = math.floor(min_y / 30.0) * 30.0
-    
-    width = int((lr_x - ul_x) / 30.0)
-    height = int((ul_y - lr_y) / 30.0)
-    
-    target_transform = Affine.translation(ul_x, ul_y) * Affine.scale(30.0, -30.0)
-    
-    return target_transform, width, height, target_crs, (ul_x, ul_y), (lr_x, lr_y)
+
 
 
 def process_tanager_mgrs_stack(target_location):
-    print(f"Discovering Tanager collections for location: {target_location}...")
+    print(f"Discovering Tanager-1 collections for location: {target_location}...")
     import yaml
     
     config_path = os.path.join(script_dir, "locations_config.yaml")
@@ -132,11 +63,13 @@ def process_tanager_mgrs_stack(target_location):
     source_cache = loc_data.get("SOURCE_CACHE") or target_location
     location_dir = os.path.join(SOURCE_DIR, f"{source_cache}_SourceData")
     if not os.path.exists(location_dir):
-        raise FileNotFoundError(f"CRITICAL: Directory {location_dir} does not exist.")
+        print(f"Warning: Tanager directory {location_dir} does not exist for {target_location}. Skipping.")
+        return None
         
     basic_files = glob.glob(os.path.join(location_dir, "**", "*_basic_sr_hdf5.h5"), recursive=True)
     if not basic_files:
-        raise FileNotFoundError(f"CRITICAL: No basic_sr_hdf5 files found in {location_dir}.")
+        print(f"Warning: No basic_sr_hdf5 files found in {location_dir} for {target_location}. Skipping.")
+        return None
 
     # 1. Parse all chunks and find bounds
     chunks = []
@@ -184,9 +117,19 @@ def process_tanager_mgrs_stack(target_location):
     if not chunks:
         raise ValueError(f"CRITICAL: No chunks intersect the bounding box for {target_location}.")
 
-    # 2. Establish Universal MGRS-Aligned Grid
-    tf_target, width, height, crs_wkt, ul_coords, lr_coords = calculate_mgrs_aligned_grid(chunks, roi_bbox=roi_bbox)
-    print(f"MGRS Target Grid: {width}x{height} 30m pixels (CRS: {crs_wkt})")
+    # 3. Establish Universal MGRS-Aligned Grid from Config
+    width = loc_data['MGRS_WIDTH']
+    height = loc_data['MGRS_HEIGHT']
+    crs_wkt = f"EPSG:{loc_data['MGRS_EPSG']}"
+    ul_x = loc_data['MGRS_UL_X']
+    ul_y = loc_data['MGRS_UL_Y']
+    target_gsd = loc_data.get('TARGET_GSD', 30.0)
+    
+    tf_target = Affine.translation(ul_x, ul_y) * Affine.scale(target_gsd, -target_gsd)
+    ul_coords = (ul_x, ul_y)
+    lr_coords = (ul_x + width * target_gsd, ul_y - height * target_gsd)
+    
+    print(f"MGRS Target Grid: {width}x{height} {target_gsd}m pixels (CRS: {crs_wkt})")
     print(f"Origin (UL): {ul_coords}, Lower Right: {lr_coords}")
 
     output_file = os.path.join(OUTPUT_DIR, f"Tanager_MGRS_Stack_{target_location}.h5")
@@ -209,13 +152,13 @@ def process_tanager_mgrs_stack(target_location):
                 chunks_dim = (1, bands, chunk_h, chunk_w) if is_3d else (1, chunk_h, chunk_w)
                 
                 fill_val = src_dset.attrs.get("_FillValue", 0 if dtype.kind in ['i', 'u'] else -9999.0)
-                out_dset = grp_tanager.create_dataset(name, shape=out_shape, dtype=dtype, compression="gzip", compression_opts=5, fillvalue=fill_val, chunks=chunks_dim)
+                out_dset = grp_tanager.create_dataset(name, shape=out_shape, dtype=dtype, compression="gzip", compression_opts=5, shuffle=True, fillvalue=fill_val, chunks=chunks_dim)
                 
                 # Copy attributes from source datasets
                 for attr_name, attr_val in src_dset.attrs.items():
                     out_dset.attrs[attr_name] = attr_val
 
-        ds_vis = grp_tanager.create_dataset("ortho_visual", shape=(n_times, 4, height, width), dtype='uint8', compression="gzip", fillvalue=0)
+        ds_vis = grp_tanager.create_dataset("ortho_visual", shape=(n_times, 4, height, width), dtype='uint8', compression="gzip",shuffle=True, fillvalue=0)
         
         gdal_transform = [tf_target.c, tf_target.a, tf_target.b, tf_target.f, tf_target.d, tf_target.e]
         
@@ -322,7 +265,7 @@ def process_tanager_mgrs_stack(target_location):
                 
         # Generate Common Mask
         print("  Generating Common Mask for Tanager on MGRS Grid...")
-        mask_ds = grp_tanager.create_dataset('common_mask', shape=(n_times, height, width), dtype=bool, compression="gzip", compression_opts=5, chunks=(1, chunk_h, chunk_w), fillvalue=False)
+        mask_ds = grp_tanager.create_dataset('common_mask', shape=(n_times, height, width), dtype=bool, compression="gzip", shuffle=True, compression_opts=5, chunks=(1, chunk_h, chunk_w), fillvalue=False)
         mask_ds.attrs['description'] = "True = Invalid/Masked, False = Valid. Generated from SpecComplex ARD rules."
         mask_ds.attrs['cloud_dilation'] = TANAGER_CLOUD_DILATION
         mask_ds.attrs['uncertainty_threshold'] = TANAGER_UNCERTAINTY_THRESHOLD
@@ -339,26 +282,15 @@ def process_tanager_mgrs_stack(target_location):
             
         print("  Generating strict 'ortho_visual' RGB composite from SR...")
         wavelengths = grp_tanager['surface_reflectance'].attrs.get('wavelengths', np.zeros(grp_tanager['surface_reflectance'].shape[1]))
-        r_idx = int(np.argmin(np.abs(wavelengths - 650)))
-        g_idx = int(np.argmin(np.abs(wavelengths - 550)))
-        b_idx = int(np.argmin(np.abs(wavelengths - 450)))
         
         sr_dset_ref = grp_tanager["surface_reflectance"]
         for out_idx in range(n_times):
-            r_band = sr_dset_ref[out_idx, r_idx, :, :]
-            g_band = sr_dset_ref[out_idx, g_idx, :, :]
-            b_band = sr_dset_ref[out_idx, b_idx, :, :]
-            
-            # Mask out values < -1 or == fillvalue as nan for PNG creation
-            r_input = np.where(r_band < -1, np.nan, r_band)
-            g_input = np.where(g_band < -1, np.nan, g_band)
-            b_input = np.where(b_band < -1, np.nan, b_band)
-            
-            rgba_img = sc.generate_rgba_image(r_input, g_input, b_input)
+            rgba_img = sc.generate_rgba_from_hsi(frame_data=sr_dset_ref[out_idx, :, :, :], wavelengths=wavelengths, nodata=sr_dset_ref.fillvalue)
             ds_vis[out_idx, ...] = np.transpose(rgba_img, (2, 0, 1))
 
         # Attributes
         dt_str = h5py.string_dtype(encoding='ascii')
+        grp_tanager['surface_reflectance'].attrs['scale_to_float'] = 0.0001
         grp_tanager['surface_reflectance'].attrs['acquisition_time'] = np.array(meta_lists['acq_time'], dtype='float64')
         grp_tanager['surface_reflectance'].attrs.create('spacecraft_id', data=np.array(meta_lists['space_id'], dtype=dt_str))
         if len(meta_lists['good_wavelengths']) == n_times:

@@ -66,7 +66,7 @@ def compute_frame_metrics(payload):
             c_s = payload['col_offset']
             c_e = c_s + width
             
-            frame_sr = data_grp["surface_reflectance"][t_local, :, r_s:r_e, c_s:c_e]
+            frame_sr = sc.load_scaled_reflectance(data_grp["surface_reflectance"], np.s_[t_local, :, r_s:r_e, c_s:c_e])
             frame_mask = data_grp["common_mask"][t_local, r_s:r_e, c_s:c_e]
             raw_frame_ortho = data_grp["ortho_visual"][t_local, :, r_s:r_e, c_s:c_e]
 
@@ -83,14 +83,14 @@ def compute_frame_metrics(payload):
             # Dependency Resolution: Read existing volume map if Z-Score requires it but we aren't calculating it
             if flags['z_score'] and not flags['volume'] and not flags['neighborhood_volume']:
                 with h5py.File(payload['constellation_filepath'], 'r') as h5_const:
-                    slide_map = h5_const["/HDFEOS/GRIDS/HARMONIZED/Data Fields/sliding_volume_map"][payload['global_idx'], ...]
+                    slide_map = sc.read_scaled_int16(h5_const["/HDFEOS/GRIDS/HARMONIZED/Data Fields/sliding_volume_map"], np.s_[payload['global_idx'], ...])
             else:
                 slide_map = None
                 
             if flags['neighborhood_z_score'] and not flags['neighborhood_volume']:
                 try:
                     with h5py.File(payload['constellation_filepath'], 'r') as h5_const:
-                        neighborhood_map = h5_const["/HDFEOS/GRIDS/HARMONIZED/Data Fields/neighborhood_volume_map"][payload['global_idx'], ...]
+                        neighborhood_map = sc.read_scaled_int16(h5_const["/HDFEOS/GRIDS/HARMONIZED/Data Fields/neighborhood_volume_map"], np.s_[payload['global_idx'], ...])
                 except KeyError:
                     neighborhood_map = None
             else:
@@ -135,7 +135,7 @@ def compute_frame_metrics(payload):
         msd_map = None
         if flags['msd']:
             t0 = time.perf_counter()
-            msd_map = sc.process_msd_sliding_tile(frame_sr, TILE_SIZE, SLIDING_STRIDE)
+            msd_map = scTorch.process_msd_sliding_tile(frame_sr, TILE_SIZE, SLIDING_STRIDE)
             telemetry['MSD_Map'] = time.perf_counter() - t0
     
         # --- 6. Global Z-Score ---
@@ -263,12 +263,12 @@ def main(target_location=None, tile_size=3, num_endmembers=7, norm_param=None, f
     CALC_MSD = False
     CALC_GLOBAL_ENDMEMBERS = True
     CALC_SLIDING_VOLUME = True
-    CALC_NEIGHBORHOOD_VOLUME = True
+    CALC_NEIGHBORHOOD_VOLUME = False
     CALC_Z_SCORE = True
     CALC_ROBUST_SCALE = True
     CALC_BOX_COX = True
-    CALC_NEIGHBORHOOD_Z_SCORE = True
-    CALC_TEMPORAL_Z_SCORE = True
+    CALC_NEIGHBORHOOD_Z_SCORE = False
+    CALC_TEMPORAL_Z_SCORE = False
     CALC_PIXEL_TEMPORAL_Z_SCORE = True
 
     # ==========================================
@@ -327,14 +327,20 @@ def main(target_location=None, tile_size=3, num_endmembers=7, norm_param=None, f
 
         print(f"Multi-Sensor Analytical Processing Complete.\nSaved to: {out_path}")
 
-    def overwrite_dset(data_grp, name, shape, dtype='float32', spatial_ref=None, geo_transform=None, chunks=None, **kwargs):
+    def overwrite_dset(data_grp, name, shape, dtype='float32', spatial_ref=None, geo_transform=None, chunks=None, scale_factor=None, fill_value=None, **kwargs):
         if name in data_grp:
             del data_grp[name]
     
-        ds = data_grp.create_dataset(name, shape=shape, dtype=dtype, compression="gzip", compression_opts=5, chunks=chunks, **kwargs)
+        if fill_value is not None:
+            kwargs['fillvalue'] = fill_value
+            
+        ds = data_grp.create_dataset(name, shape=shape, dtype=dtype, compression="gzip", compression_opts=5, chunks=chunks, shuffle=True, **kwargs)
     
         if spatial_ref is not None: ds.attrs['spatial_ref'] = spatial_ref
         if geo_transform is not None: ds.attrs['GeoTransform'] = geo_transform
+        
+        if scale_factor is not None: ds.attrs['scale_factor'] = scale_factor
+        if fill_value is not None: ds.attrs['_FillValue'] = fill_value
         
         return ds
 
@@ -454,20 +460,22 @@ def main(target_location=None, tile_size=3, num_endmembers=7, norm_param=None, f
                 h5_out.create_group('/HDFEOS/GRIDS/HARMONIZED')
                 harm_grp = h5_out.create_group(harm_path)
 
+            scale_fac = 10000.0
+            fill_val = -32768
             # Pre-allocate ONLY requested datasets
             ds_harm_mask = overwrite_dset(harm_grp, 'common_mask', (total_frames, height, width), dtype='uint8', spatial_ref=spatial_ref, geo_transform=master_gt, chunks=chunks_3d)
             ds_harm_ortho = overwrite_dset(harm_grp, 'ortho_visual', (total_frames, 4, height, width), dtype='uint8', spatial_ref=spatial_ref, geo_transform=master_gt, chunks=(1, 4, chunk_h, chunk_w))
             ds_harm_slide = overwrite_dset(harm_grp, 'sliding_volume_map', (total_frames, height, width), spatial_ref=spatial_ref, geo_transform=master_gt, chunks=chunks_3d) if CALC_SLIDING_VOLUME else None
             ds_harm_neighborhood = overwrite_dset(harm_grp, 'neighborhood_volume_map', (total_frames, height, width), spatial_ref=spatial_ref, geo_transform=master_gt, chunks=chunks_3d) if CALC_NEIGHBORHOOD_VOLUME else None
-            ds_harm_ndvi = overwrite_dset(harm_grp, 'ndvi_map', (total_frames, height, width), spatial_ref=spatial_ref, geo_transform=master_gt, chunks=chunks_3d) if CALC_NDVI else None
-            ds_harm_ndbi = overwrite_dset(harm_grp, 'ndbi_map', (total_frames, height, width), spatial_ref=spatial_ref, geo_transform=master_gt, chunks=chunks_3d) if CALC_NDBI else None
-            ds_harm_msd = overwrite_dset(harm_grp, 'msd_map', (total_frames, height, width), spatial_ref=spatial_ref, geo_transform=master_gt, chunks=chunks_3d) if CALC_MSD else None
-            ds_harm_z = overwrite_dset(harm_grp, 'sliding_volume_z_score', (total_frames, height, width), spatial_ref=spatial_ref, geo_transform=master_gt, chunks=chunks_3d) if CALC_Z_SCORE else None
-            ds_harm_robust = overwrite_dset(harm_grp, 'sliding_volume_robust_scale', (total_frames, height, width), spatial_ref=spatial_ref, geo_transform=master_gt, chunks=chunks_3d) if CALC_ROBUST_SCALE else None
-            ds_harm_box_cox = overwrite_dset(harm_grp, 'sliding_volume_box_cox', (total_frames, height, width), spatial_ref=spatial_ref, geo_transform=master_gt, chunks=chunks_3d) if CALC_BOX_COX else None
-            ds_harm_neighborhood_z = overwrite_dset(harm_grp, 'neighborhood_volume_z_score', (total_frames, height, width), spatial_ref=spatial_ref, geo_transform=master_gt, chunks=chunks_3d) if CALC_NEIGHBORHOOD_Z_SCORE else None
-            ds_harm_temp_z = overwrite_dset(harm_grp, 'temporal_z_score', (total_frames, height, width), spatial_ref=spatial_ref, geo_transform=master_gt, chunks=chunks_3d) if CALC_TEMPORAL_Z_SCORE else None
-            ds_harm_pixel_temp_z = overwrite_dset(harm_grp, 'pixel_temporal_z_score', (total_frames, height, width), spatial_ref=spatial_ref, geo_transform=master_gt, chunks=chunks_3d) if CALC_PIXEL_TEMPORAL_Z_SCORE else None
+            ds_harm_ndvi = overwrite_dset(harm_grp, 'ndvi_map', (total_frames, height, width), dtype='int16', scale_factor=scale_fac, fill_value=fill_val, spatial_ref=spatial_ref, geo_transform=master_gt, chunks=chunks_3d) if CALC_NDVI else None
+            ds_harm_ndbi = overwrite_dset(harm_grp, 'ndbi_map', (total_frames, height, width), dtype='int16', scale_factor=scale_fac, fill_value=fill_val, spatial_ref=spatial_ref, geo_transform=master_gt, chunks=chunks_3d) if CALC_NDBI else None
+            ds_harm_msd = overwrite_dset(harm_grp, 'msd_map', (total_frames, height, width), dtype='int16', scale_factor=scale_fac, fill_value=fill_val, spatial_ref=spatial_ref, geo_transform=master_gt, chunks=chunks_3d) if CALC_MSD else None
+            ds_harm_z = overwrite_dset(harm_grp, 'sliding_volume_z_score', (total_frames, height, width), dtype='int16', scale_factor=scale_fac, fill_value=fill_val, spatial_ref=spatial_ref, geo_transform=master_gt, chunks=chunks_3d) if CALC_Z_SCORE else None
+            ds_harm_robust = overwrite_dset(harm_grp, 'sliding_volume_robust_scale', (total_frames, height, width), dtype='int16', scale_factor=scale_fac, fill_value=fill_val, spatial_ref=spatial_ref, geo_transform=master_gt, chunks=chunks_3d) if CALC_ROBUST_SCALE else None
+            ds_harm_box_cox = overwrite_dset(harm_grp, 'sliding_volume_box_cox', (total_frames, height, width), dtype='int16', scale_factor=scale_fac, fill_value=fill_val, spatial_ref=spatial_ref, geo_transform=master_gt, chunks=chunks_3d) if CALC_BOX_COX else None
+            ds_harm_neighborhood_z = overwrite_dset(harm_grp, 'neighborhood_volume_z_score', (total_frames, height, width), dtype='int16', scale_factor=scale_fac, fill_value=fill_val, spatial_ref=spatial_ref, geo_transform=master_gt, chunks=chunks_3d) if CALC_NEIGHBORHOOD_Z_SCORE else None
+            ds_harm_temp_z = overwrite_dset(harm_grp, 'temporal_z_score', (total_frames, height, width), dtype='int16', scale_factor=scale_fac, fill_value=fill_val, spatial_ref=spatial_ref, geo_transform=master_gt, chunks=chunks_3d) if CALC_TEMPORAL_Z_SCORE else None
+            ds_harm_pixel_temp_z = overwrite_dset(harm_grp, 'pixel_temporal_z_score', (total_frames, height, width), dtype='int16', scale_factor=scale_fac, fill_value=fill_val, spatial_ref=spatial_ref, geo_transform=master_gt, chunks=chunks_3d) if CALC_PIXEL_TEMPORAL_Z_SCORE else None
 
             sensor_dsets = {}
             if CALC_GLOBAL_ENDMEMBERS:
@@ -478,7 +486,7 @@ def main(target_location=None, tile_size=3, num_endmembers=7, norm_param=None, f
                     n_frames, n_bands = sr_shape[0], sr_shape[1]
                 
                     data_grp = h5_out[f"/HDFEOS/GRIDS/{grid}/Data Fields"]
-                    em_ds = overwrite_dset(data_grp, 'frame_endmembers', (n_frames, n_bands, NUM_ENDMEMBERS), spatial_ref=spatial_ref, geo_transform=master_gt, chunks=(1, n_bands, NUM_ENDMEMBERS))
+                    em_ds = overwrite_dset(data_grp, 'frame_endmembers', (n_frames, n_bands, NUM_ENDMEMBERS), dtype='int16', scale_factor=scale_fac, fill_value=fill_val, spatial_ref=spatial_ref, geo_transform=master_gt, chunks=(1, n_bands, NUM_ENDMEMBERS))
                     em_ds.attrs['wavelengths'] = orig_data_grp["surface_reflectance"].attrs['wavelengths']
                     idx_ds = overwrite_dset(data_grp, 'frame_endmember_indices', (n_frames, NUM_ENDMEMBERS), dtype='int32', chunks=(1, NUM_ENDMEMBERS))
                     vol_ds = overwrite_dset(data_grp, 'frame_endmember_volumes', (n_frames, NUM_ENDMEMBERS), chunks=(1, NUM_ENDMEMBERS))
@@ -589,26 +597,26 @@ def main(target_location=None, tile_size=3, num_endmembers=7, norm_param=None, f
             ds_harm_mask[global_idx, ...] = result['mask']
             ds_harm_ortho[global_idx, ...] = result['ortho']
             if CALC_NDVI: 
-                ds_harm_ndvi[global_idx, ...] = result['ndvi']
+                ds_harm_ndvi[global_idx, ...] = sc.scale_to_int16(result['ndvi'])
             if CALC_NDBI: 
-                ds_harm_ndbi[global_idx, ...] = result['ndbi']
+                ds_harm_ndbi[global_idx, ...] = sc.scale_to_int16(result['ndbi'])
             if CALC_MSD: 
-                ds_harm_msd[global_idx, ...] = result['msd']
+                ds_harm_msd[global_idx, ...] = sc.scale_to_int16(result['msd'])
             if CALC_SLIDING_VOLUME: 
                 ds_harm_slide[global_idx, ...] = result['slide']
             if CALC_NEIGHBORHOOD_VOLUME:
                 ds_harm_neighborhood[global_idx, ...] = result['neighborhood']
             if CALC_Z_SCORE: 
-                ds_harm_z[global_idx, ...] = result['z_map']
+                ds_harm_z[global_idx, ...] = sc.scale_to_int16(result['z_map'])
             if CALC_ROBUST_SCALE:
-                ds_harm_robust[global_idx, ...] = result['robust_map']
+                ds_harm_robust[global_idx, ...] = sc.scale_to_int16(result['robust_map'])
             if CALC_BOX_COX:
-                ds_harm_box_cox[global_idx, ...] = result['box_cox_map']
+                ds_harm_box_cox[global_idx, ...] = sc.scale_to_int16(result['box_cox_map'])
             if CALC_NEIGHBORHOOD_Z_SCORE:
-                ds_harm_neighborhood_z[global_idx, ...] = result['neighborhood_z_map']
+                ds_harm_neighborhood_z[global_idx, ...] = sc.scale_to_int16(result['neighborhood_z_map'])
         
             if CALC_GLOBAL_ENDMEMBERS:
-                sensor_dsets[grid_name]['em'][t_local, ...] = result['em']
+                sensor_dsets[grid_name]['em'][t_local, ...] = sc.scale_to_int16(result['em']) if result['em'] is not None else np.nan
                 sensor_dsets[grid_name]['idx'][t_local, ...] = result['em_idx']
                 sensor_dsets[grid_name]['vol'][t_local, ...] = result['vol']
                 
@@ -678,7 +686,7 @@ def main(target_location=None, tile_size=3, num_endmembers=7, norm_param=None, f
                 sensor_volumes = np.empty((len(indices), height, width), dtype=np.float32)
                 sensor_masks = np.empty((len(indices), height, width), dtype=np.bool_)
                 for i, idx in enumerate(indices):
-                    sensor_volumes[i] = ds_harm_slide[idx, :, :]
+                    sensor_volumes[i] = sc.read_scaled_int16(ds_harm_slide, np.s_[idx, :, :])
                     # common_mask convention: 0 = Valid/Clear, 1 = Invalid/Masked.
                     # SpecComplex temporal Z-score functions strictly expect True = Valid Pixel.
                     sensor_masks[i] = (ds_harm_mask[idx, :, :] == 0)
@@ -688,21 +696,23 @@ def main(target_location=None, tile_size=3, num_endmembers=7, norm_param=None, f
                     try:
                         temp_z_cube = sc.calculate_temporal_z_score(sensor_volumes, sensor_masks)
                         for i, idx in enumerate(indices):
-                            ds_harm_temp_z[idx, :, :] = temp_z_cube[i]
+                            ds_harm_temp_z[idx, :, :] = sc.scale_to_int16(temp_z_cube[i])
                     except ValueError as e:
                         print(f"    -> Warning: Skipping {sensor} temporal Z-score: {e}")
+                        fill_val = ds_harm_temp_z.fillvalue if ds_harm_temp_z.fillvalue is not None else -32768
                         for i, idx in enumerate(indices):
-                            ds_harm_temp_z[idx, :, :] = np.nan
+                            ds_harm_temp_z[idx, :, :] = fill_val
                         
                 if CALC_PIXEL_TEMPORAL_Z_SCORE:
                     try:
                         pixel_temp_z_cube = sc.calculate_pixel_temporal_z_score(sensor_volumes, sensor_masks)
                         for i, idx in enumerate(indices):
-                            ds_harm_pixel_temp_z[idx, :, :] = pixel_temp_z_cube[i]
+                            ds_harm_pixel_temp_z[idx, :, :] = sc.scale_to_int16(pixel_temp_z_cube[i])
                     except ValueError as e:
                         print(f"    -> Warning: Skipping {sensor} pixel temporal Z-score: {e}")
+                        fill_val = ds_harm_pixel_temp_z.fillvalue if ds_harm_pixel_temp_z.fillvalue is not None else -32768
                         for i, idx in enumerate(indices):
-                            ds_harm_pixel_temp_z[idx, :, :] = np.nan
+                            ds_harm_pixel_temp_z[idx, :, :] = fill_val
             
             print(f"Temporal Z-Scores completed in {time.perf_counter() - t0_temp_z:.2f}s")
 

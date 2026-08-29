@@ -47,11 +47,30 @@ def parse_enmap_stac(json_path):
     
     # Extract band metadata from the image asset
     eo_bands = assets.get('image', {}).get('eo:bands', [])
-    if eo_bands and 'center_wavelength' in eo_bands[0]:
-        wavelengths = [b['center_wavelength'] for b in eo_bands]
-        fwhms = [b.get('full_width_half_max', 0) for b in eo_bands]
-    else:
-        # Some versions of EnMAP STAC omit full band metadata
+    wavelengths = []
+    fwhms = []
+    if eo_bands:
+        wavelengths = [b.get('eo:center_wavelength') if 'eo:center_wavelength' in b else b.get('center_wavelength', 0.0) for b in eo_bands]
+        fwhms = [b.get('eo:full_width_half_max') if 'eo:full_width_half_max' in b else b.get('full_width_half_max', 0.0) for b in eo_bands]
+    
+    # Locate METADATA.XML for band metadata fallback
+    xml_filename = stac['id'] + "-METADATA.XML"
+    xml_path = os.path.join(base_dir, xml_filename)
+    
+    if not any(w > 0 for w in wavelengths) and os.path.exists(xml_path):
+        try:
+            import xml.etree.ElementTree as ET
+            tree_temp = ET.parse(xml_path)
+            root_temp = tree_temp.getroot()
+            xml_wvs = [float(e.text) for e in root_temp.iter() if e.tag.lower().endswith('wavelengthcenterofband') and e.text]
+            xml_fwhms = [float(e.text) for e in root_temp.iter() if e.tag.lower().endswith('fwhmofband') and e.text]
+            if len(xml_wvs) == 224:
+                wavelengths = xml_wvs
+                fwhms = xml_fwhms if len(xml_fwhms) == 224 else [0.0] * 224
+        except Exception as e:
+            print(f"Warning: Failed to parse band wavelengths from {xml_path}: {e}")
+
+    if not wavelengths or not any(w > 0 for w in wavelengths):
         wavelengths = [0.0] * 224
         fwhms = [0.0] * 224
     

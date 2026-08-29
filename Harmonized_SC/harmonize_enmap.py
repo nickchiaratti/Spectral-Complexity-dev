@@ -158,8 +158,9 @@ def process_enmap_scenes_to_grid(h5f, enmap_source_dir, master_height, master_wi
 
     rad_nodata = grouped_scenes[0][0]['nodata']
     
-    sr_ds = grp_enmap.create_dataset("surface_reflectance", shape=(total_num_frames, band_count, master_height, master_width), dtype='float32', compression="gzip", compression_opts=5, fillvalue=rad_nodata, chunks=(1, band_count, chunk_h, chunk_w))
-    datasets_created_info.append(("surface_reflectance", np.dtype('float32'), 4, ["Time", "Band", "YDim", "XDim"]))
+    sr_ds = grp_enmap.create_dataset("surface_reflectance", shape=(total_num_frames, band_count, master_height, master_width), dtype='int16', compression="gzip", compression_opts=5, shuffle=True, fillvalue=rad_nodata, chunks=(1, band_count, chunk_h, chunk_w))
+    sr_ds.attrs['scale_to_float'] = 0.0001
+    datasets_created_info.append(("surface_reflectance", np.dtype('int16'), 4, ["Time", "Band", "YDim", "XDim"]))
     
     mask_keys = ['quality_classes', 'quality_cloud', 'quality_cloud_shadow', 'quality_haze', 'quality_cirrus', 'quality_snow', 'quality_testflags', 'defective_pixel_mask']
     mask_ds_dict = {}
@@ -178,7 +179,7 @@ def process_enmap_scenes_to_grid(h5f, enmap_source_dir, master_height, master_wi
         meta_lists['acq_time'].append(group[0]['time'].timestamp())
         sun_elev_arr[t_idx] = group[0]['sun_elevation']
         
-        canvas_rad = np.full((band_count, master_height, master_width), rad_nodata, dtype='float32')
+        canvas_rad = np.full((band_count, master_height, master_width), rad_nodata, dtype='int16')
         mask_canvases = {mk: np.full((1, master_height, master_width), 255, dtype='uint8') for mk in mask_keys}
         
         for scene in group:
@@ -187,7 +188,7 @@ def process_enmap_scenes_to_grid(h5f, enmap_source_dir, master_height, master_wi
                     if t_idx == 0 and scene == group[0] and base_wv[0] == 0.0:
                         scene['wavelengths'] = np.zeros(band_count, dtype=np.float32)
                         base_wv = scene['wavelengths']
-                    incoming_rad = np.full((band_count, master_height, master_width), rad_nodata, dtype='float32')
+                    incoming_rad = np.full((band_count, master_height, master_width), rad_nodata, dtype='int16')
                     reproject(
                         source=rasterio.band(src, list(range(1, src.count + 1))),
                         destination=incoming_rad,
@@ -294,15 +295,7 @@ def process_enmap_scenes_to_grid(h5f, enmap_source_dir, master_height, master_wi
         ortho_vis_dset.attrs['GeoTransform'] = gdal_transform
         
         for out_idx in range(total_num_frames):
-            r_band = sr_ds[out_idx, r_idx, :, :]
-            g_band = sr_ds[out_idx, g_idx, :, :]
-            b_band = sr_ds[out_idx, b_idx, :, :]
-            
-            r_input = np.where(r_band == rad_nodata, np.nan, r_band)
-            g_input = np.where(g_band == rad_nodata, np.nan, g_band)
-            b_input = np.where(b_band == rad_nodata, np.nan, b_band)
-            
-            rgba_img = sc.generate_rgba_image(r_input, g_input, b_input)
+            rgba_img = sc.generate_rgba_from_hsi(frame_data=sr_ds[out_idx, :, :, :], wavelengths=master_wv)
             ortho_vis_dset[out_idx, ...] = np.transpose(rgba_img, (2, 0, 1))
 
         return datasets_created_info, total_num_frames, band_count

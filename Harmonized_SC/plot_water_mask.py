@@ -6,6 +6,12 @@ import numpy as np
 import matplotlib.pyplot as plt
 from datetime import datetime, timezone
 import glob
+import sys
+from pathlib import Path
+script_dir = Path(__file__).resolve().parent
+if str(script_dir.parent) not in sys.path:
+    sys.path.insert(0, str(script_dir.parent))
+import SpecComplex as sc
 
 # ==========================================
 # CONFIGURATION
@@ -69,7 +75,7 @@ def main(target_location=LOCATION):
         print(f"Closest frame to 2025-09-10 is index {closest_idx} (Date: {closest_dt.strftime('%Y-%m-%d %H:%M:%S')})")
         
         # ortho_visual is typically shape (Time, Band, Y, X)
-        closest_ortho = ortho_visual_ds[closest_idx]
+        closest_ortho = sc.read_scaled_int16(ortho_visual_ds, np.s_[closest_idx])
         # Ensure we only take the first 3 bands (RGB/BGR) and reorder to (Y, X, Bands)
         img_visual = np.transpose(closest_ortho[:3, :, :], (1, 2, 0))
         
