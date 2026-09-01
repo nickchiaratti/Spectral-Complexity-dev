@@ -69,7 +69,7 @@ def plot_pixel_sits(pixel_y, pixel_x, source_h5_path, inference_results_h5,
                 x_geo = gt[0] + (pixel_x + 0.5) * gt[1] + (pixel_y + 0.5) * gt[2]
                 y_geo = gt[3] + (pixel_x + 0.5) * gt[4] + (pixel_y + 0.5) * gt[5]
                 spatial_ref_str = spatial_ref.decode('utf-8') if isinstance(spatial_ref, bytes) else str(spatial_ref)
-                crs = pyproj.CRS.from_wkt(spatial_ref_str)
+                crs = pyproj.CRS.from_user_input(spatial_ref_str)
                 transformer = pyproj.Transformer.from_crs(crs, "epsg:4326", always_xy=True)
                 lon, lat = transformer.transform(x_geo, y_geo)
             except Exception:

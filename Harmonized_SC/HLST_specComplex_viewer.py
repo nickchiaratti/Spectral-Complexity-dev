@@ -20,6 +20,7 @@ import rasterio.transform
 import rasterio.transform
 from pyproj import Transformer, CRS
 import yaml
+import glob
 import sys
 from pathlib import Path
 script_dir = Path(__file__).resolve().parent
@@ -37,6 +38,7 @@ plt.rcParams.update({
     'xtick.labelsize': 14,
     'ytick.labelsize': 14,
     'legend.fontsize': 12,
+    'legend.framealpha': 1.0,
     'figure.titlesize': 20
 })
 
@@ -54,21 +56,22 @@ except Exception:
     Location = "Tait"
 
 # --- Configuration ---
-complexity_type = 'sliding_volume_box_cox' #'sliding_volume_map' #'sliding_volume_z_score' # or 'sliding_volume_map'
-complexity_type_comparison = 'pixel_temporal_z_score'
+complexity_type = 'sliding_volume_z_score' #'sliding_volume_map' #'sliding_volume_z_score' # or 'sliding_volume_map'
+complexity_type_comparison = 'ndvi_map'
 
 COMPLEXITY_DICT = {
     'sliding_volume_map': 'Spectral Complexity',
     'neighborhood_volume_map': 'Spectral Complexity Neighborhood Map',
     'pixel_temporal_z_score': 'Spectral Complexity Pixel Temporal Z-Score',
-    'sliding_volume_box_cox': 'Spectral Complexity Neighborhood Z-Score (Box-Cox)',
+    'sliding_volume_box_cox': 'Spectral Complexity Z-Score (Box-Cox)',
     'temporal_z_score': 'Spectral Complexity Global Temporal Z-Score',
-    'sliding_volume_z_score': 'Spectral Complexity Frame-based Z-Score',
+    'sliding_volume_z_score': 'Spectral Complexity Z-Score',
     'neighborhood_volume_z_score': 'Spectral Complexity Neighborhood Z-Score',
     'sliding_volume_z_score_masked': 'Spectral Complexity Z-Score',
     'sliding_volume_local_z_score': 'Spectral Complexity Local Z-Score',
     'sliding_volume_map_5x5': 'Spectral Complexity 5x5 window',
     'sliding_volume_map_7x7': 'Spectral Complexity 7x7 window',
+    'ndvi_map': 'NDVI',
 }
 LOG_SCALE = ('map' in complexity_type)
 START_YEAR = 2022
@@ -91,13 +94,14 @@ def apply_seasonal_underlay(axes, dates):
     # Scientifically curated desaturated hex codes at light opacity (alpha=0.15)
     # Preserves high luminance to maintain WCAG contrast against foreground satellite traces
     season_config = [
-        (12, 3, '#D9D9D9', 'Winter'),  # Light gray
-        (3,  6, '#A8E6CF', 'Spring'),  # Light green
-        (6,  9, '#FFF275', 'Summer'),  # Yellow
-        (9, 12, '#FFB74D', 'Fall')     # Orange
+        (12, 3, '#D9D9D9', 'Winter (Dec-Feb)'),  # Light gray
+        (3,  6, '#A8E6CF', 'Spring (Mar-May)'),  # Light green
+        (6,  9, '#FFF275', 'Summer (Jun-Aug)'),  # Yellow
+        (9, 12, '#FFB74D', 'Fall (Sep-Nov)')     # Orange
     ]
     for ax in axes:
         xlim = ax.get_xlim()
+        added_labels = set()
         for y in range(min_year - 1, max_year + 2):
             for start_m, end_m, color, label in season_config:
                 if start_m == 12:
@@ -110,11 +114,28 @@ def apply_seasonal_underlay(axes, dates):
                 t1_num = mdates.date2num(t1)
                 if t1_num < xlim[0] or t0_num > xlim[1]:
                     continue
-                ax.axvspan(t0, t1, color=color, alpha=0.15, zorder=0, label='_nolegend_')
+                patch_label = label if label not in added_labels else '_nolegend_'
+                added_labels.add(label)
+                ax.axvspan(t0, t1, color=color, alpha=0.15, zorder=0, label=patch_label)
         ax.set_xlim(xlim)
 
-# Example default path (can be overridden by file dialog)
-default_harmonized_path = f"C:/satelliteImagery/HLST30/HLST_{Location}_Harmonized_SC_EM-7_Norm-bandCount.h5"
+def get_default_harmonized_path(location):
+    candidates = [
+        f"C:/satelliteImagery/MGRS30mConstellation/Harmonized_MGRS_Stack_{location}_SC_EM-7_Norm-None.h5",
+        f"C:/satelliteImagery/MGRS30mConstellation/Harmonized_MGRS_Stack_{location}_SC_*.h5",
+        f"C:/satelliteImagery/MGRS30mConstellation/Harmonized_MGRS_Stack_{location}.h5",
+        f"C:/satelliteImagery/HLST30/HLST_{location}_Harmonized_SC_EM-7_Norm-None.h5",
+        f"C:/satelliteImagery/HLST30/HLST_{location}_Harmonized*SC_EM*.h5",
+        f"C:/satelliteImagery/HLST30/HLST_{location}_Harmonized*.h5"
+    ]
+    for pattern in candidates:
+        matches = glob.glob(pattern)
+        if matches:
+            matches.sort(key=lambda x: os.path.getmtime(x), reverse=True)
+            return matches[0]
+    return f"C:/satelliteImagery/MGRS30mConstellation/Harmonized_MGRS_Stack_{location}_SC_EM-7_Norm-None.h5"
+
+default_harmonized_path = get_default_harmonized_path(Location)
 
 suffix = ''
 if complexity_type == 'sliding_volume_z_score':
@@ -138,12 +159,12 @@ TS_LOCATIONS_MAP = {
         {'latlon': (43.151877, -77.487111), 'label': "Shadow Pines Playground",          'color': 'tab:cyan'},
     ],
     "Rochesterv2": [
-        {'latlon': (43.13927, -77.50340), 'label': "ROCX NITE Tarp",                  'color': 'tab:purple'},
-        {'latlon': (43.142856, -77.508451), 'label': "West Tait Forest",                'color': 'tab:green'},
-        {'latlon': (43.144861, -77.501176), 'label': "East Tait Forest",                'color': 'tab:olive'},
+        #{'latlon': (43.13927, -77.50340), 'label': "ROCX NITE Tarp",                  'color': 'tab:purple'},
+        #{'latlon': (43.142856, -77.508451), 'label': "West Tait Forest",                'color': 'tab:green'},
+        #{'latlon': (43.144861, -77.501176), 'label': "East Tait Forest",                'color': 'tab:olive'},
         {'latlon': (43.151502, -77.485518), 'label': "Shadow Pines Grass Field",         'color': 'tab:red'},
-        {'latlon': (43.151219, -77.486637), 'label': "Shadow Pines Pickleball Court",    'color': 'tab:blue'},
-        {'latlon': (43.151877, -77.487111), 'label': "Shadow Pines Playground",          'color': 'tab:cyan'},
+        #{'latlon': (43.151219, -77.486637), 'label': "Shadow Pines Pickleball Court",    'color': 'tab:blue'},
+        #{'latlon': (43.151877, -77.487111), 'label': "Shadow Pines Playground",          'color': 'tab:cyan'},
     ],
     "Malibu": [
         {'latlon': (34.059168, -118.573950), 'label': "Parker Mesa Overlook",                      'color': 'tab:purple'},
@@ -164,7 +185,7 @@ TS_LOCATIONS_MAP = {
 }
 
 # Time Series Locations (Latitude, Longitude)
-TS_LOCATIONS = TS_LOCATIONS_MAP.get(Location, TS_LOCATIONS_MAP.get("Tait", []))
+TS_LOCATIONS = TS_LOCATIONS_MAP.get(Location)
 
 DISPLAY_NORMALIZATION = False
 DISPLAY_REDUNDANT_FIGURE = True 
@@ -241,8 +262,11 @@ class HarmonizedComplexityViewer:
         filename = os.path.basename(file_path)
         parts = filename.split('_')
         resolved_location = Location
-        if len(parts) > 1 and parts[0] == "HLST":
-            resolved_location = parts[1]
+        if len(parts) > 1:
+            if parts[0] == "HLST":
+                resolved_location = parts[1]
+            elif filename.startswith("Harmonized_MGRS_Stack_") and len(parts) > 3:
+                resolved_location = parts[3]
             
         global TS_LOCATIONS
         if resolved_location in TS_LOCATIONS_MAP:
@@ -301,13 +325,11 @@ class HarmonizedComplexityViewer:
             'ENMAP': {loc['label']: {'t': [], 'v': []} for loc in TS_LOCATIONS},
             'DRAGONETTE': {loc['label']: {'t': [], 'v': []} for loc in TS_LOCATIONS}
         }
-        all_comp = sc.read_scaled_int16(target_dset)
-        all_mask = self.common_mask_dset[:] if MASKING else np.ones_like(all_comp, dtype=bool)
         for loc in TS_LOCATIONS:
             y, x = loc['yx']
             if 0 <= y < self.height and 0 <= x < self.width:
-                vals = all_comp[:, y, x]
-                masks = all_mask[:, y, x] == 0
+                vals = sc.read_scaled_int16(target_dset, np.s_[:, y, x])
+                masks = (self.common_mask_dset[:, y, x] == 0) if MASKING else np.ones(self.total_frames, dtype=bool)
                 for i in range(self.total_frames):
                     if masks[i] and not np.isnan(vals[i]):
                         dt = datetime.fromtimestamp(self.prov_time[i], tz=timezone.utc)
@@ -362,9 +384,9 @@ class HarmonizedComplexityViewer:
         ax_t_frame = self.fig_controls.add_axes([0.35, 0.62, 0.15, 0.035])
         ax_e_frame = self.fig_controls.add_axes([0.6, 0.62, 0.15, 0.035])
         ax_scatter_btn = self.fig_controls.add_axes([0.3, 0.57, 0.4, 0.035])
-        self.txt_l_frame = TextBox(ax_l_frame, 'L: ', initial=str(self.l_file_idx if self.l_file_idx is not None else 0))
-        self.txt_t_frame = TextBox(ax_t_frame, 'T: ', initial=str(self.t_file_idx if self.t_file_idx is not None else 0))
-        self.txt_e_frame = TextBox(ax_e_frame, 'E: ', initial=str(self.e_file_idx if self.e_file_idx is not None else 0))
+        self.txt_l_frame = TextBox(ax_l_frame, 'Landsat: ', initial=str(self.l_file_idx if self.l_file_idx is not None else 0))
+        self.txt_t_frame = TextBox(ax_t_frame, 'Tanager: ', initial=str(self.t_file_idx if self.t_file_idx is not None else 0))
+        self.txt_e_frame = TextBox(ax_e_frame, 'EnMAP: ', initial=str(self.e_file_idx if self.e_file_idx is not None else 0))
         self.btn_scatter = Button(ax_scatter_btn, 'Update Scatter', color='lightyellow')
         
         # Localization
@@ -413,10 +435,9 @@ class HarmonizedComplexityViewer:
         self.ax_ts_main = self.fig_combined.add_subplot(2, 3, (5, 6))
 
     def _init_comparison_ui(self):
-        self.fig_comparison = plt.figure(figsize=(12, 10))
+        self.fig_comparison = plt.figure(figsize=(14, 9))
         self.fig_comparison.canvas.manager.set_window_title("Time Series Complexity Comparison")
-        self.fig_comparison.subplots_adjust(top=0.92, bottom=0.08, left=0.08, right=0.92, hspace=0.35)
-        self.fig_comparison.text(0.5, 0.96, "Time Series Metric Comparison", ha='center', va='top', fontsize=12, fontweight='bold')
+        self.fig_comparison.subplots_adjust(top=0.92, bottom=0.10, left=0.08, right=0.92, hspace=0.35)
         self.ax_comp_top = self.fig_comparison.add_subplot(211)
         self.ax_comp_bot = self.fig_comparison.add_subplot(212)
 
@@ -608,7 +629,7 @@ class HarmonizedComplexityViewer:
                 if MASKING and mask_arr is not None:
                     import matplotlib.patches as mpatches
                     mask_patch = mpatches.Patch(color=(1.0, 0.65, 0.0, 0.5), label='Masked (Invalid)')
-                    ax.legend(handles=[mask_patch], loc='center left', bbox_to_anchor=(1.25, 0.5), fontsize=9, framealpha=0.8)
+                    ax.legend(handles=[mask_patch], loc='center left', bbox_to_anchor=(1.25, 0.5), fontsize=9, framealpha=1.0)
             else:
                 curr_im.set_data(data)
                 curr_im.set_clim(vmin=v_min, vmax=v_max)
@@ -683,7 +704,7 @@ class HarmonizedComplexityViewer:
             if MASKING:
                 import matplotlib.patches as mpatches
                 mask_patch = mpatches.Patch(color=(1.0, 0.65, 0.0, 0.5), label='Masked (Invalid)')
-                self.ax_chip_comp.legend(handles=[mask_patch], loc='lower right', fontsize=7, framealpha=0.8)
+                self.ax_chip_comp.legend(handles=[mask_patch], loc='lower right', fontsize=7, framealpha=1.0)
             
             self.ax_transect_t.clear()
             if getattr(self, 'ax_transect_t_twin', None) is not None:
@@ -733,36 +754,42 @@ class HarmonizedComplexityViewer:
                         filt_t_d.append(d_data['t'][i]); filt_v_d.append(d_data['v'][i])
 
             if filt_t_l:
-                self.ax_transect_t.plot(filt_t_l, filt_v_l, marker='^', color=c_color, label=f"L: {label}", markersize=5, linestyle='--', linewidth=1.5, alpha=0.7)
+                self.ax_transect_t.plot(filt_t_l, filt_v_l, marker='^', color=c_color, label=f"Landsat: {label}", markersize=5, linestyle='--', linewidth=1.5, alpha=0.7)
             if filt_t_s:
-                self.ax_transect_t.plot(filt_t_s, filt_v_s, marker='o', color=c_color, label=f"S: {label}", markersize=4, linestyle=':', linewidth=1.2, alpha=0.7)
+                self.ax_transect_t.plot(filt_t_s, filt_v_s, marker='o', color=c_color, label=f"Sentinel-2: {label}", markersize=4, linestyle=':', linewidth=1.2, alpha=0.7)
             if filt_t_t:
-                t_ax.plot(filt_t_t, filt_v_t, marker='s', color=c_color, label=f"T: {label}", markersize=6, linestyle='-', linewidth=2, alpha=0.9)
+                t_ax.plot(filt_t_t, filt_v_t, marker='s', color=c_color, label=f"Tanager: {label}", markersize=6, linestyle='-', linewidth=2, alpha=0.9)
             if filt_t_e:
-                t_ax.plot(filt_t_e, filt_v_e, marker='D', color=c_color, label=f"E: {label}", markersize=6, linestyle='-', linewidth=2, alpha=0.9)
+                t_ax.plot(filt_t_e, filt_v_e, marker='D', color=c_color, label=f"EnMAP: {label}", markersize=6, linestyle='-', linewidth=2, alpha=0.9)
             if filt_t_d:
-                t_ax.plot(filt_t_d, filt_v_d, marker='v', color=c_color, label=f"D: {label}", markersize=6, linestyle='-.', linewidth=2, alpha=0.9)
+                t_ax.plot(filt_t_d, filt_v_d, marker='v', color=c_color, label=f"Dragonette: {label}", markersize=6, linestyle='-.', linewidth=2, alpha=0.9)
             
             self.ax_transect_t.grid(True, alpha=0.3, which="both", ls="--")
-            self.ax_transect_t.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m'))
-            self.ax_transect_t.tick_params(axis='x', rotation=45, labelsize=9)
+            self.ax_transect_t.xaxis.set_major_locator(mdates.YearLocator())
+            self.ax_transect_t.xaxis.set_major_formatter(mdates.DateFormatter('%Y'))
+            self.ax_transect_t.xaxis.set_minor_locator(mdates.MonthLocator())
+            self.ax_transect_t.tick_params(axis='x', rotation=0, labelsize=14)
+            self.ax_transect_t.tick_params(axis='y', labelsize=14)
+            if self.ax_transect_t_twin is not None:
+                self.ax_transect_t_twin.tick_params(axis='y', labelsize=14)
             self.ax_transect_t.axvline(curr_dt, color='red', linestyle=':', alpha=0.8, linewidth=2, label='Current Frame')
             self.ax_transect_t.set_xlim(self.ts_start_date, self.ts_end_date)
+            self.ax_transect_t.set_xlabel("Year", fontsize=14)
             apply_seasonal_underlay(self.ax_transect_t, [self.ts_start_date, self.ts_end_date])
             
             lines_1, labels_1 = self.ax_transect_t.get_legend_handles_labels()
             if self.use_twin_axis and self.ax_transect_t_twin is not None:
-                self.ax_transect_t.set_ylabel(f"HLS (L/S)", color='black', fontsize=10)
-                self.ax_transect_t_twin.set_ylabel(f"Tanager/ENMAP/Dragonette", color='black', fontsize=10)
+                self.ax_transect_t.set_ylabel(f"HLS (L/S)", color='black', fontsize=14)
+                self.ax_transect_t_twin.set_ylabel(f"Tanager/ENMAP/Dragonette", color='black', fontsize=14)
                 if LOG_SCALE:
                     self.ax_transect_t.set_yscale('log')
                     self.ax_transect_t_twin.set_yscale('log')
                 lines_2, labels_2 = self.ax_transect_t_twin.get_legend_handles_labels()
-                self.ax_transect_t.legend(lines_1 + lines_2, labels_1 + labels_2, loc='best', fontsize=10)
+                self.ax_transect_t.legend(lines_1 + lines_2, labels_1 + labels_2, loc='best', fontsize=12)
             else:
-                self.ax_transect_t.set_ylabel(COMPLEXITY_DICT.get(complexity_type, complexity_type), fontsize=10)
+                self.ax_transect_t.set_ylabel(COMPLEXITY_DICT.get(complexity_type, complexity_type), fontsize=14)
                 if LOG_SCALE: self.ax_transect_t.set_yscale('log')
-                self.ax_transect_t.legend(loc='best', fontsize=10)
+                self.ax_transect_t.legend(loc='best', fontsize=12)
 
         # Plot Time Series helper
         def plot_time_series(ax_main, ax_twin=None, source_dict=None, title_label=None):
@@ -774,52 +801,66 @@ class HarmonizedComplexityViewer:
                 if l_d['t']:
                     filt_t, filt_v = [t for t in l_d['t'] if self.ts_start_date <= t <= self.ts_end_date], [v for i, v in enumerate(l_d['v']) if self.ts_start_date <= l_d['t'][i] <= self.ts_end_date]
                     if filt_t:
-                        ax_main.plot(filt_t, filt_v, marker='^', color=loc['color'], label=f"L: {label}", markersize=4, linestyle='--', linewidth=1, alpha=0.6)
+                        ax_main.plot(filt_t, filt_v, marker='^', color=loc['color'], label=f"Landsat: {label}", markersize=4, linestyle='--', linewidth=1, alpha=0.6)
                         
                 s_d = src['SENTINEL'][label]
                 if s_d['t']:
                     filt_t, filt_v = [t for t in s_d['t'] if self.ts_start_date <= t <= self.ts_end_date], [v for i, v in enumerate(s_d['v']) if self.ts_start_date <= s_d['t'][i] <= self.ts_end_date]
                     if filt_t:
-                        ax_main.plot(filt_t, filt_v, marker='o', color=loc['color'], label=f"S: {label}", markersize=4, linestyle=':', linewidth=1.2, alpha=0.6)
+                        ax_main.plot(filt_t, filt_v, marker='o', color=loc['color'], label=f"Sentinel-2: {label}", markersize=4, linestyle=':', linewidth=1.2, alpha=0.6)
                 
                 t_d = src['TANAGER'][label]
                 if t_d['t']:
                     filt_t, filt_v = [t for t in t_d['t'] if self.ts_start_date <= t <= self.ts_end_date], [v for i, v in enumerate(t_d['v']) if self.ts_start_date <= t_d['t'][i] <= self.ts_end_date]
                     if filt_t:
-                        t_ax.plot(filt_t, filt_v, marker='s', color=loc['color'], label=f"T: {label}", markersize=5, linestyle='-', linewidth=1.5, alpha=0.9)
+                        t_ax.plot(filt_t, filt_v, marker='s', color=loc['color'], label=f"Tanager: {label}", markersize=5, linestyle='-', linewidth=1.5, alpha=0.9)
                         
                 e_d = src['ENMAP'][label]
                 if e_d['t']:
                     filt_t, filt_v = [t for t in e_d['t'] if self.ts_start_date <= t <= self.ts_end_date], [v for i, v in enumerate(e_d['v']) if self.ts_start_date <= e_d['t'][i] <= self.ts_end_date]
                     if filt_t:
-                        t_ax.plot(filt_t, filt_v, marker='D', color=loc['color'], label=f"E: {label}", markersize=5, linestyle='-', linewidth=1.5, alpha=0.9)
+                        t_ax.plot(filt_t, filt_v, marker='D', color=loc['color'], label=f"EnMAP: {label}", markersize=5, linestyle='-', linewidth=1.5, alpha=0.9)
 
                 d_d = src['DRAGONETTE'][label]
                 if d_d['t']:
                     filt_t, filt_v = [t for t in d_d['t'] if self.ts_start_date <= t <= self.ts_end_date], [v for i, v in enumerate(d_d['v']) if self.ts_start_date <= d_d['t'][i] <= self.ts_end_date]
                     if filt_t:
-                        t_ax.plot(filt_t, filt_v, marker='v', color=loc['color'], label=f"D: {label}", markersize=5, linestyle='-.', linewidth=1.5, alpha=0.9)
+                        t_ax.plot(filt_t, filt_v, marker='v', color=loc['color'], label=f"Dragonette: {label}", markersize=5, linestyle='-.', linewidth=1.5, alpha=0.9)
 
             ax_main.grid(True, alpha=0.3, which="both", ls="--")
-            ax_main.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m'))
-            ax_main.tick_params(axis='x', rotation=45, labelsize=8)
+            ax_main.xaxis.set_major_locator(mdates.YearLocator())
+            ax_main.xaxis.set_major_formatter(mdates.DateFormatter('%Y'))
+            ax_main.xaxis.set_minor_locator(mdates.MonthLocator())
+            ax_main.tick_params(axis='x', rotation=0, labelsize=14)
+            ax_main.tick_params(axis='y', labelsize=14)
+            if ax_twin is not None:
+                ax_twin.tick_params(axis='y', labelsize=14)
             ax_main.axvline(curr_dt, color='black', linestyle='--', alpha=0.8, linewidth=1.5)
             ax_main.set_xlim(self.ts_start_date, self.ts_end_date)
             apply_seasonal_underlay(ax_main, [self.ts_start_date, self.ts_end_date])
             if title_label:
-                ax_main.set_title(title_label, fontsize=10, fontweight='bold')
+                ax_main.set_title(title_label, fontsize=16, fontweight='bold')
+            ax_main.set_xlabel("Year", fontsize=14)
             
             lines_1, labels_1 = ax_main.get_legend_handles_labels()
             if self.use_twin_axis and ax_twin is not None:
+                ax_main.set_ylabel("HLS (L/S)", fontsize=14)
+                ax_twin.set_ylabel("Tanager / EnMAP / Dragonette", fontsize=14)
                 if LOG_SCALE:
                     ax_main.set_yscale('log')
                     ax_twin.set_yscale('log')
                 lines_2, labels_2 = ax_twin.get_legend_handles_labels()
                 if lines_1 + lines_2:
-                    ax_main.legend(lines_1 + lines_2, labels_1 + labels_2, loc='upper left', fontsize=8, ncol=2)
+                    ax_main.legend(lines_1 + lines_2, labels_1 + labels_2, loc='upper left', fontsize=12, ncol=2)
             else:
+                if title_label:
+                    ax_main.set_ylabel(title_label, fontsize=14)
+                else:
+                    ax_main.set_ylabel(COMPLEXITY_DICT.get(complexity_type, complexity_type), fontsize=14)
+                if LOG_SCALE:
+                    ax_main.set_yscale('log')
                 if lines_1:
-                    ax_main.legend(loc='upper left', fontsize=8, ncol=2)
+                    ax_main.legend(loc='best', fontsize=12, ncol=2)
 
         self.ax_ts_main.clear()
         if self.ax_ts_twin is not None:
@@ -1020,7 +1061,7 @@ def main(target_location=None, file_path=None, start_year=None, end_year=None):
     
     if target_location:
         Location = target_location
-        default_harmonized_path = f"C:/satelliteImagery/HLST30/HLST_{Location}_Harmonized_SC_EM-7_Norm-bandCount.h5"
+        default_harmonized_path = get_default_harmonized_path(Location)
         if Location in TS_LOCATIONS_MAP:
             TS_LOCATIONS = TS_LOCATIONS_MAP[Location]
     

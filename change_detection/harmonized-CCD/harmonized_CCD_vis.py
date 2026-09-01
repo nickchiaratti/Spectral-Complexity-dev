@@ -7,37 +7,49 @@ import pyproj
 import matplotlib.patches as patches
 import scienceplots
 import matplotlib.dates as mdates
+import glob
+import sys
+from pathlib import Path
+
+script_dir = Path(__file__).resolve().parent
+repo_dir = str(script_dir.parent.parent)
+if repo_dir not in sys.path:
+    sys.path.insert(0, repo_dir)
+import SpecComplex as sc
+
 plt.style.use(['science','no-latex'])
 
 # --- CONFIGURATION ---
 N_ENDMEMBERS = 4  # Number of endmembers extracted via MaxD per patch
+PLOT_INVALID_SAMPLES = False # Whether to plot invalid samples (gray markers) in the time series
 # ---------------------
 
-from harmonized_CCD_main import LOCATION, H5_PATH, ENABLE_CONSTANT, ENABLE_LINEAR, ENABLE_QUADRATIC, TEMPORAL_PERIODS, TARGET_METRIC, TARGET_NAME
+from harmonized_CCD_main import LOCATION, H5_PATH, ENABLE_CONSTANT, ENABLE_LINEAR, ENABLE_QUADRATIC, TEMPORAL_PERIODS, TARGET_METRIC, TARGET_NAME, get_source_h5_path
 _term_str = f"C{int(ENABLE_CONSTANT)}L{int(ENABLE_LINEAR)}Q{int(ENABLE_QUADRATIC)}"
 _period_str = f"P{len(TEMPORAL_PERIODS)}"
 CONFIG = f"{_term_str}_{_period_str}"
 
-import glob
-
 def get_inference_h5(location, config, target_metric):
-    search_pattern = f"C:/satelliteImagery/HLST30/CCD/{location}_CCD_Harmonized_Change_Detection_{target_metric}_{config}.h5"
-    files = glob.glob(search_pattern)
-    if not files:
-        return None
-    # Sort by modification time, descending
-    files.sort(key=os.path.getmtime, reverse=True)
-    return files[0]
+    candidates = [
+        #f"C:/satelliteImagery/HLST30/CCD/{location}_CCD_Harmonized_Change_Detection_{target_metric}_{config}.h5",
+        f"C:/satelliteImagery/MGRS30mConstellation/CCD/{location}_CCD_Harmonized_Change_Detection_{target_metric}_{config}.h5",
+    ]
+    for pattern in candidates:
+        files = glob.glob(pattern)
+        if files:
+            files.sort(key=os.path.getmtime, reverse=True)
+            return files[0]
+    return None
 
 def plot_pixel_sits(pixel_y, pixel_x, source_h5_path, inference_results_h5, ax=None, current_date=None):
     lat, lon = None, None
     with h5py.File(inference_results_h5, 'r') as f:
-        target_metric = f.attrs.get('TARGET_METRIC', 'sliding_volume_z_score')
+        target_metric = f.attrs.get('TARGET_METRIC', TARGET_METRIC)
 
     with h5py.File(source_h5_path, 'r') as f:
         harm_grp = f['/HDFEOS/GRIDS/HARMONIZED/Data Fields']
         acq_time = harm_grp[target_metric].attrs['acquisition_time'][:]
-        z_score = harm_grp[target_metric][:, pixel_y, pixel_x]
+        z_score = sc.read_scaled_int16(harm_grp[target_metric], np.s_[:, pixel_y, pixel_x])
         
         unified_masks = harm_grp['common_mask'][:, pixel_y, pixel_x]
         is_invalid = unified_masks.astype(bool)
@@ -58,7 +70,7 @@ def plot_pixel_sits(pixel_y, pixel_x, source_h5_path, inference_results_h5, ax=N
                 else:
                     spatial_ref_str = str(spatial_ref)
                 
-                crs = pyproj.CRS.from_wkt(spatial_ref_str)
+                crs = pyproj.CRS.from_user_input(spatial_ref_str)
                 transformer = pyproj.Transformer.from_crs(crs, "epsg:4326", always_xy=True)
                 lon, lat = transformer.transform(x_geo, y_geo)
             except Exception as e:
@@ -105,7 +117,7 @@ def plot_pixel_sits(pixel_y, pixel_x, source_h5_path, inference_results_h5, ax=N
     
     # Plot Actuals
     is_anomaly = (anomalies == 1)
-    for marker_type, sc_keyword in [('s', 'Sentinel'), ('o', 'Landsat'), ('D', 'Tanager')]:
+    for marker_type, sc_keyword in [('s', 'Sentinel'), ('o', 'Landsat'), ('D', 'Tanager'), ('*', 'EnMAP'), ('^', 'Dragonette')]:
         sc_mask = np.array([sc_keyword.lower() in str(sc).lower() for sc in spacecrafts_arr])
         
         idx_valid_normal = valid_mask & sc_mask & ~is_anomaly
@@ -116,9 +128,10 @@ def plot_pixel_sits(pixel_y, pixel_x, source_h5_path, inference_results_h5, ax=N
         if np.any(idx_valid_anomaly):
             ax.plot(dates_arr[idx_valid_anomaly], z_score[idx_valid_anomaly], color='r', marker=marker_type, linestyle='None', label=f'Anomaly ({sc_keyword})')
             
-        idx_invalid = is_invalid & sc_mask
-        if np.any(idx_invalid):
-            ax.plot(dates_arr[idx_invalid], z_score[idx_invalid], color='gray', marker=marker_type, linestyle='None', markerfacecolor='none', label=f'Invalid ({sc_keyword})')
+        if PLOT_INVALID_SAMPLES:
+            idx_invalid = is_invalid & sc_mask
+            if np.any(idx_invalid):
+                ax.plot(dates_arr[idx_invalid], z_score[idx_invalid], color='gray', marker=marker_type, linestyle='None', markerfacecolor='none', label=f'Invalid ({sc_keyword})')
             
     # Plot Predictions
     pred_mask = ~np.isnan(predicted)
@@ -198,6 +211,8 @@ def animate_pixel_endmembers(pixel_y, pixel_x, source_h5_path, inference_results
         if 'LANDSAT' in s: return 'Landsat'
         if 'SENTINEL' in s: return 'Sentinel'
         if 'TANAGER' in s: return 'Tanager'
+        if 'ENMAP' in s: return 'EnMAP'
+        if 'DRAGONETTE' in s: return 'Dragonette'
         return s
 
     endmembers_over_time = []
@@ -429,6 +444,8 @@ def plot_segment_spectra(pixel_y, pixel_x, source_h5_path, inference_results_h5)
         if 'LANDSAT' in s: return 'Landsat'
         if 'SENTINEL' in s: return 'Sentinel'
         if 'TANAGER' in s: return 'Tanager'
+        if 'ENMAP' in s: return 'EnMAP'
+        if 'DRAGONETTE' in s: return 'Dragonette'
         return s
         
     with h5py.File(inference_results_h5, 'r') as f_inf:
@@ -643,6 +660,8 @@ def plot_season_spectra(pixel_y, pixel_x, source_h5_path, inference_results_h5):
         if 'LANDSAT' in s: return 'Landsat'
         if 'SENTINEL' in s: return 'Sentinel'
         if 'TANAGER' in s: return 'Tanager'
+        if 'ENMAP' in s: return 'EnMAP'
+        if 'DRAGONETTE' in s: return 'Dragonette'
         return s
         
     with h5py.File(inference_results_h5, 'r') as f_inf:
@@ -850,6 +869,8 @@ def plot_segment_endmembers(pixel_y, pixel_x, source_h5_path, inference_results_
         if 'LANDSAT' in s: return 'Landsat'
         if 'SENTINEL' in s: return 'Sentinel'
         if 'TANAGER' in s: return 'Tanager'
+        if 'ENMAP' in s: return 'EnMAP'
+        if 'DRAGONETTE' in s: return 'Dragonette'
         return s
 
     with h5py.File(inference_results_h5, 'r') as f_inf:
@@ -1036,6 +1057,8 @@ def plot_seasonal_separability(pixel_y, pixel_x, source_h5_path, inference_resul
         if 'LANDSAT' in s: return 'Landsat'
         if 'SENTINEL' in s: return 'Sentinel'
         if 'TANAGER' in s: return 'Tanager'
+        if 'ENMAP' in s: return 'EnMAP'
+        if 'DRAGONETTE' in s: return 'Dragonette'
         return s
 
     with h5py.File(inference_results_h5, 'r') as f_inf:
@@ -1398,7 +1421,24 @@ def plot_spatial_anomaly_overlay(source_h5_path, inference_results_h5):
             
     btn_sep.on_clicked(on_sep_click)
 
-    ax_img.imshow(base_frame)
+    extent = None
+    geo_transform = None
+    with h5py.File(inference_results_h5, 'r') as f:
+        geo_transform = f.attrs.get('GeoTransform')
+    if geo_transform is None:
+        with h5py.File(source_h5_path, 'r') as f:
+            harm_grp = f['/HDFEOS/GRIDS/HARMONIZED/Data Fields']
+            geo_transform = harm_grp[target_metric].attrs.get('GeoTransform')
+
+    if geo_transform is not None:
+        gt = geo_transform
+        left = gt[0]
+        right = gt[0] + W * gt[1]
+        top = gt[3]
+        bottom = gt[3] + H * gt[5]
+        extent = [left, right, bottom, top]
+
+    ax_img.imshow(base_frame, extent=extent)
     ax_img.set_title(f"{base_sg} Acquisition: {base_date.strftime('%Y-%m-%d %H:%M:%S')} UTC")
     
     valid_initial_counts = np.sum(full_valid_mask, axis=0)
@@ -1409,14 +1449,14 @@ def plot_spatial_anomaly_overlay(source_h5_path, inference_results_h5):
     gray[insufficient_data, 1] = 0.5
     gray[insufficient_data, 2] = 0.5
     gray[insufficient_data, 3] = 0.5
-    ax_img.imshow(gray)
+    ax_img.imshow(gray, extent=extent)
     
     if not np.all(np.isnan(anomaly_map)):
         from matplotlib.cm import gist_rainbow
         masked_anom = np.ma.masked_invalid(anomaly_map)
         cmap = gist_rainbow
         cmap.set_bad(color='white', alpha=0)
-        im = ax_img.imshow(masked_anom, cmap=cmap, alpha=0.7)
+        im = ax_img.imshow(masked_anom, cmap=cmap, alpha=0.7, extent=extent)
         cbar = plt.colorbar(im, ax=ax_img)
         ticks = cbar.get_ticks()
         min_anom, max_anom = np.nanmin(anomaly_map), np.nanmax(anomaly_map)
@@ -1424,19 +1464,33 @@ def plot_spatial_anomaly_overlay(source_h5_path, inference_results_h5):
             ticks = ticks[(ticks >= min_anom) & (ticks <= max_anom)]
             cbar.set_ticks(ticks)
             cbar.set_ticklabels([datetime.fromtimestamp(t, timezone.utc).strftime('%Y-%m-%d') for t in ticks])
+            cbar.set_label('First Date of Detected Change')
             
-    rect = patches.Rectangle((-1, -1), 1, 1, linewidth=2, edgecolor='orange', facecolor='none', visible=False)
+    if extent is not None:
+        rect = patches.Rectangle((0, 0), 1, 1, linewidth=2, edgecolor='orange', facecolor='none', visible=False)
+    else:
+        rect = patches.Rectangle((-1, -1), 1, 1, linewidth=2, edgecolor='orange', facecolor='none', visible=False)
     ax_img.add_patch(rect)
     
     ax_ts.text(0.5, 0.5, 'Click a pixel on the map to view data', horizontalalignment='center', verticalalignment='center', transform=ax_ts.transAxes)
 
     def onclick(event):
         if event.inaxes != ax_img: return
-        x, y = int(event.xdata), int(event.ydata)
+        if extent is not None:
+            x = int((event.xdata - gt[0]) / gt[1])
+            y = int((event.ydata - gt[3]) / gt[5])
+        else:
+            x, y = int(event.xdata), int(event.ydata)
+            
         if x < 0 or x >= W or y < 0 or y >= H: return
         print(f"Clicked on {x}, {y}")
         
-        rect.set_xy((x - 0.5, y - 0.5))
+        if extent is not None:
+            rect.set_xy((gt[0] + x * gt[1], gt[3] + (y + 1) * gt[5]))
+            rect.set_width(gt[1])
+            rect.set_height(abs(gt[5]))
+        else:
+            rect.set_xy((x - 0.5, y - 0.5))
         rect.set_visible(True)
         
         current_selected['x'] = x
@@ -1469,6 +1523,17 @@ if __name__ == "__main__":
     inference_h5 = get_inference_h5(LOCATION, CONFIG, TARGET_METRIC)
     if inference_h5 and os.path.exists(inference_h5):
         print(f"Loading latest inference results: {inference_h5}")
-        plot_spatial_anomaly_overlay(H5_PATH, inference_h5)
+        
+        # Check source H5 file corresponding to inference
+        try:
+            with h5py.File(inference_h5, 'r') as f:
+                loc_name = f.attrs.get('LOCATION', LOCATION)
+        except Exception:
+            loc_name = LOCATION
+        source_h5 = get_source_h5_path(loc_name)
+        if not os.path.exists(source_h5):
+            source_h5 = H5_PATH
+            
+        plot_spatial_anomaly_overlay(source_h5, inference_h5)
     else:
-        print("Run harmonized_CCD_main.py first to create output h5")
+        print(f"No inference results found for {LOCATION}. Run harmonized_CCD_main.py first.")

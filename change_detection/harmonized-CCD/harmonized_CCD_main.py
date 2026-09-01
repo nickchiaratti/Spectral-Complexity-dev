@@ -8,8 +8,17 @@ from sklearn.linear_model import LassoLarsIC
 import multiprocessing
 import joblib
 import contextlib
+import glob
+import sys
+from pathlib import Path
 from scipy.stats import chi2
 from joblib import Parallel, delayed
+
+script_dir = Path(__file__).resolve().parent
+repo_dir = str(script_dir.parent.parent)
+if repo_dir not in sys.path:
+    sys.path.insert(0, repo_dir)
+import SpecComplex as sc
 
 @contextlib.contextmanager
 def tqdm_joblib(tqdm_object):
@@ -31,9 +40,22 @@ def tqdm_joblib(tqdm_object):
 # 1. CONFIGURATION
 # ==========================================
 # Input/Output
-LOCATION = "Tait"
-H5_PATH = f"C:/satelliteImagery/HLST30/HLST_{LOCATION}_Harmonized_SC_EM-7_Norm-None.h5"
-TARGET_METRIC = 'sliding_volume_z_score'
+LOCATION = "SantaBarbara"
+
+def get_source_h5_path(location):
+    candidates = [
+        f"C:/satelliteImagery/MGRS30mConstellation/Harmonized_MGRS_Stack_{location}_SC_EM-7_Norm-None.h5",
+        #f"C:/satelliteImagery/HLST30/HLST_{location}_Harmonized_SC_EM-7_Norm-None.h5",
+    ]
+    for pattern in candidates:
+        matches = glob.glob(pattern)
+        if matches:
+            matches.sort(key=lambda x: os.path.getmtime(x), reverse=True)
+            return matches[0]
+    return #f"C:/satelliteImagery/MGRS30mConstellation/Harmonized_MGRS_Stack_{location}_SC_EM-7_Norm-None.h5"
+
+H5_PATH = get_source_h5_path(LOCATION)
+TARGET_METRIC = 'sliding_volume_box_cox'
 
 if TARGET_METRIC == 'sliding_volume_z_score':
     TARGET_NAME = 'Spectral Complexity (Z-Score)'
@@ -43,6 +65,8 @@ elif TARGET_METRIC == 'ndvi':
     TARGET_NAME = 'NDVI'
 elif TARGET_METRIC == 'ndbi':
     TARGET_NAME = 'NDBI'
+else:
+    TARGET_NAME = TARGET_METRIC.replace('_', ' ').title()
 
 # Anomaly Detection Thresholds
 CHANGE_PROBABILITY = 0.99
@@ -63,7 +87,7 @@ TEMPORAL_PERIODS = [0.33, 0.5, 1]
 
 # RLS Tuning
 RLS_RIDGE_PENALTY = 1e-6
-RLS_FORGETTING_FACTOR = 0.999
+RLS_FORGETTING_FACTOR = 0.99
 
 
 
@@ -113,7 +137,6 @@ def _process_row_chunk(chunk_args):
     
     chunk_pred = np.full((num_frames, chunk_height, width), np.nan, dtype=np.float32)
     chunk_rmse = np.full((num_frames, chunk_height, width), np.nan, dtype=np.float32)
-    chunk_coef = np.full((num_frames, chunk_height, width, num_features), np.nan, dtype=np.float32)
     chunk_flags = np.zeros((num_frames, chunk_height, width), dtype=np.uint8)
     chunk_date = np.full((chunk_height, width), np.nan, dtype=np.float64)
     chunk_count = np.zeros((chunk_height, width), dtype=np.int32)
@@ -231,7 +254,6 @@ def _process_row_chunk(chunk_args):
                     x_target = X_full[global_idx, :]
                     chunk_pred[global_idx, y_local, x] = np.dot(x_target, theta)
                     chunk_rmse[global_idx, y_local, x] = rmse
-                    chunk_coef[global_idx, y_local, x, :] = theta
                 
                 consecutive_count = 0
                 break_detected = False
@@ -249,7 +271,6 @@ def _process_row_chunk(chunk_args):
                     chunk_pred[target_idx, y_local, x] = y_pred
                     # Keep RMSE frozen from initialization for stable break detection
                     chunk_rmse[target_idx, y_local, x] = rmse
-                    chunk_coef[target_idx, y_local, x, :] = theta
                     
                     chi2_val = (error / rmse)**2
                     is_anomaly = chi2_val > chi2_threshold
@@ -292,7 +313,7 @@ def _process_row_chunk(chunk_args):
                     # Reached end of time series
                     break
 
-    return y_start, y_end, chunk_pred, chunk_rmse, chunk_coef, chunk_flags, chunk_date, chunk_count
+    return y_start, y_end, chunk_pred, chunk_rmse, chunk_flags, chunk_date, chunk_count
 
 def main(enable_const=ENABLE_CONSTANT, 
          enable_lin=ENABLE_LINEAR, 
@@ -308,7 +329,12 @@ def main(enable_const=ENABLE_CONSTANT,
     
     _term_str = f"C{int(enable_const)}L{int(enable_lin)}Q{int(enable_quad)}"
     _period_str = f"P{len(temporal_periods)}"
-    output_h5 = f"C:/satelliteImagery/HLST30/CCD/{LOCATION}_CCD_Harmonized_Change_Detection_{target_metric}_{_term_str}_{_period_str}.h5"
+    
+    base_dir = os.path.dirname(H5_PATH)
+    ccd_dir = os.path.join(base_dir, "CCD")
+    os.makedirs(ccd_dir, exist_ok=True)
+    
+    output_h5 = os.path.join(ccd_dir, f"{LOCATION}_CCD_Harmonized_Change_Detection_{target_metric}_{_term_str}_{_period_str}.h5")
 
     print(f"Loading data from {H5_PATH}...")
     with h5py.File(H5_PATH, 'r') as f:
@@ -316,7 +342,7 @@ def main(enable_const=ENABLE_CONSTANT,
         metric_ds = data_grp[target_metric]
         
         acq_times = metric_ds.attrs['acquisition_time'][:]
-        y_data = metric_ds[...]
+        y_data = sc.read_scaled_int16(metric_ds)
         
         # Determine valid mask
         common_mask = data_grp['common_mask'][...]
@@ -337,21 +363,33 @@ def main(enable_const=ENABLE_CONSTANT,
 
     print(f"Dataset shape: {num_frames} frames, {height}x{width} pixels")
 
-    # Output arrays
-    change_date_map = np.zeros((height, width), dtype=np.float64)
-    change_date_map[:] = np.nan
-    change_count_map = np.zeros((height, width), dtype=np.int32)
-    
-    predicted_series = np.full((num_frames, height, width), np.nan, dtype=np.float32)
-    rmse_series = np.full((num_frames, height, width), np.nan, dtype=np.float32)
-    
-    anomaly_flags = np.zeros((num_frames, height, width), dtype=np.uint8)
-
     X_full = build_harmonic_matrix(frac_years, temporal_periods=temporal_periods,
                                    enable_const=enable_const, enable_lin=enable_lin, enable_quad=enable_quad)
-                                   
-    num_features = X_full.shape[1]
-    coef_series = np.full((num_frames, height, width, num_features), np.nan, dtype=np.float32)
+
+    print("\nInitializing Output HDF5 on disk...")
+    os.makedirs(os.path.dirname(output_h5), exist_ok=True)
+    out_file = h5py.File(output_h5, 'w')
+    out_file.attrs['spatial_ref'] = spatial_ref
+    out_file.attrs['GeoTransform'] = geo_transform
+    out_file.attrs['CHANGE_PROBABILITY'] = CHANGE_PROBABILITY
+    out_file.attrs['CONSECUTIVE_ANOMALIES'] = CONSECUTIVE_ANOMALIES
+    out_file.attrs['CHI2_DEGREES_OF_FREEDOM'] = CHI2_DEGREES_OF_FREEDOM
+    out_file.attrs['MAX_RMSE'] = MAX_RMSE
+    out_file.attrs['MIN_RMSE_CLAMP'] = MIN_RMSE_CLAMP
+    out_file.attrs['MIN_YEARS_FOR_INIT'] = MIN_YEARS_FOR_INIT
+    out_file.attrs['MIN_SAMPLES'] = min_samples
+    out_file.attrs['TEMPORAL_PERIODS'] = temporal_periods
+    out_file.attrs['ENABLE_CONSTANT'] = enable_const
+    out_file.attrs['ENABLE_LINEAR'] = enable_lin
+    out_file.attrs['ENABLE_QUADRATIC'] = enable_quad
+    out_file.attrs['TARGET_METRIC'] = target_metric
+    out_file.attrs['SOURCE_DATA'] = H5_PATH
+    
+    predicted_ds = out_file.create_dataset('predicted_series', shape=(num_frames, height, width), dtype=np.float32, fillvalue=np.nan, compression='gzip')
+    rmse_ds = out_file.create_dataset('rmse_series', shape=(num_frames, height, width), dtype=np.float32, fillvalue=np.nan, compression='gzip')
+    flags_ds = out_file.create_dataset('anomaly_flags', shape=(num_frames, height, width), dtype=np.uint8, fillvalue=0, compression='gzip')
+    date_ds = out_file.create_dataset('change_date_timestamp', shape=(height, width), dtype=np.float64, fillvalue=np.nan, compression='gzip')
+    count_ds = out_file.create_dataset('change_count', shape=(height, width), dtype=np.int32, fillvalue=0, compression='gzip')
 
     print("\nExecuting Sliding Window LASSO Harmonic Regression...")
     
@@ -378,40 +416,15 @@ def main(enable_const=ENABLE_CONSTANT,
             delayed(_process_row_chunk)(chunk) for chunk in chunks
         )
     
-    for y_start, y_end, c_pred, c_rmse, c_coef, c_flags, c_date, c_count in results:
-        predicted_series[:, y_start:y_end, :] = c_pred
-        rmse_series[:, y_start:y_end, :] = c_rmse
-        coef_series[:, y_start:y_end, :, :] = c_coef
-        anomaly_flags[:, y_start:y_end, :] = c_flags
-        change_date_map[y_start:y_end, :] = c_date
-        change_count_map[y_start:y_end, :] = c_count
+    for y_start, y_end, c_pred, c_rmse, c_flags, c_date, c_count in results:
+        predicted_ds[:, y_start:y_end, :] = c_pred
+        rmse_ds[:, y_start:y_end, :] = c_rmse
+        flags_ds[:, y_start:y_end, :] = c_flags
+        date_ds[y_start:y_end, :] = c_date
+        count_ds[y_start:y_end, :] = c_count
+        out_file.flush()
 
-    os.makedirs(os.path.dirname(output_h5), exist_ok=True)
-    print(f"\nSaving Results to {output_h5}...")
-    with h5py.File(output_h5, 'w') as out_file:
-        out_file.attrs['spatial_ref'] = spatial_ref
-        out_file.attrs['GeoTransform'] = geo_transform
-        out_file.attrs['CHANGE_PROBABILITY'] = CHANGE_PROBABILITY
-        out_file.attrs['CONSECUTIVE_ANOMALIES'] = CONSECUTIVE_ANOMALIES
-        out_file.attrs['CHI2_DEGREES_OF_FREEDOM'] = CHI2_DEGREES_OF_FREEDOM
-        out_file.attrs['MAX_RMSE'] = MAX_RMSE
-        out_file.attrs['MIN_RMSE_CLAMP'] = MIN_RMSE_CLAMP
-        out_file.attrs['MIN_YEARS_FOR_INIT'] = MIN_YEARS_FOR_INIT
-        out_file.attrs['MIN_SAMPLES'] = min_samples
-        out_file.attrs['TEMPORAL_PERIODS'] = temporal_periods
-        out_file.attrs['ENABLE_CONSTANT'] = enable_const
-        out_file.attrs['ENABLE_LINEAR'] = enable_lin
-        out_file.attrs['ENABLE_QUADRATIC'] = enable_quad
-        out_file.attrs['TARGET_METRIC'] = target_metric
-        out_file.attrs['SOURCE_DATA'] = H5_PATH
-        
-        out_file.create_dataset('predicted_series', data=predicted_series, compression='gzip')
-        out_file.create_dataset('rmse_series', data=rmse_series, compression='gzip')
-        out_file.create_dataset('coef_series', data=coef_series, compression='gzip')
-        out_file.create_dataset('anomaly_flags', data=anomaly_flags, compression='gzip')
-        out_file.create_dataset('change_date_timestamp', data=change_date_map, compression='gzip')
-        out_file.create_dataset('change_count', data=change_count_map, compression='gzip')
-        
+    out_file.close()
     print("Harmonized CCD Pipeline Complete!")
 
     if launch_vis:

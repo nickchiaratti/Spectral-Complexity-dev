@@ -106,13 +106,7 @@ def plot_global_stats(target_location=None, h5_path=None, location=None, metric=
         mask_dset_path = '/HDFEOS/GRIDS/HARMONIZED/Data Fields/common_mask'
         common_mask = h5_file[mask_dset_path] if mask_dset_path in h5_file else None
 
-        # Calculate valid (unmasked / non-NaN) pixel counts per frame
-        dset_full = sc.read_scaled_int16(dset)
-        if common_mask is not None:
-            counts = np.sum((common_mask[:] == 0) & ~np.isnan(dset_full), axis=(1, 2))
-        else:
-            counts = np.sum(~np.isnan(dset_full), axis=(1, 2))
-
+        total_frames = dset.shape[0]
         grids_str = [g if isinstance(g, str) else g.decode('utf-8') for g in grids]
         sensors = {'Landsat (HLSL30)': [], 'Sentinel (HLSS30)': [], 'Tanager': [], 'EnMAP': []}
         for i, g in enumerate(grids_str):
@@ -130,41 +124,156 @@ def plot_global_stats(target_location=None, h5_path=None, location=None, metric=
             else:
                 sensors.setdefault(g, []).append(i)
 
-        # Extract strided voxel samples per sensor for log-normal distribution validation
-        sensor_z_samples = {}
-        for s_name, s_idx in sensors.items():
-            if not s_idx: continue
-            step = 1#max(1, len(s_idx))
-            sampled_frames = s_idx[::step]
-            arr = sc.read_scaled_int16(dset, np.s_[sampled_frames])
-            if common_mask is not None:
-                m_arr = common_mask[sampled_frames]
-                valid_z = arr[(m_arr == 0) & ~np.isnan(arr)]
-            else:
-                valid_z = arr[~np.isnan(arr)]
-            if len(valid_z) > 0:
-                sensor_z_samples[s_name] = valid_z
-
-        # Also extract raw sliding_volume_map samples per sensor (masked by common_mask) to validate log-transformation
+        # =========================================================================
+        # EXACT POPULATION STREAMING (100% OF DATASET VOXELS ACROSS ALL FRAMES)
+        # =========================================================================
         raw_dset_path = '/HDFEOS/GRIDS/HARMONIZED/Data Fields/sliding_volume_map'
-        mask_dset_path = '/HDFEOS/GRIDS/HARMONIZED/Data Fields/common_mask'
-        sensor_raw_log_samples = {}
-        all_raw_log_list = []
-        if raw_dset_path in h5_file and mask_dset_path in h5_file:
-            raw_dset = h5_file[raw_dset_path]
-            mask_dset = h5_file[mask_dset_path]
+        has_raw = raw_dset_path in h5_file
+        raw_dset = h5_file[raw_dset_path] if has_raw else None
+
+        # --- PASS 1: Exact Counts, Means, and Global Range over 100% of Pixels ---
+        counts = np.zeros(total_frames, dtype=np.int64)
+        z_sum = {s: 0.0 for s in sensors}
+        z_count = {s: 0 for s in sensors}
+        log_sum = {s: 0.0 for s in sensors}
+        log_count = {s: 0 for s in sensors}
+        global_min_log = np.inf
+        global_max_log = -np.inf
+
+        for f_idx in range(total_frames):
+            grid_name = None
             for s_name, s_idx in sensors.items():
-                if not s_idx: continue
-                step = 1#max(1, len(s_idx))
-                sampled_frames = s_idx[::step]
-                raw_arr = sc.read_scaled_int16(raw_dset, np.s_[sampled_frames])
-                mask_arr = mask_dset[sampled_frames]
-                valid_raw = raw_arr[(mask_arr == 0) & ~np.isnan(raw_arr) & (raw_arr > 0)]
-                if len(valid_raw) > 0:
-                    log_v = np.log(valid_raw)
-                    sensor_raw_log_samples[s_name] = log_v
-                    all_raw_log_list.append(log_v)
-        raw_log_samples = np.concatenate(all_raw_log_list) if all_raw_log_list else np.array([])
+                if f_idx in s_idx:
+                    grid_name = s_name
+                    break
+            
+            m_arr = common_mask[f_idx, :, :] if common_mask is not None else None
+            # Standardized score frame
+            z_arr = sc.read_scaled_int16(dset, np.s_[f_idx, :, :])
+            if m_arr is not None:
+                valid_z = z_arr[(m_arr == 0) & ~np.isnan(z_arr)]
+            else:
+                valid_z = z_arr[~np.isnan(z_arr)]
+            counts[f_idx] = len(valid_z)
+            if len(valid_z) > 0 and grid_name:
+                z_sum[grid_name] += np.sum(valid_z.astype(np.float64))
+                z_count[grid_name] += len(valid_z)
+                
+            # Raw volume frame (log-transformed)
+            if raw_dset is not None:
+                raw_arr = sc.read_scaled_int16(raw_dset, np.s_[f_idx, :, :])
+                if m_arr is not None:
+                    valid_raw = raw_arr[(m_arr == 0) & ~np.isnan(raw_arr) & (raw_arr > 0)]
+                else:
+                    valid_raw = raw_arr[~np.isnan(raw_arr) & (raw_arr > 0)]
+                if len(valid_raw) > 0 and grid_name:
+                    log_v = np.log(valid_raw.astype(np.float64))
+                    log_sum[grid_name] += np.sum(log_v)
+                    log_count[grid_name] += len(log_v)
+                    f_min, f_max = np.min(log_v), np.max(log_v)
+                    if f_min < global_min_log: global_min_log = f_min
+                    if f_max > global_max_log: global_max_log = f_max
+
+        z_mean = {s: (z_sum[s] / z_count[s] if z_count[s] > 0 else np.nan) for s in sensors}
+        log_mean = {s: (log_sum[s] / log_count[s] if log_count[s] > 0 else np.nan) for s in sensors}
+
+        # Setup exact shared 90-bin histogram grids
+        num_bins = 90
+        bins_z = np.linspace(-4, 4, num_bins + 1)
+        bin_centers_z = 0.5 * (bins_z[:-1] + bins_z[1:])
+        bin_width_z = bins_z[1] - bins_z[0]
+
+        if not np.isfinite(global_min_log): global_min_log = -25.0
+        if not np.isfinite(global_max_log): global_max_log = 0.0
+        bins_log = np.linspace(global_min_log, global_max_log, num_bins + 1)
+        bin_centers_log = 0.5 * (bins_log[:-1] + bins_log[1:])
+        bin_width_log = bins_log[1] - bins_log[0]
+
+        # --- PASS 2: Exact Central Moments & Exact Histogram Bin Accumulation ---
+        hist_z = {s: np.zeros(num_bins, dtype=np.int64) for s in sensors}
+        hist_log = {s: np.zeros(num_bins, dtype=np.int64) for s in sensors}
+        z_dev2 = {s: 0.0 for s in sensors}
+        z_dev3 = {s: 0.0 for s in sensors}
+        z_dev4 = {s: 0.0 for s in sensors}
+        log_dev2 = {s: 0.0 for s in sensors}
+        log_dev3 = {s: 0.0 for s in sensors}
+        log_dev4 = {s: 0.0 for s in sensors}
+
+        for f_idx in range(total_frames):
+            grid_name = None
+            for s_name, s_idx in sensors.items():
+                if f_idx in s_idx:
+                    grid_name = s_name
+                    break
+            
+            m_arr = common_mask[f_idx, :, :] if common_mask is not None else None
+            # Standardized score
+            z_arr = sc.read_scaled_int16(dset, np.s_[f_idx, :, :])
+            if m_arr is not None:
+                valid_z = z_arr[(m_arr == 0) & ~np.isnan(z_arr)]
+            else:
+                valid_z = z_arr[~np.isnan(z_arr)]
+            if len(valid_z) > 0 and grid_name:
+                hz, _ = np.histogram(valid_z, bins=bins_z)
+                hist_z[grid_name] += hz
+                dev_z = valid_z.astype(np.float64) - z_mean[grid_name]
+                z_dev2[grid_name] += np.sum(dev_z**2)
+                z_dev3[grid_name] += np.sum(dev_z**3)
+                z_dev4[grid_name] += np.sum(dev_z**4)
+
+            # Raw volume
+            if raw_dset is not None:
+                raw_arr = sc.read_scaled_int16(raw_dset, np.s_[f_idx, :, :])
+                if m_arr is not None:
+                    valid_raw = raw_arr[(m_arr == 0) & ~np.isnan(raw_arr) & (raw_arr > 0)]
+                else:
+                    valid_raw = raw_arr[~np.isnan(raw_arr) & (raw_arr > 0)]
+                if len(valid_raw) > 0 and grid_name:
+                    log_v = np.log(valid_raw.astype(np.float64))
+                    hl, _ = np.histogram(log_v, bins=bins_log)
+                    hist_log[grid_name] += hl
+                    dev_l = log_v - log_mean[grid_name]
+                    log_dev2[grid_name] += np.sum(dev_l**2)
+                    log_dev3[grid_name] += np.sum(dev_l**3)
+                    log_dev4[grid_name] += np.sum(dev_l**4)
+
+        # Compute exact population distribution statistics
+        sensor_stats_z = {}
+        for s in sensors:
+            N = z_count[s]
+            if N >= 4:
+                var_z = z_dev2[s] / (N - 1)
+                std_z = np.sqrt(max(0.0, var_z))
+                skew_z = (z_dev3[s] / N) / (var_z ** 1.5) if var_z > 0 else 0.0
+                kurt_z = ((z_dev4[s] / N) / (var_z ** 2) - 3.0) if var_z > 0 else 0.0
+
+                # Exact Wasserstein distance to standard normal N(0, 1) using empirical CDF
+                cdf_emp_z = np.cumsum(hist_z[s]) / N
+                cdf_theo_z = stats.norm.cdf(bin_centers_z)
+                wd_z = np.sum(np.abs(cdf_emp_z - cdf_theo_z)) * bin_width_z
+
+                # Probability density histogram over 100% of data
+                pdf_z = hist_z[s] / (N * bin_width_z)
+                sensor_stats_z[s] = {
+                    'N': N, 'mean': z_mean[s], 'std': std_z, 'skew': skew_z, 'kurt': kurt_z,
+                    'wd': wd_z, 'pdf': pdf_z
+                }
+
+        sensor_stats_log = {}
+        for s in sensors:
+            N = log_count[s]
+            if N >= 4:
+                var_l = log_dev2[s] / (N - 1)
+                std_l = np.sqrt(max(0.0, var_l))
+                skew_l = (log_dev3[s] / N) / (var_l ** 1.5) if var_l > 0 else 0.0
+                kurt_l = ((log_dev4[s] / N) / (var_l ** 2) - 3.0) if var_l > 0 else 0.0
+
+                # Probability density histogram over 100% of data
+                pdf_l = hist_log[s] / (N * bin_width_log)
+                sensor_stats_log[s] = {
+                    'N': N, 'mean': log_mean[s], 'std': std_l, 'skew': skew_l, 'kurt': kurt_l,
+                    'pdf': pdf_l
+                }
 
     # Parse timelines
     dates = [datetime.fromtimestamp(ts, tz=timezone.utc) for ts in times]
@@ -364,34 +473,12 @@ def plot_global_stats(target_location=None, h5_path=None, location=None, metric=
     norm_pdf = (1.0 / np.sqrt(2 * np.pi)) * np.exp(-0.5 * z_grid**2)
     ax_dist_z.plot(z_grid, norm_pdf, 'k--', linewidth=2, label=r"Theoretical Normal $\mathcal{N}(0, 1)$", zorder=4)
 
-    for s_name, s_vals in sensor_z_samples.items():
-        if len(s_vals) == 0: continue
-        skew_val = stats.skew(s_vals)
-        kurt_val = stats.kurtosis(s_vals)
-        
-        # Distribution Distance
-        np.random.seed(42)
-        normal_ref = np.random.normal(0, 1, size=min(10000, len(s_vals)))
-        wd = stats.wasserstein_distance(s_vals, normal_ref)
-        
-        # Hypothesis Tests
-        try:
-            _, k2_p = stats.normaltest(s_vals)
-        except Exception:
-            k2_p = np.nan
-            
-        # Shapiro-Wilk (downsampled to 5000 to comply with SciPy limitations)
-        shapiro_sample = np.random.choice(s_vals, size=min(5000, len(s_vals)), replace=False)
-        try:
-            w_stat, _ = stats.shapiro(shapiro_sample)
-        except Exception:
-            w_stat = np.nan
-            
-        label_str = fr"{s_name} (Skew: {skew_val:.2f}, Kurt: {kurt_val:.2f}, WD: {wd:.3f})"
-        counts_hist, bins = np.histogram(s_vals, bins=90, range=(-4, 4), density=True)
-        bin_centers = 0.5 * (bins[:-1] + bins[1:])
+    for s_name in active_sensor_names:
+        if s_name not in sensor_stats_z: continue
+        st = sensor_stats_z[s_name]
+        label_str = fr"{s_name} (Skew: {st['skew']:.2f}, Kurt: {st['kurt']:.2f}, WD: {st['wd']:.3f})"
         s_color = colors.get(s_name, '#333333')
-        ax_dist_z.plot(bin_centers, counts_hist, color=s_color, linewidth=1.8, label=label_str, alpha=0.85)
+        ax_dist_z.plot(bin_centers_z, st['pdf'], color=s_color, linewidth=1.8, label=label_str, alpha=0.85)
 
     dist_title = "Standardized Log Spectral Complexity ($Z$-Score) Density" if metric == 'zscore' else ("Standardized Box-Cox Transformed Complexity Density" if metric == 'box_cox' else "Standardized Robust Scaled Complexity Density")
     ax_dist_z.set_title(dist_title, fontsize=11, fontweight='bold', pad=8)
@@ -403,31 +490,23 @@ def plot_global_stats(target_location=None, h5_path=None, location=None, metric=
     ax_dist_z.set_xlim(-4, 4)
 
     axes_log = []
-
-    # Determine global x-range across all log samples for consistent bin alignment
-    if len(raw_log_samples) > 0:
-        _, global_bins = np.histogram(raw_log_samples, bins=90)
-        x_min_log, x_max_log = global_bins[0], global_bins[-1]
-    else:
-        x_min_log, x_max_log = -15, 15
+    x_min_log, x_max_log = bins_log[0], bins_log[-1]
 
     for idx, s_name in enumerate(active_sensor_names):
         ax = fig3.add_subplot(gs3[idx, 1], sharex=axes_log[0] if idx > 0 else None)
         axes_log.append(ax)
 
         s_color = colors.get(s_name, '#333333')
-        if s_name in sensor_raw_log_samples and len(sensor_raw_log_samples[s_name]) > 0:
-            s_vals = sensor_raw_log_samples[s_name]
-            mu_s = np.mean(s_vals)
-            std_s = np.std(s_vals)
-            skew_s = stats.skew(s_vals)
-            kurt_s = stats.kurtosis(s_vals)
-            n_px = len(s_vals)
+        if s_name in sensor_stats_log:
+            stl = sensor_stats_log[s_name]
+            mu_s = stl['mean']
+            std_s = stl['std']
+            skew_s = stl['skew']
+            kurt_s = stl['kurt']
+            n_px = stl['N']
             n_frames = len(sensors.get(s_name, []))
 
-            counts_s, bins_s = np.histogram(s_vals, bins=90, range=(x_min_log, x_max_log), density=True)
-            bin_c_s = 0.5 * (bins_s[:-1] + bins_s[1:])
-            ax.plot(bin_c_s, counts_s, color=s_color, linewidth=2.0, label=r"Empirical $\ln V$", alpha=0.9)
+            ax.plot(bin_centers_log, stl['pdf'], color=s_color, linewidth=2.0, label=r"Empirical $\ln V$", alpha=0.9)
 
             grid_s = np.linspace(x_min_log, x_max_log, 200)
             fit_s = (1.0 / (std_s * np.sqrt(2 * np.pi))) * np.exp(-0.5 * ((grid_s - mu_s) / std_s)**2)

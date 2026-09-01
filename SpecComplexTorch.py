@@ -88,7 +88,7 @@ def calcGramLocalVolumes_QR_torch(endmembers, localization_vector):
     elif localization_vector.dim() == 2:
         localization_vector = localization_vector.unsqueeze(2)
         
-    # Localize (translate) the endmembers to the origin defined by localization_vector
+    # Localize the endmembers to the origin defined by localization_vector
     V = endmembers - localization_vector # (B, C, E)
     B, C, E = V.shape
     device = V.device

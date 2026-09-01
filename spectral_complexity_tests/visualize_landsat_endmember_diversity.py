@@ -60,7 +60,7 @@ def get_lat_lon(h5_ds, base_ds, pixel_y, pixel_x):
         x_geo = gt[0] + (pixel_x + 0.5) * gt[1] + (pixel_y + 0.5) * gt[2]
         y_geo = gt[3] + (pixel_x + 0.5) * gt[4] + (pixel_y + 0.5) * gt[5]
         spatial_ref_str = decode_str(spatial_ref)
-        crs = pyproj.CRS.from_wkt(spatial_ref_str)
+        crs = pyproj.CRS.from_user_input(spatial_ref_str)
         transformer = pyproj.Transformer.from_crs(crs, "epsg:4326", always_xy=True)
         lon, lat = transformer.transform(x_geo, y_geo)
         return float(lat), float(lon)

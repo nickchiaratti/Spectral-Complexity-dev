@@ -471,12 +471,17 @@ def generate_rgba_from_hsi(frame_data, wavelengths, low=0.5, high=99.5, gamma=1.
     # Compute relative weights for each band (Integration over wavelength)
     weights = np.column_stack((x_bar, y_bar, z_bar)) * ill_weights[:, np.newaxis]
     
-    # Normalize weights so that a perfectly white spectrum (all 1s) produces Y=100
+    # Apply a Von Kries white balance adaptation to the sensor's theoretical white point.
+    # This mathematically compensates for both the sensor's truncated spectral range 
+    # (e.g., missing deep blue bands) and irregular wavelength spacing (e.g., more red bands),
+    # forcing an equal-energy white object to exactly match the sRGB D65 reference white.
     white_spectrum = np.ones_like(wavelengths)
     XYZ_white = weights.T @ white_spectrum
     if XYZ_white[1] == 0:
         return np.zeros((height, width, 4), dtype=np.uint8)
-    weights = (weights / XYZ_white[1]) * 100.0  # Scale relative to Y (luminance)
+        
+    target_D65_white = np.array([0.95047, 1.00000, 1.08883], dtype=np.float32)
+    weights = weights * (target_D65_white / XYZ_white)
     
     # Apply CMFs to hyperspectral data (Matrix multiplication)
     spectra = frame_data.reshape(bands, -1)

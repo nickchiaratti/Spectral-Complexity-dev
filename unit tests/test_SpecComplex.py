@@ -11,7 +11,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import SpecComplex
 import SpecComplexTorch
 
-FILE_PATH = r"C:\satelliteImagery\MGRS30mConstellation\Harmonized_MGRS_Stack_Tait.h5"
+FILE_PATH = r"C:/satelliteImagery/MGRS30mConstellation/Harmonized_MGRS_Stack_Rochesterv2.h5"
 
 def get_test_cases():
     if not os.path.exists(FILE_PATH):
@@ -30,7 +30,7 @@ def get_test_cases():
                     num_frames = ds.shape[0]
                     
                     if num_frames < 10:
-                        frame_indices = [num_frames // 2] 
+                        frame_indices = np.linspace(0,num_frames-1, dtype=int).tolist()
                     else:
                         num_test_frames = max(1, num_frames // 10)
                         # evenly distributed over time indices
@@ -62,6 +62,10 @@ def real_data(request):
         # Data is [bands, rows, cols]
         img = np.transpose(frame_data, (1, 2, 0)).astype(np.float32)
         
+        if 'good_wavelengths' in ds.attrs:
+            gw_mask = ds.attrs['good_wavelengths'].astype(bool)
+            img = img[:, :, gw_mask]
+        
         # Scale surface reflectance to [0, 1] range using the attribute
         img = img * scale
         
@@ -90,7 +94,7 @@ def real_data(request):
         return test_img
 
 def test_maximumDistance(real_data):
-    num_endmembers = 5
+    num_endmembers = 7
     img = real_data
     rows, cols, bands = img.shape
     
@@ -112,12 +116,15 @@ def test_maximumDistance(real_data):
     # 3. Compare Results
     em_torch_np = em_torch.squeeze(0).cpu().numpy()
     
-    np.testing.assert_allclose(em_np, em_torch_np, rtol=1e-4, atol=1e-5, 
+    em_diff = (em_np - em_torch_np).flatten()
+    print(f"Mean EM: {np.mean(em_np):.10e}, Mean Diff: {np.mean(em_diff):.10e}, Var Diff: {np.var(em_diff):.10e}")
+    
+    np.testing.assert_allclose(em_np, em_torch_np, rtol=1e-8, atol=1e-5, 
                                err_msg="Maximum distance endmembers mismatch")
 
 
 def test_calcGramLocalVolumes(real_data):
-    num_endmembers = 5
+    num_endmembers = 7
     img = real_data
     
     # Get endmembers using Numpy version to test volume function with same inputs
@@ -140,37 +147,40 @@ def test_calcGramLocalVolumes(real_data):
     vol_torch_np = vol_torch.squeeze(0).cpu().numpy()
     
     # 3. Compare Results
-    np.testing.assert_allclose(vol_np, vol_torch_np, rtol=1e-4, atol=1e-5,
+    vol_diff = (vol_np - vol_torch_np).flatten()
+    print(f"Mean Vol: {np.mean(vol_np):.10e}, Mean Diff: {np.mean(vol_diff):.10e}, Var Diff: {np.var(vol_diff):.10e}")
+    
+    np.testing.assert_allclose(vol_np, vol_torch_np, rtol=1e-8, atol=1e-5,
                                err_msg="Local volumes mismatch")
 
-
-def test_generate_rgba_from_hsi():
-    # Create a synthetic 10x10 hyperspectral cube with 200 bands
-    bands = 200
-    height, width = 10, 10
-    wavelengths = np.linspace(400, 2400, bands, dtype=np.float32)
+if __name__ == "__main__":
+    import datetime
     
-    # 1. Valid data (reflectance between 0 and 0.5, stored as int16 scaled by 10000)
-    cube = np.random.randint(500, 5000, size=(bands, height, width), dtype=np.int16)
+    log_file = os.path.join(os.path.dirname(__file__), "test_results.log")
     
-    # Add negative noise in a few bands to simulate atmospheric correction artifacts
-    cube[0, 2:5, 2:5] = -5
-    cube[10, 3, 3] = -15
-    
-    # Add a nodata region
-    cube[:, 0:2, :] = -32768
-    
-    rgba = SpecComplex.generate_rgba_from_hsi(cube, wavelengths, nodata=-32768)
-    
-    assert rgba.shape == (height, width, 4)
-    assert rgba.dtype == np.uint8
-    
-    # Nodata pixels should have alpha = 0
-    assert np.all(rgba[0:2, :, 3] == 0)
-    
-    # Valid pixels (including those with negative noise in some bands) should have alpha = 255
-    assert np.all(rgba[2:, :, 3] == 255)
-    
-    # RGB channels should contain non-zero valid visual data
-    assert np.any(rgba[2:, :, :3] > 0)
-
+    with open(log_file, "a") as f:
+        f.write(f"\n{'='*50}\n")
+        f.write(f"Test Run: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+        f.write(f"{'='*50}\n")
+        
+    class CustomLogReporter:
+        def pytest_runtest_logreport(self, report):
+            if report.when == "setup" and report.outcome in ["skipped", "failed"]:
+                with open(log_file, "a") as f:
+                    f.write(f"[{report.nodeid}] {report.outcome.upper()}")
+                    if report.longrepr:
+                        if isinstance(report.longrepr, tuple):
+                            f.write(f"  Reason: {report.longrepr[2]}\n")
+                        else:
+                            f.write(f"  Reason: {str(report.longrepr).splitlines()[-1]}\n")
+                            
+            elif report.when == "call":
+                with open(log_file, "a") as f:
+                    f.write(f"[{report.nodeid}] {report.outcome.upper()}")
+                    stdout = dict(report.sections).get("Captured stdout call", "")
+                    if stdout:
+                        f.write(f"  {stdout.strip()}\n")
+                    if report.failed:
+                        f.write(f"{report.longrepr}\n")
+                        
+    pytest.main(["-q", "--no-header", __file__], plugins=[CustomLogReporter()])

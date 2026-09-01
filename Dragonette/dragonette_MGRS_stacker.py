@@ -13,7 +13,7 @@ from datetime import datetime
 import rasterio
 from PIL import Image
 
-LOCATION='Tait'
+LOCATION='Rochesterv2'
 # Add parent folder to sys.path to find SpecComplex
 script_dir = Path(__file__).resolve().parent
 if str(script_dir.parent) not in sys.path:
@@ -268,7 +268,17 @@ def process_dragonette_mgrs_stack(target_location):
             ds_common_mask[t_idx, ...] = invalid_mask
 
             # Ortho visual (RGBA)
-            rgba_img = sc.generate_rgba_from_hsi(frame_data=incoming_rad, wavelengths=base_wv, nodata=rad_nodata)
+            # Dragonette is multispectral, so simply extract standard RGB bands
+            r_idx = np.argmin(np.abs(base_wv - 650.0))
+            g_idx = np.argmin(np.abs(base_wv - 550.0))
+            b_idx = np.argmin(np.abs(base_wv - 470.0))
+            
+            rgba_img = sc.generate_rgba_image(
+                r_band=incoming_rad[r_idx, :, :],
+                g_band=incoming_rad[g_idx, :, :],
+                b_band=incoming_rad[b_idx, :, :],
+                nodata=rad_nodata
+            )
             ds_vis[t_idx, ...] = np.transpose(rgba_img, (2, 0, 1))
             
             # Store metadata

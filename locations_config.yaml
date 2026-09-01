@@ -159,13 +159,13 @@ locations:
     ROI_LON_MAX: -119.549103
     ROI_LAT_MIN: 34.389913
     ROI_LAT_MAX: 35.163705
-    START_DATE: '2022-01-01'
+    START_DATE: '2020-01-01'
     END_DATE: '2026-08-01'
-    TANAGER_AVAILABLE: false
-    DRAGONETTE_AVAILABLE: false
+    TANAGER_AVAILABLE: true
+    TANAGER_STAC_URL: https://www.planet.com/data/stac/browser/tanager-core-imagery/natural-lands/collection.json
+    DRAGONETTE_AVAILABLE: true
+    DRAGONETTE_STAC_URL: https://wyvern-odp.com/application/spatio_temporal/collection.json
     ENMAP_AVAILABLE: true
-
-
     MGRS_EPSG: 32611
     MGRS_UL_X: 222570.0
     MGRS_UL_Y: 3895380.0

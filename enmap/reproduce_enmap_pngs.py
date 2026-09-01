@@ -10,10 +10,11 @@ from PIL import Image
 from tqdm import tqdm
 
 # Add project root to sys.path
+LOCATION='Rochesterv2'
 sys.path.insert(0, r"f:\Resilio\IMGS 890 Research\Spectral-Complexity-dev")
 import SpecComplex as sc
 
-def reproduce_pngs(location="SantaBarbara"):
+def reproduce_pngs(location="SantaBarabara"):
     h5_path = rf"C:\satelliteImagery\enmap\EnMAP_MGRS_Stack_{location}.h5"
     out_dir = rf"C:\satelliteImagery\Enmap\{location}_SourceData"
     os.makedirs(out_dir, exist_ok=True)
@@ -76,7 +77,7 @@ def reproduce_pngs(location="SantaBarbara"):
                 frame_data=frame_data,
                 wavelengths=wavelengths,
                 nodata=nodata_val,
-                scale=0.0001
+                scale=sr_ds.attrs.get('scale_to_float', sr_ds.attrs.get('scale_factor', 0.0001))
             )
             
             # 3. Save clean RGB PNG
@@ -100,4 +101,4 @@ def reproduce_pngs(location="SantaBarbara"):
     print(f"\nSuccessfully regenerated all {n_times} RGB and RGB_masked PNG previews in {out_dir}.")
 
 if __name__ == "__main__":
-    reproduce_pngs("SantaBarbara")
+    reproduce_pngs(LOCATION)

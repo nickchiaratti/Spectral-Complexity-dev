@@ -48,7 +48,7 @@ def plot_pixel_sits(pixel_y, pixel_x, source_h5_path, inference_results_h5, ax=N
                 else:
                     spatial_ref_str = str(spatial_ref)
 
-                crs = pyproj.CRS.from_wkt(spatial_ref_str)
+                crs = pyproj.CRS.from_user_input(spatial_ref_str)
                 transformer = pyproj.Transformer.from_crs(crs, "epsg:4326", always_xy=True)
                 lon, lat = transformer.transform(x_geo, y_geo)
             except Exception as e:
