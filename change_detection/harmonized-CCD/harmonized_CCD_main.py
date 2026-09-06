@@ -40,7 +40,7 @@ def tqdm_joblib(tqdm_object):
 # 1. CONFIGURATION
 # ==========================================
 # Input/Output
-LOCATION = "SantaBarbara"
+LOCATION = "CentralGreece"
 
 def get_source_h5_path(location):
     candidates = [

@@ -126,6 +126,9 @@ def process_tanager_swaths_to_grid(h5f, tanager_source_dir, master_height, maste
                     for name in df_grp.keys():
                         if chunk_idx == 0:
                             for attr_name, attr_val in df_grp[name].attrs.items():
+                                # Tanager data is natively float32, ignore any scale factors from JPL ENVI header
+                                if attr_name in ['scale_to_float', 'scale_factor'] and df_grp[name].dtype.kind == 'f':
+                                    continue
                                 if attr_name not in grp_tanager[name].attrs:
                                     grp_tanager[name].attrs[attr_name] = attr_val
                         is_3d = len(grp_tanager[name].shape) == 4
@@ -240,7 +243,7 @@ def process_tanager_swaths_to_grid(h5f, tanager_source_dir, master_height, maste
             sr_fill = sr_dset_ref.fillvalue
             if isinstance(sr_fill, (np.ndarray, list)): sr_fill = sr_fill[0]
             for out_idx in range(total_num_frames):
-                rgba_img = sc.generate_rgba_from_hsi(frame_data=sr_dset_ref[out_idx, :, :, :], wavelengths=master_wv)
+                rgba_img = sc.generate_rgba_from_hsi(frame_data=sr_dset_ref[out_idx, :, :, :], wavelengths=master_wv, nodata=sr_fill)
                 ortho_vis_dset[out_idx, ...] = np.transpose(rgba_img, (2, 0, 1))
         
         return datasets_created_info, total_num_frames, band_count

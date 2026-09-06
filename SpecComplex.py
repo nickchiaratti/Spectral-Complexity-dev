@@ -2,6 +2,8 @@ import numpy as np
 import warnings
 from scipy import ndimage
 from sklearn.preprocessing import PowerTransformer, RobustScaler
+from scipy.ndimage import uniform_filter
+from warnings import simplefilter
 
 def get_landsat_mask(data_grp, f_idx, shape, 
                      sun_elevation_threshold=30, 
@@ -329,6 +331,275 @@ def calcGramLocalVolumes(endmembers, localization_vector):
         volumes[i-1] = np.sqrt(det)
         
     return volumes
+
+
+def maximumDistance_volumes(pixels, num_endmembers, return_heights=False):
+    """
+    Combined endmember extraction and Gram volume estimation in a single
+    iterative Orthogonal Subspace Projection (OSP) pass.
+
+    Localizes the pixel neighborhood by subtracting the minimum-norm pixel
+    (the local origin), then iteratively selects endmembers by largest
+    orthogonal projection distance while recording the heights needed for 
+    the volume curve.
+
+    Rejects inputs containing any NaN values.
+
+    Args:
+        pixels:  ndarray of shape (bands, num_pixels) or 3D patch (H, W, bands).
+                 If 2D, each column is one pixel's spectral signature.
+        num_endmembers:  int, total number of endmembers to extract (k).
+                         Must be <= num_pixels.
+        return_heights:  bool, optional. If True, also returns the orthogonal
+                         projection heights (h_n) array of shape (num_endmembers,).
+
+    Returns:
+        endmembers:  ndarray of shape (bands, num_endmembers).
+                     Raw (non-localized) endmember spectra.
+                     Column 0 = max-norm pixel, column 1 = min-norm pixel (origin).
+        volumes:     ndarray of shape (num_endmembers,).
+                     Localized Gram volume curve.
+                     volumes[0] = 0   (origin contributes no volume),
+                     volumes[1] = h_1,
+                     volumes[j] = h_1 * h_2 * ... * h_j   for j >= 1.
+        heights:     (Only if return_heights=True) ndarray of shape (num_endmembers,).
+                     Orthogonal projection heights (h_n). heights[0] = 0, heights[1] = h_1,
+                     heights[j] = h_j for j >= 1.
+    """
+    nan_return = (
+        (np.full((pixels.shape[-1] if pixels.ndim == 3 else pixels.shape[0], num_endmembers), np.nan),
+         np.full(num_endmembers, np.nan),
+         np.full(num_endmembers, np.nan))
+        if return_heights else
+        (np.full((pixels.shape[-1] if pixels.ndim == 3 else pixels.shape[0], num_endmembers), np.nan),
+         np.full(num_endmembers, np.nan))
+    )
+
+    if pixels.ndim == 3:
+        h, w, num_bands = pixels.shape
+        if np.isnan(pixels).any():
+            return nan_return
+        pixels = np.reshape(pixels, (h * w, num_bands), order="F").astype(np.float32).T
+    elif pixels.ndim == 2:
+        if np.isnan(pixels).any():
+            return nan_return
+
+    num_bands, num_pixels = pixels.shape
+
+    if num_pixels < num_endmembers:
+        return nan_return
+
+    # --- Identify the two seed pixels by spectral magnitude ---
+    magnitudes = np.linalg.norm(pixels, axis=0)
+    idx_maxnorm = np.argmax(magnitudes)
+    idx_minnorm = np.argmin(magnitudes)
+
+    # Store raw endmembers in extraction order
+    endmembers = np.zeros((num_bands, num_endmembers), dtype=pixels.dtype)
+    endmembers[:, 0] = pixels[:, idx_maxnorm]
+    endmembers[:, 1] = pixels[:, idx_minnorm]
+
+    # --- Localize: shift so the min-norm pixel is at the origin ---
+    origin = pixels[:, idx_minnorm].reshape(-1, 1)    # (bands, 1)
+    residuals = pixels - origin                        # (bands, num_pixels)
+
+    # --- Prepare volume and height output ---
+    volumes = np.zeros(num_endmembers, dtype=np.float64)
+    if return_heights:
+        heights = np.zeros(num_endmembers, dtype=np.float64)
+
+    selected = np.zeros(num_pixels, dtype=bool)
+    selected[idx_minnorm] = True
+    selected[idx_maxnorm] = True
+
+    # --- First endmember: the localized max-norm pixel ---
+    v = residuals[:, idx_maxnorm].copy()
+    h = np.linalg.norm(v)
+    volumes[1] = h
+    if return_heights:
+        heights[1] = h
+
+    # Project all pixels into the subspace orthogonal to v
+    if h > 1e-12:
+        # OSP projection component: d(d^T d)^-1 d^T X
+        proj_component = np.outer(v, np.dot(v, residuals) / (h ** 2))
+        residuals -= proj_component
+
+    # --- Iteratively extract remaining endmembers ---
+    for j in range(2, num_endmembers):
+        # Magnitudes of unselected pixels in the current orthogonal subspace
+        residual_mag = np.sum(residuals ** 2, axis=0)  # (num_pixels,)
+        residual_mag[selected] = -np.inf
+
+        idx_new = np.argmax(residual_mag)
+        endmembers[:, j] = pixels[:, idx_new]
+        selected[idx_new] = True
+
+        # The orthogonal distance is the magnitude of the projected vector
+        v = residuals[:, idx_new].copy()
+        h = np.linalg.norm(v)
+
+        # Volume is the cumulative product of orthogonal heights
+        volumes[j] = volumes[j - 1] * h
+        if return_heights:
+            heights[j] = h
+
+        # Project all pixels into the subspace orthogonal to the new endmember
+        if h > 1e-12:
+            proj_component = np.outer(v, np.dot(v, residuals) / (h ** 2))
+            residuals -= proj_component
+
+    if return_heights:
+        return endmembers, volumes, heights
+    return endmembers, volumes
+
+def maximumDistance_volumes_test(pixels, num_endmembers):
+    """
+    Test version of maximumDistance_volumes that returns orthogonal heights (h_n).
+    """
+    return maximumDistance_volumes(pixels, num_endmembers, return_heights=True)
+
+maximumDistance_volumes_heights = maximumDistance_volumes_test
+
+def SMACC_volumes(pixels, num_endmembers):
+    """
+    Sequential Maximum Angle Convex Cone (SMACC) endmember extraction with
+    localized parallelotope volume estimation at each step.
+
+    The algorithm first localizes the data by translating all pixels by the
+    minimum-norm pixel value (setting it as the origin). This eliminates volume
+    inflation from nonexistent spectral ranges. It then proceeds with standard
+    SMACC endmember extraction on this translated data.
+
+    Unlike maximumDistance_volumes, this function does NOT return the
+    minimum-norm pixel as an extracted endmember. All `num_endmembers` are
+    actively selected by SMACC. The volume at step `j` is the volume of the
+    parallelotope formed by the first `j+1` localized SMACC endmembers.
+
+    Rejects inputs containing any NaN values.
+
+    Args:
+        pixels:  ndarray of shape (bands, num_pixels) or 3D patch (H, W, bands).
+                 If 2D, each column is one pixel's spectral signature.
+        num_endmembers:  int, total number of endmembers to extract (k).
+                         Must be <= num_pixels.
+
+    Returns:
+        endmembers:  ndarray of shape (bands, num_endmembers).
+                     Raw (non-localized) endmember spectra.
+                     Column 0 = first SMACC endmember (max-norm of translated data).
+        volumes:     ndarray of shape (num_endmembers,).
+                     Localized parallelotope volume curve.
+                     volumes[0] = ||e_0 - origin||,
+                     volumes[j] = prod |R_ii| from QR of origin-centered
+                                  endmember vectors up to j.
+    """
+    # ── Input validation and reshaping ────────────────────────────────
+    if pixels.ndim == 3:
+        h, w, num_bands = pixels.shape
+        if np.isnan(pixels).any():
+            return np.full((num_bands, num_endmembers), np.nan), np.full(num_endmembers, np.nan)
+        pixels = np.reshape(pixels, (h * w, num_bands), order="F").astype(np.float32).T
+    elif pixels.ndim == 2:
+        if np.isnan(pixels).any():
+            return np.full((pixels.shape[0], num_endmembers), np.nan), np.full(num_endmembers, np.nan)
+
+    num_bands, num_pixels = pixels.shape
+
+    if num_pixels < num_endmembers or num_endmembers < 1:
+        return np.full((num_bands, num_endmembers), np.nan), np.full(num_endmembers, np.nan)
+
+    # ── Localization: Translate by minimum-norm pixel ─────────────────
+    magnitudes = np.linalg.norm(pixels, axis=0)
+    idx_minnorm = np.argmin(magnitudes)
+    idx_maxnorm = np.argmax(magnitudes)                                # computed prior to translation
+    origin = pixels[:, idx_minnorm].reshape(-1, 1)                     # (bands, 1)
+    
+    # residuals will track h_j^n in the localized space
+    residuals = (pixels - origin).copy()                               # (bands, num_pixels)
+
+    # ── Output arrays and state ───────────────────────────────────────
+    endmembers = np.zeros((num_bands, num_endmembers), dtype=pixels.dtype)
+    volumes = np.zeros(num_endmembers, dtype=np.float64)
+    loc_vecs = np.zeros((num_bands, num_endmembers), dtype=np.float64)
+    
+    # SMACC abundance matrix: F[k, j] = abundance of endmember k in pixel j
+    F = np.zeros((num_endmembers, num_pixels), dtype=np.float64)
+
+    # ── Iterative SMACC extraction on localized data ──────────────────
+    for n in range(num_endmembers):
+        if n == 0:
+            # First endmember uses standard SMACC initialization (raw max-norm)
+            idx_new = idx_maxnorm
+        else:
+            # Subsequent endmembers select pixel with maximum unexplained residual norm
+            res_norms_sq = np.sum(residuals ** 2, axis=0)              # (num_pixels,)
+            idx_new = np.argmax(res_norms_sq)
+
+        endmembers[:, n] = pixels[:, idx_new]                          # raw spectrum
+        loc_vecs[:, n] = (pixels[:, idx_new] - origin.ravel()).astype(np.float64) # localized vector
+
+        # ── Volume via QR on origin-centered localized vectors ────────
+        if n == 0:
+            volumes[0] = np.linalg.norm(loc_vecs[:, 0])
+        else:
+            _, R = np.linalg.qr(loc_vecs[:, :n+1])                     # (bands, n+1) → R (n+1, n+1)
+            volumes[n] = np.prod(np.abs(np.diag(R)))
+
+        # Skip projection update after the last endmember
+        if n == num_endmembers - 1:
+            break
+
+        # ── SMACC oblique projection ──────────────────────────────────
+        w = residuals[:, idx_new].copy()                               # (bands,)
+        w_dot_w = np.dot(w, w)
+
+        if w_dot_w < 1e-24:
+            continue
+
+        # Unconstrained projection: O_{n,j} = (w^T h_j^{n-1}) / (w^T w)
+        O = np.dot(w, residuals) / w_dot_w                            # (num_pixels,)
+
+        # Oblique scaling factor alpha_{n,j}: ensures F_{k,j}^n >= 0
+        if n == 0:
+            # First endmember: no previous constraints
+            alpha = np.where(O > 0, 1.0, 0.0)
+        else:
+            f_ref = F[:n, idx_new].copy()                              # (n,)
+            active_k = f_ref > 0
+
+            alpha = np.zeros(num_pixels, dtype=np.float64)
+            pos_mask = O > 0
+
+            if np.any(pos_mask):
+                if not np.any(active_k):
+                    alpha[pos_mask] = 1.0
+                else:
+                    f_ref_active = f_ref[active_k]                         # (n_active,)
+                    F_prev_active = F[:n, :][active_k]                     # (n_active, num_pixels)
+                    F_pos = F_prev_active[:, pos_mask]                     # (n_active, P_pos)
+                    O_pos = O[pos_mask]                                    # (P_pos,)
+
+                    denominators = f_ref_active[:, None] * O_pos[None, :]  # (n_active, P_pos)
+                    ratios = F_pos / denominators                          # (n_active, P_pos)
+                    v_min = ratios.min(axis=0)                             # (P_pos,)
+
+                    alpha[pos_mask] = np.clip(v_min, 0.0, 1.0)
+
+        # New abundance: F_{n,j}^n = alpha * O
+        F_new = alpha * O                                              # (num_pixels,)
+
+        # Update previous abundances: F_{k,j}^n = F_{k,j}^{n-1} - f_ref[k] * F_{n,j}^n
+        if n > 0:
+            F[:n, :] -= f_ref[:, None] * F_new[None, :]
+
+        # Assign new endmember abundance row
+        F[n, :] = F_new
+
+        # Update residuals: h_j^n = h_j^{n-1} - w_n * F_{n,j}^n
+        residuals -= np.outer(w, F_new)
+
+    return endmembers, volumes
 
 def load_scaled_reflectance(dataset, slice_obj=np.s_[...]):
     """
@@ -701,29 +972,20 @@ def process_volume_tiles(frame_data, tile_size, num_endmembers, gram_type, norm_
     
     return output_map
 
-def process_volume_sliding_tile(frame_data, tile_size, stride, num_endmembers, gram_type, norm_type):
+def process_volume_sliding_tile(frame_data, tile_size, stride, num_endmembers):
     """
     Sliding window processing.
     Strict Validity: Window is only processed if ALL pixels are valid.
     Output is masked with NaN for any pixel identified as invalid.
     """
-    #print("Calculating Sliding Window Spectral Complexity")
     bands, height, width = frame_data.shape
     img = np.transpose(frame_data, (1, 2, 0))
     
-    sum_map = np.zeros((height, width), dtype=np.float32)
-    count_map = np.zeros((height, width), dtype=np.int8)
-    #if gram_type == 'datasetMean':
-    #    print("Localizing Gram to dataset mean")
-    #elif gram_type == 'minEndmember':
-    #    print("Localizing Gram to second endmember")
-    #else:
-    #    print("Localizing Gram to 0")
-#
-    #if norm_type == 'bandCount':
-    #    print(f"Normalizing Endmembers by √{bands}")
-    #else:
-    #    print("No Endmember Normalization Applied")
+    out_h = (height - tile_size) // stride + 1
+    out_w = (width - tile_size) // stride + 1
+    center_offset = tile_size // 2
+    
+    neighborhood_map = np.full((height, width), np.nan, dtype=np.float32)
     
     for y_start in range(0, height - tile_size + 1, stride):
         for x_start in range(0, width - tile_size + 1, stride):
@@ -735,32 +997,92 @@ def process_volume_sliding_tile(frame_data, tile_size, stride, num_endmembers, g
             if np.isnan(tile).any():
                 continue
                 
-            meanVector = tile.mean(axis=(0, 1))
-            # Pass strict_nan=True as an additional safeguard
-            endmembers, _ = maximumDistance(tile, num_endmembers, strict_nan=True)
-            if np.isnan(endmembers).any():
-                    continue
-            localizationVec = endmembers[:,1]
-
-            if gram_type == 'datasetMean':
-                volume = calcGramLocalVolumes(endmembers,meanVector)
-            elif gram_type == 'minEndmember':
-                remainingEndmembers = np.delete(endmembers,1,axis=1)
-                volume = calcGramLocalVolumes(remainingEndmembers,localizationVec)
-                volume = np.insert(volume,0,0.0)
-            else:
-                volume = calcGramLocalVolumes(endmembers,np.zeros(bands))
-
-            if norm_type == 'bandCount':
-                m_array = np.arange(1, len(volume) + 1)
-                volume = volume / np.power(bands, (m_array / 2.0))
-
-            vol_val = np.max(volume[2:])
-
-            sum_map[y_start:y_end, x_start:x_end] += vol_val
-            count_map[y_start:y_end, x_start:x_end] += 1
+            tile_flat = np.reshape(tile, (tile_size * tile_size, bands), order="F").T
+            endmembers, volumes = maximumDistance_volumes(tile_flat, num_endmembers)
             
-    return sum_map / count_map
+            if len(volumes) > 2:
+                vol_val = np.max(volumes[2:])
+            else:
+                vol_val = 0.0
+                
+            cy = y_start + center_offset
+            cx = x_start + center_offset
+            neighborhood_map[cy, cx] = vol_val
+
+    clean_neighborhood = np.nan_to_num(neighborhood_map, nan=0.0)
+    valid_binary = ~np.isnan(neighborhood_map)
+    
+    sum_map = uniform_filter(clean_neighborhood, size=tile_size, mode='constant', cval=0.0) 
+    count_map = uniform_filter(valid_binary.astype(np.float32), size=tile_size, mode='constant', cval=0.0)
+    
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=RuntimeWarning)
+        final_map = np.where(count_map > 0, sum_map / count_map, np.nan)
+        
+    return final_map, neighborhood_map
+
+
+def SMACC_sliding_volume(frame_data, tile_size, stride, num_endmembers):
+    """
+    Sliding window processing using SMACC endmember extraction and localized
+    parallelotope volume estimation.
+    Strict Validity: Window is only processed if ALL pixels are valid.
+    Output is masked with NaN for any pixel identified as invalid.
+
+    Args:
+        frame_data (np.ndarray): Input array of shape [bands, height, width].
+        tile_size (int): Size of the square sliding window tile.
+        stride (int): Stride step size between window positions.
+        num_endmembers (int): Number of endmembers to extract.
+
+    Returns:
+        final_map (np.ndarray): Uniform-filter smoothed complexity map [height, width].
+        neighborhood_map (np.ndarray): Center-pixel complexity map [height, width].
+    """
+    bands, height, width = frame_data.shape
+    img = np.transpose(frame_data, (1, 2, 0))
+    
+    out_h = (height - tile_size) // stride + 1
+    out_w = (width - tile_size) // stride + 1
+    center_offset = tile_size // 2
+    
+    neighborhood_map = np.full((height, width), np.nan, dtype=np.float32)
+    
+    for y_start in range(0, height - tile_size + 1, stride):
+        for x_start in range(0, width - tile_size + 1, stride):
+            y_end, x_end = y_start + tile_size, x_start + tile_size
+            
+            tile = img[y_start:y_end, x_start:x_end, :]
+            
+            # Pre-emptive validity check to prevent inpainting/smearing
+            if np.isnan(tile).any():
+                continue
+                
+            tile_flat = np.reshape(tile, (tile_size * tile_size, bands), order="F").T
+            endmembers, volumes = SMACC_volumes(tile_flat, num_endmembers)
+            
+            # In SMACC_volumes, volumes[0] is 1D length (||e_0 - origin||) and
+            # volumes[1:] represent 2D+ parallelotope volumes (analogous to volumes[2:] in maximumDistance_volumes)
+            if len(volumes) > 1:
+                vol_val = np.max(volumes[1:])
+            else:
+                vol_val = 0.0
+                
+            cy = y_start + center_offset
+            cx = x_start + center_offset
+            neighborhood_map[cy, cx] = vol_val
+
+    clean_neighborhood = np.nan_to_num(neighborhood_map, nan=0.0)
+    valid_binary = ~np.isnan(neighborhood_map)
+    
+    sum_map = uniform_filter(clean_neighborhood, size=tile_size, mode='constant', cval=0.0) 
+    count_map = uniform_filter(valid_binary.astype(np.float32), size=tile_size, mode='constant', cval=0.0)
+    
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=RuntimeWarning)
+        final_map = np.where(count_map > 0, sum_map / count_map, np.nan)
+        
+    return final_map, neighborhood_map
 
 
 def plot_endmember_locations(image_cube, rgb_image, endmember_indices, endmembers):

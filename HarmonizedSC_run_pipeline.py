@@ -135,12 +135,21 @@ def main():
             func(h5_path=calc_output_path)
             continue
         elif name == "plot_sliding_volume_global_stats":
-            print(f"Plotting sliding volume global stats (zscore) for {location_name}...")
-            func(h5_path=calc_output_path, metric='zscore')
-            print(f"Plotting sliding volume global stats (robust) for {location_name}...")
-            func(h5_path=calc_output_path, metric='robust')
-            print(f"Plotting sliding volume global stats (box_cox) for {location_name}...")
-            func(h5_path=calc_output_path, metric='box_cox')
+            import h5py
+            with h5py.File(calc_output_path, 'r') as h5f:
+                if '/HDFEOS/GRIDS/HARMONIZED/Data Fields' in h5f:
+                    data_fields = h5f['/HDFEOS/GRIDS/HARMONIZED/Data Fields'].keys()
+                else:
+                    data_fields = []
+                    
+            metrics_to_plot = []
+            if 'sliding_volume_z_score' in data_fields: metrics_to_plot.append('zscore')
+            if 'sliding_volume_robust_scale' in data_fields: metrics_to_plot.append('robust')
+            if 'sliding_volume_box_cox' in data_fields: metrics_to_plot.append('box_cox')
+            
+            for m in metrics_to_plot:
+                print(f"Plotting sliding volume global stats ({m}) for {location_name}...")
+                func(h5_path=calc_output_path, metric=m)
             continue
         elif name == "plot_cross_sensor_correlations":
             print(f"Plotting cross-sensor correlation summary for {location_name}...")

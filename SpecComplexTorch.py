@@ -1,6 +1,7 @@
 import torch
 import numpy as np
 import warnings
+from scipy.ndimage import uniform_filter
 
 def maximumDistance_torch(data, num_endmembers, valid_pixel_mask):
     """
@@ -68,8 +69,7 @@ def maximumDistance_torch(data, num_endmembers, valid_pixel_mask):
         endmembers[:, :, i] = data[b_idx, :, idx2]
         
     return endmembers
-
-
+    
 def calcGramLocalVolumes_QR_torch(endmembers, localization_vector):
     """
     Batched, GPU-accelerated Simplex Volumes using Vectorized Modified Gram-Schmidt (MGS).
@@ -110,8 +110,140 @@ def calcGramLocalVolumes_QR_torch(endmembers, localization_vector):
     
     return volumes
 
+def maximumDistance_volumes_torch(img_cube, num_endmembers, return_heights=False):
+    """
+    Combined MaxD endmember extraction and localized Gram volume calculation
+    in a single iterative Orthogonal Subspace Projection (OSP) pass. 
+    Localizes the pixel neighborhood to the minimum-norm pixel, then iteratively 
+    selects endmembers by maximum orthogonal projection distance while 
+    simultaneously recording the heights needed for the Gram volume curve.
 
-def process_volume_sliding_tile(frame_data, tile_size, stride, num_endmembers, gram_type, norm_type):
+    Args:
+        img_cube: Tensor of shape (B, C, N) [Batch, Bands, Pixels]
+        num_endmembers: int, total number of endmembers to extract (k).
+                        The min-norm pixel consumes one slot as the local origin,
+                        so (k-1) orthogonal heights are produced.
+        return_heights: bool, optional. If True, also returns the orthogonal 
+                        projection heights (h_n) array of shape (B, num_endmembers).
+    Returns:
+        endmembers: Tensor of shape (B, C, num_endmembers) — raw (non-localized)
+                    endmember spectra, ordered identically to maximumDistance_torch.
+                    Index 0 is max-norm, index 1 is min-norm (the local origin).
+        volumes: Tensor of shape (B, num_endmembers) — the localized Gram volume
+                 curve. volumes[:, 0] = 0 (the origin has zero volume),
+                 volumes[:, 1] = h_1, volumes[:, 2] = h_1*h_2, etc.
+        heights: (Only if return_heights=True) Tensor of shape (B, num_endmembers) —
+                 the orthogonal projection heights (h_n). heights[:, 0] = 0 (origin),
+                 heights[:, 1] = h_1, heights[:, j] = h_j for j >= 1.
+    """
+    B, C, N = img_cube.shape
+    device = img_cube.device
+    dtype = img_cube.dtype
+
+    # --- Identify the two seed endmembers (max-norm and min-norm) ---
+    magnitude_sq = torch.sum(img_cube ** 2, dim=1)  # (B, N)
+
+    idx_maxnorm = torch.argmax(magnitude_sq, dim=1)
+    idx_minnorm = torch.argmin(magnitude_sq, dim=1)
+
+    b_idx = torch.arange(B, device=device)
+
+    # Store raw (non-localized) endmembers in extraction order
+    endmembers = torch.zeros(B, C, num_endmembers, dtype=dtype, device=device)
+    endmembers[:, :, 0] = img_cube[b_idx, :, idx_maxnorm]
+    endmembers[:, :, 1] = img_cube[b_idx, :, idx_minnorm]
+
+    # --- Localize: translate entire neighborhood so min-norm pixel is at origin ---
+    origin = img_cube[b_idx, :, idx_minnorm].unsqueeze(2)  # (B, C, 1)
+    local_img_cube = img_cube - origin  # (B, C, N)
+
+    # --- Prepare volume and height output ---
+    # volumes[:, 0] = 0 (origin contributes no volume)
+    # volumes[:, j] for j >= 1 is the cumulative product of heights h_1..h_{j}
+    volumes = torch.zeros(B, num_endmembers, dtype=dtype, device=device)
+    if return_heights:
+        heights = torch.zeros(B, num_endmembers, dtype=dtype, device=device)
+
+    # --- First endmember (max-norm pixel, already identified) ---
+    v_first = local_img_cube[b_idx, :, idx_maxnorm]  # (B, C)
+    h1 = torch.norm(v_first, dim=1)  # (B,)
+    volumes[:, 1] = h1
+    if return_heights:
+        heights[:, 1] = h1
+
+    # Project all pixels into the subspace orthogonal to v_first
+    h1_sq = h1 ** 2
+    pseudo = torch.where(
+        (h1_sq > 1e-12).unsqueeze(1),
+        v_first / h1_sq.unsqueeze(1),
+        torch.zeros_like(v_first)
+    )
+    # OSP projection component: d(d^T d)^-1 d^T X
+    proj_coef = torch.bmm(pseudo.unsqueeze(1), local_img_cube)  # (B, 1, N)
+    local_img_cube -= torch.bmm(v_first.unsqueeze(2), proj_coef)  # (B, C, N)
+
+    # Track which pixels have already been selected as endmembers
+    selected_mask = torch.zeros(B, N, dtype=torch.bool, device=device)
+    selected_mask[b_idx, idx_minnorm] = True
+    selected_mask[b_idx, idx_maxnorm] = True
+
+    # --- Iterative extraction of remaining endmembers ---
+    for i in range(2, num_endmembers):
+        # Find the unselected valid pixel with maximum projection distance
+        residual_sq = torch.sum(local_img_cube ** 2, dim=1)  # (B, N)
+        residual_sq[selected_mask] = -float('inf')
+
+        idx_new = torch.argmax(residual_sq, dim=1)
+
+        # Record the raw (non-localized) endmember
+        endmembers[:, :, i] = img_cube[b_idx, :, idx_new]
+        selected_mask[b_idx, idx_new] = True
+
+        # The current vector is already projected into the orthogonal subspace
+        v_new = local_img_cube[b_idx, :, idx_new]  # (B, C)
+        h_j = torch.norm(v_new, dim=1)  # (B,)
+
+        # Cumulative product: volume at step i = volume at step (i-1) * h_j
+        volumes[:, i] = volumes[:, i - 1] * h_j
+        if return_heights:
+            heights[:, i] = h_j
+
+        # Project all pixels into the subspace orthogonal to the new endmember
+        h_j_sq = h_j ** 2
+        pseudo = torch.where(
+            (h_j_sq > 1e-12).unsqueeze(1),
+            v_new / h_j_sq.unsqueeze(1),
+            torch.zeros_like(v_new)
+        )
+        # OSP projection component: d(d^T d)^-1 d^T X
+        proj_coef = torch.bmm(pseudo.unsqueeze(1), local_img_cube)  # (B, 1, N)
+        local_img_cube -= torch.bmm(v_new.unsqueeze(2), proj_coef)  # (B, C, N)
+
+    if return_heights:
+        return endmembers, volumes, heights
+    return endmembers, volumes
+
+def maximumDistance_volumes_torch_test(img_cube, num_endmembers):
+    """
+    Test version of maximumDistance_volumes_torch that returns the orthogonal
+    heights (h_n) alongside endmembers and localized Gram volumes.
+
+    Args:
+        img_cube: Tensor of shape (B, C, N) [Batch, Bands, Pixels]
+        num_endmembers: int, total number of endmembers to extract (k).
+    Returns:
+        endmembers: Tensor of shape (B, C, num_endmembers) — raw (non-localized)
+                    endmember spectra.
+        volumes:    Tensor of shape (B, num_endmembers) — localized Gram volume curve.
+        heights:    Tensor of shape (B, num_endmembers) — orthogonal projection heights (h_n),
+                    where heights[:, 0] = 0 (origin), heights[:, 1] = h_1, and
+                    heights[:, i] = h_i for i >= 1.
+    """
+    return maximumDistance_volumes_torch(img_cube, num_endmembers, return_heights=True)
+
+maximumDistance_volumes_heights_torch = maximumDistance_volumes_torch_test
+
+def process_volume_sliding_tile(frame_data, tile_size, stride, num_endmembers):
     """
     GPU-accelerated Spectral Complexity calculation with CPU-host memory spooling.
     
@@ -145,7 +277,8 @@ def process_volume_sliding_tile(frame_data, tile_size, stride, num_endmembers, g
     if device == 'cuda':
         total_vram = torch.cuda.get_device_properties(device).total_memory
         target_vram = total_vram * 0.60
-        overhead_multiplier = 20
+        # Reduced from 20 to 5 since maximumDistance_volumes_torch allocates far fewer intermediate tensors
+        overhead_multiplier = 5
         bytes_per_window = overhead_multiplier * bands * N_pixels * BYTES_PER_ELEMENT
         batch_size = max(1, int(target_vram // bytes_per_window))
         
@@ -204,29 +337,8 @@ def process_volume_sliding_tile(frame_data, tile_size, stride, num_endmembers, g
                 # Zero out NaNs to prevent NaN propagation during tensor math
                 valid_data[torch.isnan(valid_data)] = 0.0
             
-                # 4a. Batched Maximum Distance Simplices
-                endmembers = maximumDistance_torch(valid_data, num_endmembers, valid_pixel_mask)  # (B_valid, C, E)
-            
-                # 4b. Batched Gram Volumes (QR Decomposition)
-                if gram_type == 'datasetMean':
-                    meanVector = valid_data.mean(dim=2)  # (B_valid, C)
-                    volume = calcGramLocalVolumes_QR_torch(endmembers, meanVector)
-                elif gram_type == 'minEndmember':
-                    localizationVec = endmembers[:, :, 1]
-                    remainingEndmembers = torch.cat((endmembers[:, :, 0:1], endmembers[:, :, 2:]), dim=2)
-                    volume = calcGramLocalVolumes_QR_torch(remainingEndmembers, localizationVec)
-                
-                    # Prepend 0.0 volume for mathematical consistency
-                    zeros = torch.zeros(volume.shape[0], 1, dtype=COMPUTE_DTYPE, device=device)
-                    volume = torch.cat((zeros, volume), dim=1)
-                else:
-                    origin = torch.zeros(bands, dtype=COMPUTE_DTYPE, device=device)
-                    volume = calcGramLocalVolumes_QR_torch(endmembers, origin)
-                
-                # 4c. Optional Normalization
-                if norm_type == 'bandCount':
-                    m_array = torch.arange(1, volume.shape[1] + 1, dtype=COMPUTE_DTYPE, device=device)
-                    volume = volume / torch.pow(bands, (m_array / 2.0))
+                # 4. Single-pass combined extraction and volume calculation
+                endmembers, volume = maximumDistance_volumes_torch(valid_data, num_endmembers)
                 
                 # 4d. Extract target metric and immediately move result to CPU
                 if volume.shape[1] > 2:
@@ -236,35 +348,7 @@ def process_volume_sliding_tile(frame_data, tile_size, stride, num_endmembers, g
                 
                 vol_vals[global_start_idx + i : global_start_idx + i + batch_windows.shape[0]][batch_valid.cpu()] = vol_val.cpu()
         
-    # 5. Fold spatial output map on CPU — overlap-add reconstruction
-    vol_vals_expanded = vol_vals.unsqueeze(0).unsqueeze(1).expand(1, N_pixels, L)
-    valid_expanded = valid_mask.to(COMPUTE_DTYPE).unsqueeze(0).unsqueeze(1).expand(1, N_pixels, L)
-    
-    sum_map = torch.nn.functional.fold(
-        vol_vals_expanded, 
-        output_size=(height, width), 
-        kernel_size=tile_size, 
-        stride=stride
-    )
-    count_map = torch.nn.functional.fold(
-        valid_expanded, 
-        output_size=(height, width), 
-        kernel_size=tile_size, 
-        stride=stride
-    )
-    
-    # Cast to specified lightweight datatypes for downstream saving
-    sum_map = sum_map.squeeze().numpy().astype(np.float32)
-    count_map = count_map.squeeze().numpy().astype(np.int8)
-    
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", category=RuntimeWarning)
-        final_map = sum_map / count_map
-    
-    # 6. Neighborhood map — assign each tile's volume directly to its center pixel.
-    #    No spatial averaging: each pixel receives the unblurred volume of the
-    #    neighborhood tile centered on it. Border pixels within center_offset of
-    #    the image edge have no complete tile and remain NaN.
+    # 5. Neighborhood map — assign each tile's volume directly to its center pixel.
     out_h = (height - tile_size) // stride + 1
     out_w = (width - tile_size) // stride + 1
     center_offset = tile_size // 2
@@ -277,6 +361,22 @@ def process_volume_sliding_tile(frame_data, tile_size, stride, num_endmembers, g
                      center_offset:center_offset + out_w] = vol_grid
     neighborhood_map[center_offset:center_offset + out_h,
                      center_offset:center_offset + out_w][~valid_grid] = np.nan
+                     
+    # 6. Final Map — Fast Spatial Averaging via 2D Convolution (mean filter)
+    # Replaces massive 3D PyTorch fold with a native 2D NumPy/SciPy filter
+    # Fill NaNs with 0s so they don't corrupt the convolution arithmetic
+    clean_neighborhood = np.nan_to_num(neighborhood_map, nan=0.0)
+    valid_binary = ~np.isnan(neighborhood_map)
+    
+    # Sum of volumes in the sliding window
+    sum_map = uniform_filter(clean_neighborhood, size=tile_size, mode='constant', cval=0.0) 
+    # Count of valid tiles in the sliding window
+    count_map = uniform_filter(valid_binary.astype(np.float32), size=tile_size, mode='constant', cval=0.0)
+    
+    # Divide to get the average (handling divide-by-zero where count_map is 0)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=RuntimeWarning)
+        final_map = np.where(count_map > 0, sum_map / count_map, np.nan)
         
     return final_map, neighborhood_map
 

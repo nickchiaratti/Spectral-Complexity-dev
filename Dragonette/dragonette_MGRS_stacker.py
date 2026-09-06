@@ -52,8 +52,8 @@ def parse_wyvern_stac(json_path):
         return os.path.join(base_dir, os.path.basename(href))
     
     eo_bands = assets['Cloud optimized GeoTiff']['eo:bands']
-    wavelengths = [b['center_wavelength'] * 1000 for b in eo_bands]
-    fwhms = [b['full_width_half_max'] * 1000 for b in eo_bands]
+    wavelengths = [b['center_wavelength'] for b in eo_bands]
+    fwhms = [b['full_width_half_max'] for b in eo_bands]
     esun = [b['solar_illumination'] for b in eo_bands]
 
     sun_elev = stac['properties']['view:sun_elevation']

@@ -36,7 +36,7 @@ import warnings
 Location = "Rochesterv2"
 
 # Point directly to the finalized ARD Master Cube
-SOURCE_CUBE_PATH = f"C:/satelliteImagery/HLST30/HLST_{Location}_Harmonized.h5"
+SOURCE_CUBE_PATH = f"C:/satelliteImagery/MGRS30mConstellation/Harmonized_MGRS_Stack_Rochesterv2_SC_EM-7_Norm-None.h5"
 
 # Target search window size (pixels)
 SPAN = 100
@@ -57,42 +57,72 @@ def get_reflectance_and_mask(grp, f_idx):
     and applies the strictly pre-calculated ARD common_mask.
     Returns the reflectance array, the valid mask, and the rgb ortho_visual.
     """
-    if 'ortho_visual' not in grp or 'common_mask' not in grp or 'surface_reflectance' not in grp:
+    if 'common_mask' not in grp or 'surface_reflectance' not in grp:
         raise ValueError(f"CRITICAL ERROR: Required datasets missing in grid {grp.name}")
 
-    # Extract RGB visual for plotting/display purposes
-    raw_vis = grp['ortho_visual'][f_idx, ...]
-    if raw_vis.shape[0] in [3, 4]:
-        bip_vis = np.transpose(raw_vis, (1, 2, 0))
-    else:
-        bip_vis = raw_vis
-    rgb = bip_vis[..., :3].astype(np.float32) / 255.0
-    
-    # 1 = Valid, 0 = Invalid/Masked
-    valid_mask = grp['common_mask'][f_idx, ...] != 1
-    if bip_vis.shape[-1] == 4:
-        valid_mask &= (bip_vis[..., 3] > 0)
-        
     # Determine source grid name from group path
     source_grid = grp.name.split('/')[-2]
     
+    # 1 = Valid, 0 = Invalid/Masked
+    valid_mask = grp['common_mask'][f_idx, ...] != 1
+
     # Select the Red band based on the sensor
+    red_band_idx = 3 # default
+    green_band_idx = 2
+    blue_band_idx = 1
+    
     if "HLSL30" in source_grid:
-        red_band_idx = 3 # ~655 nm
+        red_band_idx, green_band_idx, blue_band_idx = 3, 2, 1
     elif "HLSS30" in source_grid:
-        red_band_idx = 3 # ~665 nm
-    elif "TANAGER" in source_grid:
+        red_band_idx, green_band_idx, blue_band_idx = 3, 2, 1
+    elif "TANAGER" in source_grid or "ENMAP" in source_grid or "DRAGONETTE" in source_grid:
         wavelengths = grp['surface_reflectance'].attrs.get('wavelengths')
         if wavelengths is not None:
             red_band_idx = np.argmin(np.abs(wavelengths - 660.0))
+            green_band_idx = np.argmin(np.abs(wavelengths - 550.0))
+            blue_band_idx = np.argmin(np.abs(wavelengths - 480.0))
         else:
-            red_band_idx = 75 # Fallback approx for Tanager if missing attr
+            if "TANAGER" in source_grid:
+                red_band_idx, green_band_idx, blue_band_idx = 75, 45, 23
+            elif "ENMAP" in source_grid:
+                red_band_idx, green_band_idx, blue_band_idx = 48, 27, 12
+            else:
+                red_band_idx, green_band_idx, blue_band_idx = 15, 8, 2
     else:
         raise ValueError(f"Unknown source grid: {source_grid}")
         
     # Read the specific 2D band
-    reflectance = grp['surface_reflectance'][f_idx, red_band_idx, ...]
-    
+    raw_reflectance = grp['surface_reflectance'][f_idx, red_band_idx, ...]
+    if raw_reflectance.dtype == np.int16:
+        reflectance = raw_reflectance.astype(np.float32) / 10000.0
+    else:
+        reflectance = raw_reflectance.astype(np.float32)
+
+    # Extract RGB visual for plotting/display purposes
+    if 'ortho_visual' in grp:
+        raw_vis = grp['ortho_visual'][f_idx, ...]
+        if raw_vis.shape[0] in [3, 4]:
+            bip_vis = np.transpose(raw_vis, (1, 2, 0))
+        else:
+            bip_vis = raw_vis
+        rgb = bip_vis[..., :3].astype(np.float32) / 255.0
+        
+        if bip_vis.shape[-1] == 4:
+            valid_mask &= (bip_vis[..., 3] > 0)
+    else:
+        # Construct RGB from surface reflectance
+        r = grp['surface_reflectance'][f_idx, red_band_idx, ...].astype(np.float32)
+        g = grp['surface_reflectance'][f_idx, green_band_idx, ...].astype(np.float32)
+        b = grp['surface_reflectance'][f_idx, blue_band_idx, ...].astype(np.float32)
+        if grp['surface_reflectance'].dtype == np.int16:
+            r /= 10000.0
+            g /= 10000.0
+            b /= 10000.0
+        
+        rgb = np.stack([r, g, b], axis=-1)
+        # Apply a simple stretch for visualization
+        rgb = np.clip(rgb * 3.0, 0, 1)
+
     return reflectance, valid_mask, rgb
 
 def find_optimal_window(mask_ref, mask_mov, ref_bnd, span=100):
@@ -139,10 +169,10 @@ class MultiSensorCoRegistrationViewer:
         self.h5_src = h5_src
         
         self.timeline = []
-        grids = [g for g in self.h5_src['/HDFEOS/GRIDS'].keys() if g in ['HLSL30', 'HLSS30', 'TANAGER']]
+        grids = [g for g in self.h5_src['/HDFEOS/GRIDS'].keys() if g in ['HLSL30', 'HLSS30', 'TANAGER', 'ENMAP', 'DRAGONETTE']]
         for grid_name in grids:
             grp = self.h5_src[f"/HDFEOS/GRIDS/{grid_name}/Data Fields"]
-            if 'surface_reflectance' not in grp or 'ortho_visual' not in grp: continue
+            if 'surface_reflectance' not in grp: continue
             
             times = grp['surface_reflectance'].attrs.get('acquisition_time')
             if times is None: continue
@@ -177,8 +207,14 @@ class MultiSensorCoRegistrationViewer:
     def _setup_metrology(self):
         first_grid = self.timeline[0]['grid']
         first_grp = self.h5_src[f'/HDFEOS/GRIDS/{first_grid}/Data Fields']
-        geo_tf = first_grp['ortho_visual'].attrs['GeoTransform']
-        crs_wkt = first_grp['ortho_visual'].attrs['spatial_ref']
+        
+        if 'ortho_visual' in first_grp:
+            geo_tf = first_grp['ortho_visual'].attrs['GeoTransform']
+            crs_wkt = first_grp['ortho_visual'].attrs['spatial_ref']
+        else:
+            geo_tf = first_grp['surface_reflectance'].attrs['GeoTransform']
+            crs_wkt = first_grp['surface_reflectance'].attrs['spatial_ref']
+            
         if isinstance(crs_wkt, bytes): crs_wkt = crs_wkt.decode('utf-8')
         
         self.affine = rasterio.transform.Affine.from_gdal(*geo_tf)
@@ -371,6 +407,10 @@ class MultiSensorCoRegistrationViewer:
                 return 'Sentinel'
             elif 'TANAGER' in name:
                 return 'Tanager'
+            elif 'ENMAP' in name:
+                return 'EnMAP'
+            elif 'DRAGONETTE' in name:
+                return 'Dragonette'
             raise ValueError(f"Unrecognised spacecraft/grid name: {name}")
 
         rows = []

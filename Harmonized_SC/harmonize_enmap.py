@@ -233,10 +233,6 @@ def process_enmap_scenes_to_grid(h5f, enmap_source_dir, master_height, master_wi
             mask_canvases['defective_pixel_mask'][0, spatial_bad_pixels] = 1
         
         # EnMAP Native Reflectance is stored as scaled Int16 (scale factor 10000)
-        # We must convert valid pixels to a [0.0, 1.0] float representation
-        valid_rad_3d = ~((canvas_rad == rad_nodata) | np.isnan(canvas_rad)) & ~bad_pixel_locs
-        canvas_rad[valid_rad_3d] /= 10000.0
-        
         # Set bad pixels to nodata to prevent skewing downstream numerics
         canvas_rad[bad_pixel_locs] = rad_nodata
         
@@ -295,7 +291,7 @@ def process_enmap_scenes_to_grid(h5f, enmap_source_dir, master_height, master_wi
         ortho_vis_dset.attrs['GeoTransform'] = gdal_transform
         
         for out_idx in range(total_num_frames):
-            rgba_img = sc.generate_rgba_from_hsi(frame_data=sr_ds[out_idx, :, :, :], wavelengths=master_wv)
+            rgba_img = sc.generate_rgba_from_hsi(frame_data=sr_ds[out_idx, :, :, :], wavelengths=master_wv, nodata=rad_nodata)
             ortho_vis_dset[out_idx, ...] = np.transpose(rgba_img, (2, 0, 1))
 
         return datasets_created_info, total_num_frames, band_count

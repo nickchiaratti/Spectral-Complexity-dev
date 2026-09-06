@@ -298,7 +298,7 @@ def animate_pixel_endmembers(pixel_y, pixel_x, source_h5_path, inference_results
                 
             patch = np.transpose(patch, (1, 2, 0))
             
-            em, _ = sc.maximumDistance(patch, 7, strict_nan=False)
+            em, _ = sc.maximumDistance_volumes(patch, 7)
             
             if not np.isnan(em).all():
                 endmembers_over_time.append(em)
@@ -540,7 +540,7 @@ def plot_segment_spectra(pixel_y, pixel_x, source_h5_path, inference_results_h5)
                     seg_wl[sensor] = wavelengths
                     
                 patch = np.transpose(patch, (1, 2, 0))
-                em, _ = sc.maximumDistance(patch, N_ENDMEMBERS, strict_nan=False)
+                em, _ = sc.maximumDistance_volumes(patch, N_ENDMEMBERS)
                 if not np.isnan(em).all():
                     seg_data[sensor].append(em)
                     
@@ -758,7 +758,7 @@ def plot_season_spectra(pixel_y, pixel_x, source_h5_path, inference_results_h5):
                     seg_wl[sensor] = wavelengths
                     
                 patch = np.transpose(patch, (1, 2, 0))
-                em, _ = sc.maximumDistance(patch, N_ENDMEMBERS, strict_nan=False)
+                em, _ = sc.maximumDistance_volumes(patch, N_ENDMEMBERS)
                 if not np.isnan(em).all():
                     seg_data[sensor][season].append(em)
                     
@@ -997,7 +997,7 @@ def plot_segment_endmembers(pixel_y, pixel_x, source_h5_path, inference_results_
                 # Combine patches spatially: from list of (3,3,B) to (3, 3*V, B)
                 combined_patch = np.concatenate(patches_list, axis=1)
                 
-                em, _ = sc.maximumDistance(combined_patch, N_ENDMEMBERS, strict_nan=False)
+                em, _ = sc.maximumDistance_volumes(combined_patch, N_ENDMEMBERS)
                 if np.isnan(em).all():
                     ax.text(0.5, 0.5, "No Valid Endmembers", ha='center', va='center', transform=ax.transAxes)
                     continue
@@ -1167,7 +1167,7 @@ def plot_seasonal_separability(pixel_y, pixel_x, source_h5_path, inference_resul
                             wavelengths = wavelengths * 1000
                             
                         patch = np.transpose(patch, (1, 2, 0))
-                        em, _ = sc.maximumDistance(patch, N_ENDMEMBERS, strict_nan=False)
+                        em, _ = sc.maximumDistance_volumes(patch, N_ENDMEMBERS)
                         if not np.isnan(em).all():
                             season_spectra.append((wavelengths, em))
                     

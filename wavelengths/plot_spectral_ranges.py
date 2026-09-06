@@ -24,13 +24,14 @@ def plot_spectral_ranges():
     tirs_b11_path = os.path.join(script_dir, 'L9_TIRS2_RSR.xlsx')
     oli_rsr_path = os.path.join(script_dir, 'L9_OLI2_RSR.xlsx')
 
-    # Create figure with 4 subplots
-    fig, axes = plt.subplots(4, 1, figsize=(7.16, 4))
+    # Create figure with 5 subplots
+    fig, axes = plt.subplots(5, 1, figsize=(7.16, 5))
     
     ax_landsat = axes[0]
     ax_tanager = axes[1]
     ax_enmap = axes[2]
     ax_sentinel = axes[3]
+    ax_dragonette = axes[4]
 
     # ==========================================
     # Plot 1: Landsat 8/9 (OLI + TIRS)
@@ -263,13 +264,69 @@ def plot_spectral_ranges():
         print("Sentinel-2A Excel file not found. Please ensure it is in the same directory.")
 
     # Sentinel Subplot Formatting
-    ax_sentinel.set_xlabel('Wavelength (µm)')
     ax_sentinel.set_xlim(0.37, 2.51) # Standard VSWIR range
     ax_sentinel.set_ylim(0, 1.3)
     ax_sentinel.grid(True, linestyle='--', alpha=0.6)
     
     # Add plot label
     ax_sentinel.text(0.98, 0.90, 'Sentinel-2', transform=ax_sentinel.transAxes, ha='right', va='top', fontsize=9, fontweight='bold')
+
+    # ==========================================
+    # Plot 5: Dragonette
+    # ==========================================
+    dragonette_excel_path = os.path.join(script_dir, 'Dragonette spectral bands.xlsx')
+    
+    if os.path.exists(dragonette_excel_path):
+        try:
+            import warnings
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", category=UserWarning)
+                df_dragonette = pd.read_excel(dragonette_excel_path)
+            
+            dragonette_color = '#e377c2' # Pink for Dragonette
+            bands_found = False
+            
+            cwl_col = 'Extended VNIR (Dragonette-2/3/4) Band Centre Wavelength (CWL)* (nm)'
+            fwhm_col = 'Extended VNIR (Dragonette-2/3/4) Full Width at Half Maximum (FWHM) (nm)'
+            
+            if cwl_col in df_dragonette.columns and fwhm_col in df_dragonette.columns:
+                for idx, row in df_dragonette.iterrows():
+                    center_nm = row.get(cwl_col)
+                    fwhm_nm = row.get(fwhm_col)
+                    
+                    if pd.notna(center_nm) and pd.notna(fwhm_nm):
+                        bands_found = True
+                        center = center_nm / 1000.0
+                        fwhm = fwhm_nm / 1000.0
+                        
+                        # Exclude major atmospheric water absorption bands
+                        if (1.35 <= center <= 1.45) or (1.80 <= center <= 1.95):
+                            continue
+                        
+                        sigma = fwhm / 2.355
+                        x = np.linspace(center - 3*sigma, center + 3*sigma, 100)
+                        y = np.exp(-0.5 * ((x - center) / sigma) ** 2)
+                        
+                        ax_dragonette.plot(x, y, color=dragonette_color, alpha=0.6, linewidth=1, linestyle='-')
+                        ax_dragonette.fill_between(x, y, color=dragonette_color, alpha=0.1)
+                            
+                if not bands_found:
+                    print("No band data found in Dragonette Excel.")
+            else:
+                print("Could not find expected columns in Dragonette Excel.")
+        except Exception as e:
+            print(f"Error reading Dragonette Excel: {e}")
+    else:
+        print("Dragonette Excel file not found.")
+
+    # Dragonette Subplot Formatting
+    ax_dragonette.set_xlabel('Wavelength (µm)')
+    ax_dragonette.set_xlim(0.37, 2.51) # Standard VSWIR range
+    ax_dragonette.set_ylim(0, 1.3)
+    ax_dragonette.grid(True, linestyle='--', alpha=0.6)
+    
+    # Add plot label
+    ax_dragonette.text(0.98, 0.90, 'Dragonette', transform=ax_dragonette.transAxes, ha='right', va='top', fontsize=9, fontweight='bold')
 
     fig.supylabel('Relative Spectral Response (RSR)', fontsize=10, x=0.04)
 

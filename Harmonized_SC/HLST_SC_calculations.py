@@ -95,6 +95,15 @@ def compute_frame_metrics(payload):
                     neighborhood_map = None
             else:
                 neighborhood_map = None
+
+            if flags.get('smacc_zscore', False) and not flags.get('smacc_volume', False):
+                try:
+                    with h5py.File(payload['constellation_filepath'], 'r') as h5_const:
+                        smacc_slide_map = h5_const["/HDFEOS/GRIDS/HARMONIZED/Data Fields/smacc_sliding_volume_map"][payload['global_idx'], ...]
+                except KeyError:
+                    smacc_slide_map = None
+            else:
+                smacc_slide_map = None
             
         telemetry['I/O_Read'] = time.perf_counter() - t0
         valid_mask = frame_mask == 0 if MASKING else np.ones((height, width), dtype=bool)
@@ -128,8 +137,15 @@ def compute_frame_metrics(payload):
             t0 = time.perf_counter()
             # Note: process_volume_sliding_tile prunes invalid pixels internally
             # Returns both the spatially-averaged map and the per-center-pixel neighborhood map
-            slide_map, neighborhood_map = scTorch.process_volume_sliding_tile(frame_sr, TILE_SIZE, SLIDING_STRIDE, NUM_ENDMEMBERS, 'minEndmember', NORM_PARAM)
+            slide_map, neighborhood_map = scTorch.process_volume_sliding_tile(frame_sr, TILE_SIZE, SLIDING_STRIDE, NUM_ENDMEMBERS)
             telemetry['Sliding_Volume_Map'] = time.perf_counter() - t0
+
+        # --- 4b. SMACC Sliding Window Complexity ---
+        smacc_neighborhood_map = None
+        if flags.get('smacc_volume', False):
+            t0 = time.perf_counter()
+            smacc_slide_map, smacc_neighborhood_map = sc.SMACC_sliding_volume(frame_sr, TILE_SIZE, SLIDING_STRIDE, NUM_ENDMEMBERS)
+            telemetry['SMACC_Sliding_Volume_Map'] = time.perf_counter() - t0
     
         # --- 5. Mean Spectral Distance ---
         msd_map = None
@@ -154,6 +170,16 @@ def compute_frame_metrics(payload):
             t0 = time.perf_counter()
             neighborhood_z_map, neighborhood_global_mean, neighborhood_global_std = sc.calculate_global_z_score(neighborhood_map, valid_mask)
             telemetry['Neighborhood_Z_Score'] = time.perf_counter() - t0
+
+        # --- 6d. SMACC Global Z-Score ---
+        smacc_z_map = None
+        smacc_global_mean = np.nan
+        smacc_global_std = np.nan
+        if flags.get('smacc_zscore', False):
+            t0 = time.perf_counter()
+            if smacc_slide_map is not None:
+                smacc_z_map, smacc_global_mean, smacc_global_std = sc.calculate_global_z_score(smacc_slide_map, valid_mask)
+            telemetry['SMACC_Z_Score'] = time.perf_counter() - t0
 
         # --- 6b. Global Robust Scale ---
         robust_map = None
@@ -220,9 +246,11 @@ def compute_frame_metrics(payload):
             'ndbi': ndbi,
             'slide': slide_map,
             'neighborhood': neighborhood_map,
+            'smacc_slide': smacc_slide_map,
             'msd': msd_map,
             'z_map': z_map,
             'neighborhood_z_map': neighborhood_z_map,
+            'smacc_z_map': smacc_z_map,
             'robust_map': robust_map,
             'box_cox_map': box_cox_map,
             'global_lambda': global_lambda,
@@ -233,6 +261,8 @@ def compute_frame_metrics(payload):
             'bc_global_std': bc_global_std,
             'global_mean': global_mean,
             'global_std': global_std,
+            'smacc_global_mean': smacc_global_mean,
+            'smacc_global_std': smacc_global_std,
             'neighborhood_global_mean': neighborhood_global_mean,
             'neighborhood_global_std': neighborhood_global_std,
             'em': em_out,
@@ -264,12 +294,14 @@ def main(target_location=None, tile_size=3, num_endmembers=7, norm_param=None, f
     CALC_GLOBAL_ENDMEMBERS = True
     CALC_SLIDING_VOLUME = True
     CALC_NEIGHBORHOOD_VOLUME = False
+    CALC_SMACC_VOLUME = False
     CALC_Z_SCORE = True
-    CALC_ROBUST_SCALE = True
+    CALC_SMACC_ZSCORE = False
+    CALC_ROBUST_SCALE = False
     CALC_BOX_COX = True
     CALC_NEIGHBORHOOD_Z_SCORE = False
-    CALC_TEMPORAL_Z_SCORE = False
-    CALC_PIXEL_TEMPORAL_Z_SCORE = True
+    CALC_TEMPORAL_Z_SCORE = True
+    CALC_PIXEL_TEMPORAL_Z_SCORE = False
 
     # ==========================================
     # 3. FILE MANAGEMENT & I/O
@@ -348,7 +380,7 @@ def main(target_location=None, tile_size=3, num_endmembers=7, norm_param=None, f
     # 4. MASTER THREAD DISPATCHER
     # ==========================================
     def process_global_timeline(h5_out, orig_filepath):
-        nonlocal CALC_SLIDING_VOLUME, CALC_NEIGHBORHOOD_VOLUME
+        nonlocal CALC_SLIDING_VOLUME, CALC_NEIGHBORHOOD_VOLUME, CALC_SMACC_VOLUME
 
         with h5py.File(orig_filepath, 'r') as h5_orig:
             grids_grp = h5_orig['/HDFEOS/GRIDS']
@@ -371,16 +403,17 @@ def main(target_location=None, tile_size=3, num_endmembers=7, norm_param=None, f
                     }
 
         # Open direct file handles for metadata discovery and processing
-        direct_handles = {g: h5py.File(sensor_sources[g]['file'], 'r') for g in grids}
         try:
             timeline = []
             grid_wavelengths = {}
             grid_geotransforms = {}
+            direct_handles = {}
             for grid in grids:
-                base_path = f"{sensor_sources[grid]['path']}/Data Fields"
+                direct_handles[grid] = h5py.File(orig_filepath, 'r')
+                base_path = f"/HDFEOS/GRIDS/{grid}/Data Fields"
                 f_direct = direct_handles[grid]
                 if base_path not in f_direct:
-                    raise ValueError(f"CRITICAL ERROR: Data Fields missing for {grid} in {sensor_sources[grid]['file']}")
+                    raise ValueError(f"CRITICAL ERROR: Data Fields missing for {grid} in {orig_filepath}")
                 
                 data_grp = f_direct[base_path]
                 grid_geotransforms[grid] = data_grp["surface_reflectance"].attrs.get('GeoTransform')
@@ -417,8 +450,14 @@ def main(target_location=None, tile_size=3, num_endmembers=7, norm_param=None, f
                 print("  -> Dependency Warning: Neighborhood Z-score requested but 'neighborhood_volume_map' not found in file. Forcing CALC_NEIGHBORHOOD_VOLUME = True.")
                 CALC_NEIGHBORHOOD_VOLUME = True
 
+            if CALC_SMACC_ZSCORE and not CALC_SMACC_VOLUME:
+                has_smacc_vol = (harm_path in h5_out and 'smacc_sliding_volume_map' in h5_out[harm_path])
+                if not has_smacc_vol:
+                    print("  -> Dependency Warning: SMACC Z-score requested but 'smacc_sliding_volume_map' not found in file. Forcing CALC_SMACC_VOLUME = True.")
+                    CALC_SMACC_VOLUME = True
+
             ref_f = direct_handles[grids[0]]
-            ref_sr = ref_f[f"{sensor_sources[grids[0]]['path']}/Data Fields/surface_reflectance"]
+            ref_sr = ref_f[f"/HDFEOS/GRIDS/{grids[0]}/Data Fields/surface_reflectance"]
             _, _, height, width = ref_sr.shape
             spatial_ref = ref_sr.attrs.get('spatial_ref')
             master_gt = ref_sr.attrs.get('GeoTransform')
@@ -433,7 +472,7 @@ def main(target_location=None, tile_size=3, num_endmembers=7, norm_param=None, f
                 g_name = meta['grid']
                 l_idx = meta['local_idx']
                 f_direct = direct_handles[g_name]
-                fmask_path = f"{sensor_sources[g_name]['path']}/Data Fields/Fmask"
+                fmask_path = f"/HDFEOS/GRIDS/{g_name}/Data Fields/Fmask"
                 
                 if fmask_path in f_direct:
                     grid_gt = grid_geotransforms[g_name]
@@ -468,10 +507,12 @@ def main(target_location=None, tile_size=3, num_endmembers=7, norm_param=None, f
             ds_harm_ortho = overwrite_dset(harm_grp, 'ortho_visual', (total_frames, 4, height, width), dtype='uint8', spatial_ref=spatial_ref, geo_transform=master_gt, chunks=(1, 4, chunk_h, chunk_w))
             ds_harm_slide = overwrite_dset(harm_grp, 'sliding_volume_map', (total_frames, height, width), spatial_ref=spatial_ref, geo_transform=master_gt, chunks=chunks_3d) if CALC_SLIDING_VOLUME else None
             ds_harm_neighborhood = overwrite_dset(harm_grp, 'neighborhood_volume_map', (total_frames, height, width), spatial_ref=spatial_ref, geo_transform=master_gt, chunks=chunks_3d) if CALC_NEIGHBORHOOD_VOLUME else None
+            ds_harm_smacc_slide = overwrite_dset(harm_grp, 'smacc_sliding_volume_map', (total_frames, height, width), spatial_ref=spatial_ref, geo_transform=master_gt, chunks=chunks_3d) if CALC_SMACC_VOLUME else None
             ds_harm_ndvi = overwrite_dset(harm_grp, 'ndvi_map', (total_frames, height, width), dtype='int16', scale_factor=scale_fac_indices, fill_value=fill_val, spatial_ref=spatial_ref, geo_transform=master_gt, chunks=chunks_3d) if CALC_NDVI else None
             ds_harm_ndbi = overwrite_dset(harm_grp, 'ndbi_map', (total_frames, height, width), dtype='int16', scale_factor=scale_fac_indices, fill_value=fill_val, spatial_ref=spatial_ref, geo_transform=master_gt, chunks=chunks_3d) if CALC_NDBI else None
             ds_harm_msd = overwrite_dset(harm_grp, 'msd_map', (total_frames, height, width), dtype='int16', scale_factor=scale_fac_indices, fill_value=fill_val, spatial_ref=spatial_ref, geo_transform=master_gt, chunks=chunks_3d) if CALC_MSD else None
             ds_harm_z = overwrite_dset(harm_grp, 'sliding_volume_z_score', (total_frames, height, width), dtype='int16', scale_factor=scale_fac_z, fill_value=fill_val, spatial_ref=spatial_ref, geo_transform=master_gt, chunks=chunks_3d) if CALC_Z_SCORE else None
+            ds_harm_smacc_z = overwrite_dset(harm_grp, 'smacc_sliding_volume_z_score', (total_frames, height, width), dtype='int16', scale_factor=scale_fac_z, fill_value=fill_val, spatial_ref=spatial_ref, geo_transform=master_gt, chunks=chunks_3d) if CALC_SMACC_ZSCORE else None
             ds_harm_robust = overwrite_dset(harm_grp, 'sliding_volume_robust_scale', (total_frames, height, width), dtype='int16', scale_factor=scale_fac_z, fill_value=fill_val, spatial_ref=spatial_ref, geo_transform=master_gt, chunks=chunks_3d) if CALC_ROBUST_SCALE else None
             ds_harm_box_cox = overwrite_dset(harm_grp, 'sliding_volume_box_cox', (total_frames, height, width), dtype='int16', scale_factor=scale_fac_z, fill_value=fill_val, spatial_ref=spatial_ref, geo_transform=master_gt, chunks=chunks_3d) if CALC_BOX_COX else None
             ds_harm_neighborhood_z = overwrite_dset(harm_grp, 'neighborhood_volume_z_score', (total_frames, height, width), dtype='int16', scale_factor=scale_fac_z, fill_value=fill_val, spatial_ref=spatial_ref, geo_transform=master_gt, chunks=chunks_3d) if CALC_NEIGHBORHOOD_Z_SCORE else None
@@ -479,10 +520,18 @@ def main(target_location=None, tile_size=3, num_endmembers=7, norm_param=None, f
             ds_harm_pixel_temp_z = overwrite_dset(harm_grp, 'pixel_temporal_z_score', (total_frames, height, width), dtype='int16', scale_factor=scale_fac_z, fill_value=fill_val, spatial_ref=spatial_ref, geo_transform=master_gt, chunks=chunks_3d) if CALC_PIXEL_TEMPORAL_Z_SCORE else None
 
             sensor_dsets = {}
+            import os
+            for grid in grids:
+                data_grp = h5_out.require_group(f"/HDFEOS/GRIDS/{grid}/Data Fields")
+                if 'surface_reflectance' not in data_grp:
+                    data_grp['surface_reflectance'] = h5py.ExternalLink(os.path.basename(orig_filepath), f"/HDFEOS/GRIDS/{grid}/Data Fields/surface_reflectance")
+                if 'common_mask' not in data_grp:
+                    data_grp['common_mask'] = h5py.ExternalLink(os.path.basename(orig_filepath), f"/HDFEOS/GRIDS/{grid}/Data Fields/common_mask")
+
             if CALC_GLOBAL_ENDMEMBERS:
                 for grid in grids:
                     f_direct = direct_handles[grid]
-                    orig_data_grp = f_direct[f"{sensor_sources[grid]['path']}/Data Fields"]
+                    orig_data_grp = f_direct[f"/HDFEOS/GRIDS/{grid}/Data Fields"]
                     sr_shape = orig_data_grp["surface_reflectance"].shape
                     n_frames, n_bands = sr_shape[0], sr_shape[1]
                 
@@ -532,8 +581,8 @@ def main(target_location=None, tile_size=3, num_endmembers=7, norm_param=None, f
                 raise ValueError(f"CRITICAL ERROR: Unrecognized Sensor Grid Architecture: {grid_name}")
 
             payloads.append({
-                'orig_filepath': sensor_sources[grid_name]['file'],
-                'data_grp_path': f"{sensor_sources[grid_name]['path']}/Data Fields",
+                'orig_filepath': orig_filepath,
+                'data_grp_path': f"/HDFEOS/GRIDS/{grid_name}/Data Fields",
                 'constellation_filepath': orig_filepath,
                 'global_idx': global_idx,
                 'grid_name': grid_name,
@@ -553,7 +602,9 @@ def main(target_location=None, tile_size=3, num_endmembers=7, norm_param=None, f
                     'endmembers': CALC_GLOBAL_ENDMEMBERS, 'volume': CALC_SLIDING_VOLUME,
                     'neighborhood_volume': CALC_NEIGHBORHOOD_VOLUME, 'z_score': CALC_Z_SCORE,
                     'neighborhood_z_score': CALC_NEIGHBORHOOD_Z_SCORE, 'robust_scale': CALC_ROBUST_SCALE,
-                    'box_cox': CALC_BOX_COX
+                    'box_cox': CALC_BOX_COX,
+                    'smacc_volume': CALC_SMACC_VOLUME,
+                    'smacc_zscore': CALC_SMACC_ZSCORE
                 },
                 'MASKING': MASKING,
                 'NUM_ENDMEMBERS': NUM_ENDMEMBERS,
@@ -565,6 +616,8 @@ def main(target_location=None, tile_size=3, num_endmembers=7, norm_param=None, f
         agg_telemetry = {'Total_Worker_Time': []}
         global_means_list = []
         global_stds_list = []
+        smacc_global_means_list = []
+        smacc_global_stds_list = []
         neighborhood_global_means_list = []
         neighborhood_global_stds_list = []
         global_lambdas_list = []
@@ -605,10 +658,14 @@ def main(target_location=None, tile_size=3, num_endmembers=7, norm_param=None, f
                 ds_harm_msd[global_idx, ...] = sc.scale_to_int16(result['msd'], scale_factor=scale_fac_indices)
             if CALC_SLIDING_VOLUME: 
                 ds_harm_slide[global_idx, ...] = result['slide']
+            if CALC_SMACC_VOLUME: 
+                ds_harm_smacc_slide[global_idx, ...] = result['smacc_slide']
             if CALC_NEIGHBORHOOD_VOLUME:
                 ds_harm_neighborhood[global_idx, ...] = result['neighborhood']
             if CALC_Z_SCORE: 
                 ds_harm_z[global_idx, ...] = sc.scale_to_int16(result['z_map'], scale_factor=scale_fac_z)
+            if CALC_SMACC_ZSCORE: 
+                ds_harm_smacc_z[global_idx, ...] = sc.scale_to_int16(result['smacc_z_map'], scale_factor=scale_fac_z)
             if CALC_ROBUST_SCALE:
                 ds_harm_robust[global_idx, ...] = sc.scale_to_int16(result['robust_map'], scale_factor=scale_fac_z)
             if CALC_BOX_COX:
@@ -623,6 +680,9 @@ def main(target_location=None, tile_size=3, num_endmembers=7, norm_param=None, f
                 
             global_means_list.append(result['global_mean'])
             global_stds_list.append(result['global_std'])
+            if CALC_SMACC_ZSCORE:
+                smacc_global_means_list.append(result['smacc_global_mean'])
+                smacc_global_stds_list.append(result['smacc_global_std'])
             neighborhood_global_means_list.append(result['neighborhood_global_mean'])
             neighborhood_global_stds_list.append(result['neighborhood_global_std'])
             if CALC_ROBUST_SCALE:
@@ -729,7 +789,7 @@ def main(target_location=None, tile_size=3, num_endmembers=7, norm_param=None, f
         prov_idx = np.array([m['local_idx'] for m in timeline], dtype='int32')
     
         # Only tag the datasets that were actually generated in this run
-        created_harm_dsets = [ds for ds in [ds_harm_mask, ds_harm_ortho, ds_harm_slide, ds_harm_neighborhood, ds_harm_ndvi, ds_harm_ndbi, ds_harm_msd, ds_harm_z, ds_harm_robust, ds_harm_box_cox, ds_harm_neighborhood_z, ds_harm_temp_z, ds_harm_pixel_temp_z] if ds is not None]
+        created_harm_dsets = [ds for ds in [ds_harm_mask, ds_harm_ortho, ds_harm_slide, ds_harm_neighborhood, ds_harm_smacc_slide, ds_harm_ndvi, ds_harm_ndbi, ds_harm_msd, ds_harm_z, ds_harm_smacc_z, ds_harm_robust, ds_harm_box_cox, ds_harm_neighborhood_z, ds_harm_temp_z, ds_harm_pixel_temp_z] if ds is not None]
     
         for ds in created_harm_dsets:
             ds.attrs.create('source_grid', data=prov_grid)
@@ -742,6 +802,13 @@ def main(target_location=None, tile_size=3, num_endmembers=7, norm_param=None, f
                 ds.attrs['tile_size'] = TILE_SIZE
                 ds.attrs['sliding_stride'] = SLIDING_STRIDE
                 ds.attrs['gram_type'] = 'minEndmember'
+                ds.attrs['num_endmembers'] = NUM_ENDMEMBERS
+                ds.attrs['Normalization'] = NORM_PARAM if NORM_PARAM else "None"
+            elif ds.name.endswith('smacc_sliding_volume_map'):
+                ds.attrs['description'] = f"SMACC parallelotope volume within sliding {TILE_SIZE}x{TILE_SIZE} tile"
+                ds.attrs['tile_size'] = TILE_SIZE
+                ds.attrs['sliding_stride'] = SLIDING_STRIDE
+                ds.attrs['algorithm'] = 'SMACC'
                 ds.attrs['num_endmembers'] = NUM_ENDMEMBERS
                 ds.attrs['Normalization'] = NORM_PARAM if NORM_PARAM else "None"
             elif ds.name.endswith('neighborhood_volume_map'):
@@ -766,6 +833,12 @@ def main(target_location=None, tile_size=3, num_endmembers=7, norm_param=None, f
                 ds.attrs['MASK_SOURCE'] = "HARMONIZED_common_mask"
                 ds.attrs['frame_global_means'] = np.array(global_means_list, dtype=np.float32)
                 ds.attrs['frame_global_stds'] = np.array(global_stds_list, dtype=np.float32)
+            elif ds.name.endswith('smacc_sliding_volume_z_score'):
+                ds.attrs['description'] = "Global SMACC Spectral Complexity Z-score. ARD Masked pixels excluded from background stats."
+                ds.attrs['MASKING_APPLIED'] = MASKING
+                ds.attrs['MASK_SOURCE'] = "HARMONIZED_common_mask"
+                ds.attrs['frame_global_means'] = np.array(smacc_global_means_list, dtype=np.float32)
+                ds.attrs['frame_global_stds'] = np.array(smacc_global_stds_list, dtype=np.float32)
             elif ds.name.endswith('sliding_volume_robust_scale'):
                 ds.attrs['description'] = "Global Spectral Complexity Robust Scale (PowerTransformer + Median/IQR). ARD Masked pixels excluded from background stats."
                 ds.attrs['MASKING_APPLIED'] = MASKING

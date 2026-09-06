@@ -9,7 +9,7 @@ import h5py
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
-from matplotlib.widgets import Button, TextBox, CheckButtons, RadioButtons
+from matplotlib.widgets import Button, TextBox, CheckButtons
 import matplotlib.gridspec as gridspec
 from datetime import datetime, timezone
 import tkinter as tk
@@ -159,12 +159,12 @@ TS_LOCATIONS_MAP = {
         {'latlon': (43.151877, -77.487111), 'label': "Shadow Pines Playground",          'color': 'tab:cyan'},
     ],
     "Rochesterv2": [
-        #{'latlon': (43.13927, -77.50340), 'label': "ROCX NITE Tarp",                  'color': 'tab:purple'},
-        #{'latlon': (43.142856, -77.508451), 'label': "West Tait Forest",                'color': 'tab:green'},
-        #{'latlon': (43.144861, -77.501176), 'label': "East Tait Forest",                'color': 'tab:olive'},
+        {'latlon': (43.13927, -77.50340), 'label': "ROCX NITE Tarp",                  'color': 'tab:purple'},
+        {'latlon': (43.142856, -77.508451), 'label': "West Tait Forest",                'color': 'tab:green'},
+        {'latlon': (43.144861, -77.501176), 'label': "East Tait Forest",                'color': 'tab:olive'},
         {'latlon': (43.151502, -77.485518), 'label': "Shadow Pines Grass Field",         'color': 'tab:red'},
-        #{'latlon': (43.151219, -77.486637), 'label': "Shadow Pines Pickleball Court",    'color': 'tab:blue'},
-        #{'latlon': (43.151877, -77.487111), 'label': "Shadow Pines Playground",          'color': 'tab:cyan'},
+        {'latlon': (43.151219, -77.486637), 'label': "Shadow Pines Pickleball Court",    'color': 'tab:blue'},
+        {'latlon': (43.151877, -77.487111), 'label': "Shadow Pines Playground",          'color': 'tab:cyan'},
     ],
     "Malibu": [
         {'latlon': (34.059168, -118.573950), 'label': "Parker Mesa Overlook",                      'color': 'tab:purple'},
@@ -181,7 +181,14 @@ TS_LOCATIONS_MAP = {
     ],
     "SanRafael": [
         {'latlon': (34.757710, -119.949640), 'label': "Forest Fire?",                     'color': 'tab:green'},
-    ]
+    ],
+    "SantaBarbara": [
+        {'latlon': (34.759448, -119.772086), 'label': "South Fork Camp",                     'color': 'tab:purple'},
+        {'latlon': (34.757710, -119.949640), 'label': "Forest Fire?",                     'color': 'tab:green'},
+        {'latlon': (34.927856, -119.693770), 'label': "Building",                     'color': 'tab:blue'},
+        {'latlon': (34.910118, -119.637076), 'label': "Circle Farm",                     'color': 'tab:red'},
+        {'latlon': (34.980337, -119.751268), 'label': "Cuyama River",                     'color': 'tab:orange'},
+    ],
 }
 
 # Time Series Locations (Latitude, Longitude)
@@ -229,7 +236,7 @@ class HarmonizedComplexityViewer:
             else:
                 raw_wl = self.h5[f'/HDFEOS/GRIDS/{g}/Data Fields/surface_reflectance'].attrs['wavelengths'][:]
             if 'TANAGER' in g.upper() or 'ENMAP' in g.upper() or 'DRAGONETTE' in g.upper():
-                self.wavelengths[g] = raw_wl / 1000.0
+                self.wavelengths[g] = raw_wl
             else:
                 self.wavelengths[g] = raw_wl
 
@@ -281,13 +288,33 @@ class HarmonizedComplexityViewer:
             center_lon, center_lat = transformer_back.transform(center_x, center_y)
             TS_LOCATIONS = [{'latlon': (center_lat, center_lon), 'label': f"Grid Center ({resolved_location})", 'color': 'tab:purple'}]
 
+        valid_locations = []
         print("\n--- Coordinate Mapping ---")
         for loc in TS_LOCATIONS:
             lat, lon = loc['latlon']
             proj_x, proj_y = transformer.transform(lon, lat)
             px, py = inv_affine * (proj_x, proj_y)
-            loc['yx'] = (int(round(py)), int(round(px)))
-            print(f"Mapped [{loc['label']}] Lat/Lon ({lat:.4f}, {lon:.4f}) -> Pixel (y={loc['yx'][0]}, x={loc['yx'][1]})")
+            r, c = int(round(py)), int(round(px))
+            
+            if 0 <= r < self.height and 0 <= c < self.width:
+                loc['yx'] = (r, c)
+                valid_locations.append(loc)
+                print(f"Mapped [{loc['label']}] Lat/Lon ({lat:.4f}, {lon:.4f}) -> Pixel (y={r}, x={c})")
+            else:
+                print(f"Warning: [{loc['label']}] out of bounds (y={r}, x={c}). Discarding.")
+                
+        if not valid_locations:
+            print("Warning: No predefined locations fell within image bounds. Falling back to center pixel.")
+            r, c = self.height // 2, self.width // 2
+            ul_x, ul_y = affine * (c, r)
+            transformer_back = Transformer.from_crs(crs, "EPSG:4326", always_xy=True)
+            center_lon, center_lat = transformer_back.transform(ul_x, ul_y)
+            valid_locations = [{'latlon': (center_lat, center_lon), 'label': "Grid Center", 'color': 'tab:purple', 'yx': (r, c)}]
+            
+        global TS_LOCATIONS_ACTIVE
+        TS_LOCATIONS_ACTIVE = valid_locations
+        # We also need to update TS_LOCATIONS where it is used. I'll just assign it back to TS_LOCATIONS.
+        TS_LOCATIONS = valid_locations
 
         self.current_idx = 0
         self.save_dir = SAVE_DIR.replace(Location, resolved_location)
@@ -295,7 +322,6 @@ class HarmonizedComplexityViewer:
         self.ts_start_date = TS_START_DATE
         self.ts_end_date = TS_END_DATE
         self.use_twin_axis = TWIN_Y_AXIS_DEFAULT
-        self.localization_mode = 'general'
         
         self.im_slide = None
         self.cbar_slide = None
@@ -388,11 +414,6 @@ class HarmonizedComplexityViewer:
         self.txt_t_frame = TextBox(ax_t_frame, 'Tanager: ', initial=str(self.t_file_idx if self.t_file_idx is not None else 0))
         self.txt_e_frame = TextBox(ax_e_frame, 'EnMAP: ', initial=str(self.e_file_idx if self.e_file_idx is not None else 0))
         self.btn_scatter = Button(ax_scatter_btn, 'Update Scatter', color='lightyellow')
-        
-        # Localization
-        self.ax_meta.text(0.5, 0.53, "--- Parallelotope Localization ---", ha='center', va='center', fontsize=10)
-        ax_rad_loc = self.fig_controls.add_axes([0.3, 0.43, 0.4, 0.08])
-        self.rad_localization = RadioButtons(ax_rad_loc, ('general', 'datasetMean', 'minEndmember'), active=0)
 
         # Filters Note
         self.ax_meta.text(0.5, 0.35, "Pixel Filters are baked into HDF5", ha='center', va='center', fontsize=10, style='italic')
@@ -417,7 +438,6 @@ class HarmonizedComplexityViewer:
         self.btn_auto.on_clicked(self._on_auto_save)
         self.btn_scatter.on_clicked(self._on_update_scatter)
         self.btn_update_mask.on_clicked(self._on_update_mask)
-        self.rad_localization.on_clicked(self._on_localization_change)
         self.chk_ts_axis.on_clicked(self._on_ts_axis_toggle)
 
     def _init_combined_ui(self):
@@ -900,10 +920,6 @@ class HarmonizedComplexityViewer:
         if DISPLAY_REDUNDANT_FIGURE: figs_to_draw.extend([self.fig_redundant, self.fig_transect])
         if hasattr(self, 'fig_comparison') and self.fig_comparison is not None: figs_to_draw.append(self.fig_comparison)
         for f in figs_to_draw: f.canvas.draw_idle()
-
-    def _on_localization_change(self, label):
-        self.localization_mode = label
-        self.update_display()
             
     def _on_ts_axis_toggle(self, label):
         self.use_twin_axis = not self.use_twin_axis

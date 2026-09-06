@@ -126,8 +126,8 @@ def parse_wyvern_stac(json_path):
     
     # Extract band metadata
     eo_bands = assets['Cloud optimized GeoTiff']['eo:bands']
-    wavelengths = [b['center_wavelength'] * 1000 for b in eo_bands] # Convert µm to nm
-    fwhms = [b['full_width_half_max'] * 1000 for b in eo_bands] # Convert µm to nm
+    wavelengths = [b['center_wavelength'] for b in eo_bands]
+    fwhms = [b['full_width_half_max'] for b in eo_bands]
     
     try:
         esun = [b['solar_illumination'] for b in eo_bands]

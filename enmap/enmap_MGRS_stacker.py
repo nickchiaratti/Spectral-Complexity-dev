@@ -83,8 +83,23 @@ def parse_enmap_scene(json_path):
             print(f"Warning: Failed to parse band wavelengths from {xml_path}: {e}")
 
     if not wavelengths or not any(w > 0 for w in wavelengths):
+        print(f"  Warning: STAC JSON '{os.path.basename(json_path)}' omits complete band wavelength metadata. Falling back to default EnMAP 224-band table.")
         wavelengths = [0.0] * 224
         fwhms = [0.0] * 224
+        from pathlib import Path
+        excel_path = Path(__file__).resolve().parent.parent / "wavelengths" / "EnMAP_Spectral_Bands_update.xlsx"
+        if excel_path.exists():
+            import pandas as pd
+            try:
+                df_vnir = pd.read_excel(excel_path, sheet_name='VNIR')
+                df_swir = pd.read_excel(excel_path, sheet_name='SWIR')
+                df = pd.concat([df_vnir, df_swir], ignore_index=True)
+                if 'CW (nm)' in df.columns:
+                    wavelengths = df['CW (nm)'].values.astype(float).tolist()
+                if 'FWHM (nm)' in df.columns:
+                    fwhms = df['FWHM (nm)'].values.astype(float).tolist()
+            except Exception as e:
+                print(f"Warning: Failed to load default EnMAP wavelengths from Excel: {e}")
     
     sun_elev = stac['properties'].get('view:sun_elevation', 0.0)
     sun_azim = stac['properties'].get('view:sun_azimuth', 0.0)

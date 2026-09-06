@@ -153,6 +153,114 @@ def test_calcGramLocalVolumes(real_data):
     np.testing.assert_allclose(vol_np, vol_torch_np, rtol=1e-8, atol=1e-5,
                                err_msg="Local volumes mismatch")
 
+def test_maximumDistance_volumes(real_data):
+    num_endmembers = 7
+    img = real_data
+    rows, cols, bands = img.shape
+    
+    # 1. Run separate methods
+    em_sep, _ = SpecComplex.maximumDistance(img, num_endmembers)
+    
+    localizationVec = em_sep[:, 1]
+    remainingEndmembers = np.delete(em_sep, 1, axis=1)
+    vol_sep = SpecComplex.calcGramLocalVolumes(remainingEndmembers, localizationVec)
+    vol_sep = np.insert(vol_sep, 0, 0.0)
+    
+    # 2. Run combined method
+    img_flat = np.reshape(img, (rows * cols, bands), order="F")
+    valid_mask = ~np.isnan(img_flat).any(axis=1)
+    valid_pixels = img_flat[valid_mask]
+    pixels_t = valid_pixels.T # (bands, num_pixels)
+    
+    em_comb, vol_comb = SpecComplex.maximumDistance_volumes(pixels_t, num_endmembers)
+    
+    # 3. Compare Results
+    em_diff = (em_sep - em_comb).flatten()
+    print(f"Mean EM: {np.mean(em_sep):.10e}, Mean Diff: {np.mean(em_diff):.10e}, Var Diff: {np.var(em_diff):.10e}")
+    np.testing.assert_allclose(em_sep, em_comb, rtol=1e-8, atol=1e-5,
+                               err_msg="Endmembers mismatch between separate and combined methods")
+                               
+    vol_diff = (vol_sep - vol_comb).flatten()
+    print(f"Mean Vol: {np.mean(vol_sep):.10e}, Mean Diff: {np.mean(vol_diff):.10e}, Var Diff: {np.var(vol_diff):.10e}")
+    np.testing.assert_allclose(vol_sep, vol_comb, rtol=1e-8, atol=1e-5,
+                               err_msg="Volumes mismatch between separate and combined methods")
+
+def test_maximumDistance_volumes_torch(real_data):
+    num_endmembers = 7
+    img = real_data
+    rows, cols, bands = img.shape
+    
+    # 1. Run Numpy combined method
+    img_flat = np.reshape(img, (rows * cols, bands), order="F")
+    valid_mask = ~np.isnan(img_flat).any(axis=1)
+    valid_pixels = img_flat[valid_mask]
+    pixels_t = valid_pixels.T # (bands, num_pixels)
+    
+    em_np, vol_np = SpecComplex.maximumDistance_volumes(pixels_t, num_endmembers)
+    
+    # 2. Run Torch combined method
+    data_torch = torch.from_numpy(valid_pixels).transpose(0, 1).unsqueeze(0) # (1, bands, valid_pixels)
+    
+    em_torch, vol_torch = SpecComplexTorch.maximumDistance_volumes_torch(
+        data_torch, num_endmembers
+    )
+    
+    em_torch_np = em_torch.squeeze(0).cpu().numpy()
+    vol_torch_np = vol_torch.squeeze(0).cpu().numpy()
+    
+    # 3. Compare Results
+    em_diff = (em_np - em_torch_np).flatten()
+    print(f"Mean EM NP: {np.mean(em_np):.10e}, Mean Torch EM: {np.mean(em_torch_np):.10e}")
+    print(f"Mean EM Diff: {np.mean(em_diff):.10e}, Var EM Diff: {np.var(em_diff):.10e}")
+    
+    np.testing.assert_allclose(em_np, em_torch_np, rtol=1e-8, atol=1e-5,
+                               err_msg="Endmembers mismatch between Numpy and Torch maximumDistance_volumes")
+                               
+    vol_diff = (vol_np - vol_torch_np).flatten()
+    print(f"Mean Vol NP: {np.mean(vol_np):.10e}, Mean Torch Vol: {np.mean(vol_torch_np):.10e}")
+    print(f"Mean Vol Diff: {np.mean(vol_diff):.10e}, Var Vol Diff: {np.var(vol_diff):.10e}")
+    
+    np.testing.assert_allclose(vol_np, vol_torch_np, rtol=1e-8, atol=1e-5,
+                               err_msg="Volumes mismatch between Numpy and Torch maximumDistance_volumes")
+
+def test_maximumDistance_volumes_torch_heights(real_data):
+    num_endmembers = 7
+    img = real_data
+    rows, cols, bands = img.shape
+    
+    img_flat = np.reshape(img, (rows * cols, bands), order="F")
+    valid_mask = ~np.isnan(img_flat).any(axis=1)
+    valid_pixels = img_flat[valid_mask]
+    pixels_t = valid_pixels.T  # (bands, num_pixels)
+    
+    # 1. Run Numpy test method
+    em_np, vol_np, h_np = SpecComplex.maximumDistance_volumes_test(pixels_t, num_endmembers)
+    
+    # 2. Run Torch test method
+    data_torch = torch.from_numpy(valid_pixels).transpose(0, 1).unsqueeze(0)  # (1, bands, valid_pixels)
+    em_torch, vol_torch, h_torch = SpecComplexTorch.maximumDistance_volumes_torch_test(
+        data_torch, num_endmembers
+    )
+    
+    em_torch_np = em_torch.squeeze(0).cpu().numpy()
+    vol_torch_np = vol_torch.squeeze(0).cpu().numpy()
+    h_torch_np = h_torch.squeeze(0).cpu().numpy()
+    
+    # 3. Verify internal consistency: cumulative product of heights equals volumes
+    expected_vol_torch = torch.cumprod(h_torch[:, 1:], dim=-1)
+    torch.testing.assert_close(
+        vol_torch[:, 1:], expected_vol_torch, rtol=1e-6, atol=1e-6,
+        msg="Cumulative product of heights does not match volumes in Torch"
+    )
+    
+    # 4. Compare Torch vs Numpy
+    np.testing.assert_allclose(h_np, h_torch_np, rtol=1e-8, atol=1e-5,
+                               err_msg="Heights mismatch between Numpy and Torch")
+    np.testing.assert_allclose(vol_np, vol_torch_np, rtol=1e-8, atol=1e-5,
+                               err_msg="Volumes mismatch between Numpy and Torch")
+    np.testing.assert_allclose(em_np, em_torch_np, rtol=1e-8, atol=1e-5,
+                               err_msg="Endmembers mismatch between Numpy and Torch")
+
 if __name__ == "__main__":
     import datetime
     
