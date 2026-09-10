@@ -1,0 +1,125 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<kml xmlns="http://www.opengis.net/kml/2.2" xmlns:gx="http://www.google.com/kml/ext/2.2" xmlns:kml="http://www.opengis.net/kml/2.2" xmlns:atom="http://www.w3.org/2005/Atom">
+<Document>
+	<name>LakeFire2024.kml</name>
+	<Style id="style_LakeFire2024">
+		<BalloonStyle>
+			<text><![CDATA[<div style="font-family: Arial, sans-serif; min-width: 300px; padding: 4px;">
+          <h2 style="margin: 0 0 8px 0; color: #1a73e8; border-bottom: 2px solid #1a73e8; padding-bottom: 4px;">$[name]</h2>
+          $[description]
+        </div>]]></text>
+		</BalloonStyle>
+		<LineStyle>
+			<color>ffb9267f</color>
+			<width>2.5</width>
+		</LineStyle>
+		<PolyStyle>
+			<color>2eb9267f</color>
+		</PolyStyle>
+	</Style>
+	<Placemark>
+		<name>LakeFire2024</name>
+		<description><![CDATA[<table style="width: 100%; font-size: 12px; border-collapse: collapse;">
+  <tr style="background-color: #f8f9fa;">
+    <td style="padding: 4px; font-weight: bold; border: 1px solid #ddd;">Location Type</td>
+    <td style="padding: 4px; border: 1px solid #ddd;">Sub-ROI</td>
+  </tr>
+  <tr>
+    <td style="padding: 4px; font-weight: bold; border: 1px solid #ddd;">Source Cache</td>
+    <td style="padding: 4px; border: 1px solid #ddd;">SantaBarbara</td>
+  </tr>
+  <tr style="background-color: #f8f9fa;">
+    <td style="padding: 4px; font-weight: bold; border: 1px solid #ddd;">Longitude Range</td>
+    <td style="padding: 4px; border: 1px solid #ddd;">[-120.212400, -119.773519] (0.4389&deg;)</td>
+  </tr>
+  <tr>
+    <td style="padding: 4px; font-weight: bold; border: 1px solid #ddd;">Latitude Range</td>
+    <td style="padding: 4px; border: 1px solid #ddd;">[34.495958, 34.927972] (0.4320&deg;)</td>
+  </tr>
+  <tr style="background-color: #f8f9fa;">
+    <td style="padding: 4px; font-weight: bold; border: 1px solid #ddd;">Center (Lon, Lat)</td>
+    <td style="padding: 4px; border: 1px solid #ddd;">(-119.992959, 34.711965)</td>
+  </tr>
+  <tr>
+    <td style="padding: 4px; font-weight: bold; border: 1px solid #ddd;">Approx. Footprint</td>
+    <td style="padding: 4px; border: 1px solid #ddd;">40.16 km &times; 48.09 km (1931.4 km&sup2;)</td>
+  </tr>
+  <tr style="background-color: #f8f9fa;">
+    <td style="padding: 4px; font-weight: bold; border: 1px solid #ddd;">Date Range</td>
+    <td style="padding: 4px; border: 1px solid #ddd;">2020-01-01 to 2026-08-01</td>
+  </tr>
+  <tr>
+    <td style="padding: 4px; font-weight: bold; border: 1px solid #ddd;">Sensors Available</td>
+    <td style="padding: 4px; border: 1px solid #ddd;">Tanager: <b>No</b> | Dragonette: <b>No</b> | EnMAP: <b>No</b></td>
+  </tr>
+</table>]]></description>
+		<LookAt>
+			<longitude>-119.992959</longitude>
+			<latitude>34.711965</latitude>
+			<altitude>0</altitude>
+			<heading>0</heading>
+			<tilt>0</tilt>
+			<range>100249</range>
+		</LookAt>
+		<styleUrl>#style_LakeFire2024</styleUrl>
+		<ExtendedData>
+			<Data name="Location">
+				<value>LakeFire2024</value>
+			</Data>
+			<Data name="Type">
+				<value>Sub-ROI</value>
+			</Data>
+			<Data name="SourceCache">
+				<value>SantaBarbara</value>
+			</Data>
+			<Data name="LonMin">
+				<value>-120.2124</value>
+			</Data>
+			<Data name="LonMax">
+				<value>-119.773519</value>
+			</Data>
+			<Data name="LatMin">
+				<value>34.495958</value>
+			</Data>
+			<Data name="LatMax">
+				<value>34.927972</value>
+			</Data>
+			<Data name="CenterLon">
+				<value>-119.992959</value>
+			</Data>
+			<Data name="CenterLat">
+				<value>34.711965</value>
+			</Data>
+			<Data name="AreaKm2">
+				<value>1931.42</value>
+			</Data>
+			<Data name="StartDate">
+				<value>2020-01-01</value>
+			</Data>
+			<Data name="EndDate">
+				<value>2026-08-01</value>
+			</Data>
+			<Data name="Tanager">
+				<value>false</value>
+			</Data>
+			<Data name="Dragonette">
+				<value>false</value>
+			</Data>
+			<Data name="EnMAP">
+				<value>false</value>
+			</Data>
+		</ExtendedData>
+		<Polygon>
+			<tessellate>1</tessellate>
+			<outerBoundaryIs>
+				<LinearRing>
+					<coordinates>
+						-120.2124,34.495958,0 -119.773519,34.495958,0 -119.773519,34.927972,0 -120.2124,34.927972,0 -120.2124,34.495958,0 
+					</coordinates>
+				</LinearRing>
+			</outerBoundaryIs>
+		</Polygon>
+		<atom:link rel="app" href="https://www.google.com/earth/about/versions/#earth-pro" title="Google Earth Pro 7.3.7.1155"></atom:link>
+	</Placemark>
+</Document>
+</kml>

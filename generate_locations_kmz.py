@@ -6,6 +6,7 @@ Compatible with Google Earth, QGIS, ArcGIS Pro, and GDAL/OGR.
 """
 
 import argparse
+import hashlib
 import math
 import os
 import sys
@@ -111,7 +112,13 @@ def build_kml_document(locations: Dict[str, Any]) -> str:
 
     # Location styles
     for loc_name in locations.keys():
-        rgb = palette.get(loc_name, "#00B0FF")
+        if loc_name in palette:
+            rgb = palette[loc_name]
+        else:
+            # Generate deterministic fallback color
+            hash_hex = hashlib.md5(loc_name.encode('utf-8')).hexdigest()
+            rgb = f"#{hash_hex[:6].upper()}"
+
         line_col = kml_color(rgb, alpha_hex="FF")
         poly_col = kml_color(rgb, alpha_hex="2E")  # ~18% semi-transparent fill
 

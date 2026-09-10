@@ -1,0 +1,3671 @@
+{
+  "type": "Feature",
+  "stac_version": "1.0.0",
+  "stac_extensions": [
+    "https://stac-extensions.github.io/eo/v1.1.0/schema.json",
+    "https://stac-extensions.github.io/projection/v1.0.0/schema.json",
+    "https://stac-extensions.github.io/scientific/v1.0.0/schema.json",
+    "https://stac-extensions.github.io/view/v1.1.0/schema.json",
+    "https://stac-extensions.github.io/processing/v1.2.0/schema.json",
+    "https://stac-extensions.github.io/sat/v1.1.0/schema.json",
+    "https://stac-extensions.github.io/raster/v1.1.0/schema.json"
+  ],
+  "id": "ENMAP01-____L1B-DT0000216073_20260907T150940Z_003_V010506_20260908T051021Z",
+  "collection": "ENMAP_HSI_L1B",
+  "geometry": {
+    "type": "Polygon",
+    "coordinates": [
+      [
+        [
+          -69.052503,
+          -38.881164
+        ],
+        [
+          -69.13412,
+          -39.149821
+        ],
+        [
+          -68.789183,
+          -39.198101
+        ],
+        [
+          -68.708821,
+          -38.92926
+        ],
+        [
+          -69.052503,
+          -38.881164
+        ]
+      ]
+    ]
+  },
+  "bbox": [
+    -69.134119664,
+    -39.198101057,
+    -68.708821205,
+    -38.881164392
+  ],
+  "properties": {
+    "version": "01.05.06",
+    "created": "2026-09-08T08:27:20.479Z",
+    "updated": "2026-09-08T08:27:20.479Z",
+    "datetime": "2026-09-07T15:09:43.096675Z",
+    "start_datetime": "2026-09-07T15:09:40.851065Z",
+    "end_datetime": "2026-09-07T15:09:45.342284Z",
+    "platform": "enmap",
+    "proj:epsg": 4326,
+    "sat:relative_orbit": 23879,
+    "sat:orbit_state": "DESCENDING",
+    "eo:cloud_cover": 0,
+    "eo:snow_cover": 0,
+    "view:sun_azimuth": 28.180722,
+    "view:sun_elevation": 41.038371,
+    "processing:facility": "NZ",
+    "processing:level": "L1B",
+    "eop:sensorType": "OPTICAL",
+    "card4l:eastern_geometric_accuracy": 1.0,
+    "card4l:geometric_accuracy_radial_rmse": 2.0,
+    "card4l:northern_geometric_accuracy": 1.0,
+    "card4l:specification": "SR",
+    "card4l:specification_version": "5.0",
+    "enmap:SWIRAOrSWIRBSelected": "SWIRA",
+    "enmap:acquisitionConfiguration": "earth",
+    "enmap:acquisitionType": "EARTH",
+    "enmap:acrossOffNadirAngle": -0.0882619370025,
+    "enmap:alongOffNadirAngle": 0.126539658946,
+    "enmap:archivedVersion": "01.05.06",
+    "enmap:biomeType": "Temperate Grasslands, Savanas and Shrublands",
+    "enmap:cirrus_cover": 0,
+    "enmap:cloud_shadow": 0,
+    "enmap:compressionType": "COMPRESSED",
+    "enmap:datatakeID": "0000216073",
+    "enmap:defectivePixelsSWIR": 12,
+    "enmap:defectivePixelsVNIR": 2,
+    "enmap:haze_cover": 1,
+    "enmap:imageID": "0000028069",
+    "enmap:instrumentStatusOK": "true",
+    "enmap:missionPhase": "routine",
+    "enmap:nodata": 0,
+    "enmap:non_cloud_shadow": 0,
+    "enmap:numberOfTiles": "03",
+    "enmap:overallQuality": 0,
+    "enmap:overallQualitySWIR": 0,
+    "enmap:overallQualityVNIR": 0,
+    "enmap:ozoneValue": 330,
+    "enmap:processingDate": "2026-09-08T05:10:21.561004Z",
+    "enmap:productScreeningFailedGroups": "TEMPERATURE",
+    "enmap:productScreeningResultStatus": "WARNING",
+    "enmap:qualityAtmosphere": 0,
+    "enmap:saturationCrosstalkSWIR": 0,
+    "enmap:saturationCrosstalkVNIR": 0,
+    "enmap:sceneAOT": 117,
+    "enmap:sceneAzimuthAngle": 13.2243688643,
+    "enmap:sceneSunglint": 0,
+    "enmap:sceneTerrain": 0,
+    "enmap:sceneWV": 547,
+    "enmap:season": "NA",
+    "enmap:status": "NOMINAL",
+    "enmap:statusSWIR": "on",
+    "enmap:statusVNIR": "on",
+    "enmap:swirNumberChannelsMissing": 0,
+    "enmap:tileID": "03",
+    "enmap:vnirNumberChannelsMissing": 0,
+    "enmap:water_cover": 0,
+    "eo:instrument": "HSI",
+    "sci:citation": "DLR (2026): EnMAP L0 Product 0000216073_03_L0_20260907T192317_010506_20260908 doi: 10.15489/rlyibn8gjc58 Processed to level 1B (version: 010506, parameters: XXXXXXXXXXXG)"
+  },
+  "assets": {
+    "metadata": {
+      "href": "https://download.geoservice.dlr.de/ENMAP/files/L1B/2026/09/07/DT0000216073/03/ENMAP01-____L1B-DT0000216073_20260907T150940Z_003_V010506_20260908T051021Z/ENMAP01-____L1B-DT0000216073_20260907T150940Z_003_V010506_20260908T051021Z-METADATA.XML",
+      "type": "application/xml",
+      "title": "Metadata",
+      "description": "Original XML metadata",
+      "roles": [
+        "metadata"
+      ]
+    },
+    "image_swir": {
+      "href": "https://download.geoservice.dlr.de/ENMAP/files/L1B/2026/09/07/DT0000216073/03/ENMAP01-____L1B-DT0000216073_20260907T150940Z_003_V010506_20260908T051021Z/ENMAP01-____L1B-DT0000216073_20260907T150940Z_003_V010506_20260908T051021Z-SPECTRAL_IMAGE_SWIR_COG.TIF",
+      "type": "image/tiff; application=geotiff; profile=cloud-optimized",
+      "title": "Spectral Image SWIR",
+      "description": "Short-wave Infrared (SWIR) Earth image measurement data covering 1 tile (30x30km) in sensor geometry",
+      "proj:epsg": 4326,
+      "proj:shape": [
+        1024,
+        1000
+      ],
+      "proj:transform": [
+        0.0003445556556556565,
+        -8.002727272727333e-05,
+        -69.05202106419146,
+        -4.8221278421280915e-05,
+        -0.0002652627147046484,
+        -38.87835417228916,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "proj:geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              -69.13396899146419,
+              -39.198204470568
+            ],
+            [
+              -68.70746540853581,
+              -39.198204470568
+            ],
+            [
+              -68.70746540853581,
+              -38.87835417228916
+            ],
+            [
+              -69.13396899146419,
+              -38.87835417228916
+            ],
+            [
+              -69.13396899146419,
+              -39.198204470568
+            ]
+          ]
+        ]
+      },
+      "proj:bbox": [
+        -69.13396899146419,
+        -39.198204470568,
+        -68.70746540853581,
+        -38.87835417228916
+      ],
+      "raster:bands": [
+        {
+          "data_type": "uint16",
+          "scale": 9.37505565131e-07,
+          "offset": 0.0142492711181,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 8.97863971946e-07,
+          "offset": 0.0135469538401,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 9.36814157528e-07,
+          "offset": 0.0138456924851,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 5.69044147099e-07,
+          "offset": 0.00945931393048,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 4.82835970421e-07,
+          "offset": 0.00812571920345,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 4.94794428547e-07,
+          "offset": 0.00840012330425,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 5.84901273241e-07,
+          "offset": 0.00997152642071,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 7.18386597832e-07,
+          "offset": 0.0117791151984,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 7.73542086122e-07,
+          "offset": 0.0125258540879,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 8.12562873385e-07,
+          "offset": 0.013189802428,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 7.98882859781e-07,
+          "offset": 0.0133040875253,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 8.11973673367e-07,
+          "offset": 0.0132808677386,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 8.15488863978e-07,
+          "offset": 0.013083124883,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 8.15168541537e-07,
+          "offset": 0.012717792503,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 8.0723517505e-07,
+          "offset": 0.0123902319351,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 7.83363621232e-07,
+          "offset": 0.0117788993471,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 7.60911945661e-07,
+          "offset": 0.0116842975626,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 7.46092016192e-07,
+          "offset": 0.0114579367356,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 6.94145777895e-07,
+          "offset": 0.0108061280722,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 5.94470131644e-07,
+          "offset": 0.00972084393032,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 3.20759778935e-07,
+          "offset": 0.00588156616949,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 2.22455507804e-07,
+          "offset": 0.00361176197437,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 2.99041718495e-07,
+          "offset": 0.00380563098602,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 3.38186286079e-07,
+          "offset": 0.00345521292206,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 4.95461108509e-07,
+          "offset": 0.00479476712894,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 5.37782325392e-07,
+          "offset": 0.00494047585933,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 5.39152236749e-07,
+          "offset": 0.00477657801443,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 5.44925828469e-07,
+          "offset": 0.00454828505437,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 5.49284771695e-07,
+          "offset": 0.00451273956333,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 5.63929220175e-07,
+          "offset": 0.00463665927352,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 5.68314653242e-07,
+          "offset": 0.00472900297194,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 5.51055441385e-07,
+          "offset": 0.00466426723518,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 4.77635093625e-07,
+          "offset": 0.0041752333224,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 4.36558103465e-07,
+          "offset": 0.00392479798692,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 5.06021289545e-07,
+          "offset": 0.00414261563102,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 5.14627588961e-07,
+          "offset": 0.00395220790322,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 4.71604817614e-07,
+          "offset": 0.00322673131543,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 4.20257869349e-07,
+          "offset": 0.00252294028322,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 3.34550128982e-07,
+          "offset": 0.00181484085464,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 2.29855823074e-07,
+          "offset": 0.00122854585684,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 7.07634408078e-08,
+          "offset": 5.68870807674e-05,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 4.38953053738e-08,
+          "offset": -6.84959808483e-05,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 2.7616723933e-08,
+          "offset": -5.46920674341e-06,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 9.13949185715e-09,
+          "offset": -1.90503805948e-05,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 1.34727405408e-07,
+          "offset": 0.000360777013749,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 1.8411372169e-07,
+          "offset": 0.000510502370909,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 1.51555034648e-07,
+          "offset": 0.000458978832719,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 2.11561659927e-07,
+          "offset": 0.000573801656624,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 3.09887716964e-07,
+          "offset": 0.000799374664759,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 3.50953451783e-07,
+          "offset": 0.00086173552936,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 3.79881524131e-07,
+          "offset": 0.00093669110706,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 3.87655553652e-07,
+          "offset": 0.00108101778479,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 3.83342285507e-07,
+          "offset": 0.0010837523866,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 3.84412310256e-07,
+          "offset": 0.00107605172361,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 3.73095719183e-07,
+          "offset": 0.00107694046248,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 3.38057219158e-07,
+          "offset": 0.000912932691933,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 3.59910485797e-07,
+          "offset": 0.00081948503997,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 3.48019161798e-07,
+          "offset": 0.000968410055871,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 3.22675943797e-07,
+          "offset": 0.000919931886572,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 3.51586536259e-07,
+          "offset": 0.000935333826888,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 3.44515340218e-07,
+          "offset": 0.0010919062928,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 3.2433920457e-07,
+          "offset": 0.00103318795416,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 3.2626793221e-07,
+          "offset": 0.000936121316604,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 3.16875890658e-07,
+          "offset": 0.000939383352737,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 3.12935498298e-07,
+          "offset": 0.00100366083259,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 3.04534040394e-07,
+          "offset": 0.000896665334295,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 5.04715385831e-07,
+          "offset": 0.00101420033349,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 2.90030567895e-07,
+          "offset": 0.000788029883568,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 2.81914245281e-07,
+          "offset": 0.000780877933729,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 2.65734437624e-07,
+          "offset": 0.000819713268262,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 2.43866590204e-07,
+          "offset": 0.000837157038266,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 2.42540421192e-07,
+          "offset": 0.000774747993989,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 2.36051333735e-07,
+          "offset": 0.000581655049986,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 2.11494170518e-07,
+          "offset": 0.000689198702912,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 1.72944402199e-07,
+          "offset": 0.000526419540273,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 5.06279849726e-08,
+          "offset": 0.00014075146277,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 9.30577476764e-08,
+          "offset": 0.000279858753788,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 1.14376307483e-07,
+          "offset": 0.00034417089948,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 7.82143482643e-08,
+          "offset": 0.000226952443349,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 4.42707427438e-08,
+          "offset": 2.85603817279e-05,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 3.00946699072e-08,
+          "offset": 5.00167939758e-05,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 7.16902584039e-08,
+          "offset": 0.000212120001131,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 1.23055191054e-07,
+          "offset": 0.00033392264903,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 1.20490408778e-07,
+          "offset": 0.000307169072943,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 7.6069033483e-08,
+          "offset": 0.000231356557572,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 7.44547519156e-08,
+          "offset": 0.000178856928082,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 1.02885912352e-07,
+          "offset": 0.000199283993191,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 1.08850546422e-07,
+          "offset": 0.000368724836843,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 1.20500044032e-07,
+          "offset": 0.000395953703265,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 1.27799842859e-07,
+          "offset": 0.00041480149465,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 1.3134824525e-07,
+          "offset": 0.000354909102568,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 1.2992271091e-07,
+          "offset": 0.000426255512565,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 1.30084648541e-07,
+          "offset": 0.000331349622153,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 1.30190650542e-07,
+          "offset": 0.000421269933091,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 1.29952739362e-07,
+          "offset": 0.0004128887917,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 1.24768489773e-07,
+          "offset": 0.000333388131907,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 1.18902332827e-07,
+          "offset": 0.000392249743074,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 1.09256868475e-07,
+          "offset": 0.000368490930489,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 1.12749853947e-07,
+          "offset": 0.000307350563366,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 1.07773238387e-07,
+          "offset": 0.000320455232278,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 1.06748320267e-07,
+          "offset": 0.000373301595556,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 9.26570603997e-08,
+          "offset": 0.000288852732851,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 9.74176075306e-08,
+          "offset": 0.000332312651342,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 9.94587251453e-08,
+          "offset": 0.000276952127001,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 9.79115421762e-08,
+          "offset": 0.000312098906871,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 9.56347374488e-08,
+          "offset": 0.000282654189954,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 9.16688500376e-08,
+          "offset": 0.000354886121416,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 9.09280866293e-08,
+          "offset": 0.000255587503044,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 8.83735364812e-08,
+          "offset": 0.000214126165037,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 1.10067252985e-07,
+          "offset": 0.000218954231764,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 8.37707133348e-08,
+          "offset": 0.000230912211124,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 8.28620364483e-08,
+          "offset": 0.000194829084855,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 7.89856233089e-08,
+          "offset": 0.000197970557919,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 8.72117068086e-08,
+          "offset": 0.00020836168343,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 7.60890287658e-08,
+          "offset": 0.000223959347957,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 8.74562759765e-08,
+          "offset": 0.000176990114421,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 8.64366444557e-08,
+          "offset": 0.000225568119189,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 7.15575320758e-08,
+          "offset": 0.000177673276686,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 6.12445706127e-08,
+          "offset": 0.000185871719516,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 5.62018405863e-08,
+          "offset": 0.000135990963302,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 6.65965631445e-08,
+          "offset": 0.00014462148129,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 7.1757619911e-08,
+          "offset": 0.000159869856054,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 4.8793765953e-08,
+          "offset": 0.000151774146331,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 6.56907711496e-08,
+          "offset": 0.000144760615725,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 5.52291844794e-08,
+          "offset": 0.000106804111846,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 5.37350877781e-08,
+          "offset": 0.000131757905952,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 6.14040425856e-08,
+          "offset": 0.000137536937055,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 6.084260432e-08,
+          "offset": 0.000137788824622,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 3.54160015843e-08,
+          "offset": 9.78456916477e-05,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 8.36174090611e-08,
+          "offset": 0.00010625141084,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 6.05318105481e-08,
+          "offset": 0.000104883326067,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 4.40571612903e-08,
+          "offset": 0.00010161597187,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 3.89468388235e-08,
+          "offset": 7.15211949663e-05,
+          "sampling": "area",
+          "nodata": 0
+        }
+      ],
+      "eo:bands": [
+        {
+          "name": "B092",
+          "center_wavelength": 0.901962,
+          "full_width_half_max": 0.00917725
+        },
+        {
+          "name": "B093",
+          "center_wavelength": 0.911572,
+          "full_width_half_max": 0.00931901
+        },
+        {
+          "name": "B094",
+          "center_wavelength": 0.92132,
+          "full_width_half_max": 0.00945441
+        },
+        {
+          "name": "B095",
+          "center_wavelength": 0.931204,
+          "full_width_half_max": 0.00958399
+        },
+        {
+          "name": "B096",
+          "center_wavelength": 0.941218,
+          "full_width_half_max": 0.0097083
+        },
+        {
+          "name": "B097",
+          "center_wavelength": 0.951361,
+          "full_width_half_max": 0.00982789
+        },
+        {
+          "name": "B098",
+          "center_wavelength": 0.961629,
+          "full_width_half_max": 0.00994331
+        },
+        {
+          "name": "B099",
+          "center_wavelength": 0.972017,
+          "full_width_half_max": 0.0100551
+        },
+        {
+          "name": "B100",
+          "center_wavelength": 0.982524,
+          "full_width_half_max": 0.0101638
+        },
+        {
+          "name": "B101",
+          "center_wavelength": 0.993145,
+          "full_width_half_max": 0.01027
+        },
+        {
+          "name": "B102",
+          "center_wavelength": 1.00388,
+          "full_width_half_max": 0.0103742
+        },
+        {
+          "name": "B103",
+          "center_wavelength": 1.01472,
+          "full_width_half_max": 0.0104768
+        },
+        {
+          "name": "B104",
+          "center_wavelength": 1.02566,
+          "full_width_half_max": 0.0105775
+        },
+        {
+          "name": "B105",
+          "center_wavelength": 1.0367,
+          "full_width_half_max": 0.0106753
+        },
+        {
+          "name": "B106",
+          "center_wavelength": 1.04784,
+          "full_width_half_max": 0.010769
+        },
+        {
+          "name": "B107",
+          "center_wavelength": 1.05907,
+          "full_width_half_max": 0.0108578
+        },
+        {
+          "name": "B108",
+          "center_wavelength": 1.07039,
+          "full_width_half_max": 0.0109405
+        },
+        {
+          "name": "B109",
+          "center_wavelength": 1.08179,
+          "full_width_half_max": 0.0110162
+        },
+        {
+          "name": "B110",
+          "center_wavelength": 1.09326,
+          "full_width_half_max": 0.0110839
+        },
+        {
+          "name": "B111",
+          "center_wavelength": 1.10481,
+          "full_width_half_max": 0.0111437
+        },
+        {
+          "name": "B112",
+          "center_wavelength": 1.11643,
+          "full_width_half_max": 0.011196
+        },
+        {
+          "name": "B113",
+          "center_wavelength": 1.12811,
+          "full_width_half_max": 0.0112414
+        },
+        {
+          "name": "B114",
+          "center_wavelength": 1.13984,
+          "full_width_half_max": 0.0112806
+        },
+        {
+          "name": "B115",
+          "center_wavelength": 1.15162,
+          "full_width_half_max": 0.0113139
+        },
+        {
+          "name": "B116",
+          "center_wavelength": 1.16344,
+          "full_width_half_max": 0.0113421
+        },
+        {
+          "name": "B117",
+          "center_wavelength": 1.17531,
+          "full_width_half_max": 0.0113656
+        },
+        {
+          "name": "B118",
+          "center_wavelength": 1.1872,
+          "full_width_half_max": 0.011385
+        },
+        {
+          "name": "B119",
+          "center_wavelength": 1.19911,
+          "full_width_half_max": 0.0114009
+        },
+        {
+          "name": "B120",
+          "center_wavelength": 1.21105,
+          "full_width_half_max": 0.0114135
+        },
+        {
+          "name": "B121",
+          "center_wavelength": 1.223,
+          "full_width_half_max": 0.0114229
+        },
+        {
+          "name": "B122",
+          "center_wavelength": 1.23497,
+          "full_width_half_max": 0.0114292
+        },
+        {
+          "name": "B123",
+          "center_wavelength": 1.24695,
+          "full_width_half_max": 0.0114325
+        },
+        {
+          "name": "B124",
+          "center_wavelength": 1.25893,
+          "full_width_half_max": 0.0114329
+        },
+        {
+          "name": "B125",
+          "center_wavelength": 1.27092,
+          "full_width_half_max": 0.0114305
+        },
+        {
+          "name": "B126",
+          "center_wavelength": 1.28292,
+          "full_width_half_max": 0.0114253
+        },
+        {
+          "name": "B127",
+          "center_wavelength": 1.29491,
+          "full_width_half_max": 0.0114176
+        },
+        {
+          "name": "B128",
+          "center_wavelength": 1.3069,
+          "full_width_half_max": 0.0114073
+        },
+        {
+          "name": "B129",
+          "center_wavelength": 1.31888,
+          "full_width_half_max": 0.0113946
+        },
+        {
+          "name": "B130",
+          "center_wavelength": 1.33086,
+          "full_width_half_max": 0.0113796
+        },
+        {
+          "name": "B131",
+          "center_wavelength": 1.34282,
+          "full_width_half_max": 0.0113624
+        },
+        {
+          "name": "B132",
+          "center_wavelength": 1.35476,
+          "full_width_half_max": 0.011343
+        },
+        {
+          "name": "B133",
+          "center_wavelength": 1.36669,
+          "full_width_half_max": 0.0113215
+        },
+        {
+          "name": "B134",
+          "center_wavelength": 1.3786,
+          "full_width_half_max": 0.0112981
+        },
+        {
+          "name": "B135",
+          "center_wavelength": 1.39048,
+          "full_width_half_max": 0.0112728
+        },
+        {
+          "name": "B136",
+          "center_wavelength": 1.44943,
+          "full_width_half_max": 0.011122
+        },
+        {
+          "name": "B137",
+          "center_wavelength": 1.46111,
+          "full_width_half_max": 0.0110876
+        },
+        {
+          "name": "B138",
+          "center_wavelength": 1.47274,
+          "full_width_half_max": 0.011052
+        },
+        {
+          "name": "B139",
+          "center_wavelength": 1.48434,
+          "full_width_half_max": 0.0110151
+        },
+        {
+          "name": "B140",
+          "center_wavelength": 1.49589,
+          "full_width_half_max": 0.0109772
+        },
+        {
+          "name": "B141",
+          "center_wavelength": 1.5074,
+          "full_width_half_max": 0.0109383
+        },
+        {
+          "name": "B142",
+          "center_wavelength": 1.51887,
+          "full_width_half_max": 0.0108984
+        },
+        {
+          "name": "B143",
+          "center_wavelength": 1.53029,
+          "full_width_half_max": 0.0108577
+        },
+        {
+          "name": "B144",
+          "center_wavelength": 1.54168,
+          "full_width_half_max": 0.0108161
+        },
+        {
+          "name": "B145",
+          "center_wavelength": 1.55301,
+          "full_width_half_max": 0.0107738
+        },
+        {
+          "name": "B146",
+          "center_wavelength": 1.56431,
+          "full_width_half_max": 0.0107308
+        },
+        {
+          "name": "B147",
+          "center_wavelength": 1.57555,
+          "full_width_half_max": 0.0106872
+        },
+        {
+          "name": "B148",
+          "center_wavelength": 1.58676,
+          "full_width_half_max": 0.010643
+        },
+        {
+          "name": "B149",
+          "center_wavelength": 1.59791,
+          "full_width_half_max": 0.0105985
+        },
+        {
+          "name": "B150",
+          "center_wavelength": 1.60902,
+          "full_width_half_max": 0.0105535
+        },
+        {
+          "name": "B151",
+          "center_wavelength": 1.62009,
+          "full_width_half_max": 0.0105082
+        },
+        {
+          "name": "B152",
+          "center_wavelength": 1.63111,
+          "full_width_half_max": 0.0104626
+        },
+        {
+          "name": "B153",
+          "center_wavelength": 1.64208,
+          "full_width_half_max": 0.0104169
+        },
+        {
+          "name": "B154",
+          "center_wavelength": 1.653,
+          "full_width_half_max": 0.010371
+        },
+        {
+          "name": "B155",
+          "center_wavelength": 1.66387,
+          "full_width_half_max": 0.0103251
+        },
+        {
+          "name": "B156",
+          "center_wavelength": 1.6747,
+          "full_width_half_max": 0.0102793
+        },
+        {
+          "name": "B157",
+          "center_wavelength": 1.68547,
+          "full_width_half_max": 0.0102335
+        },
+        {
+          "name": "B158",
+          "center_wavelength": 1.6962,
+          "full_width_half_max": 0.0101879
+        },
+        {
+          "name": "B159",
+          "center_wavelength": 1.70687,
+          "full_width_half_max": 0.0101425
+        },
+        {
+          "name": "B160",
+          "center_wavelength": 1.7175,
+          "full_width_half_max": 0.0100974
+        },
+        {
+          "name": "B161",
+          "center_wavelength": 1.72808,
+          "full_width_half_max": 0.0100525
+        },
+        {
+          "name": "B162",
+          "center_wavelength": 1.7386,
+          "full_width_half_max": 0.0100079
+        },
+        {
+          "name": "B163",
+          "center_wavelength": 1.74908,
+          "full_width_half_max": 0.00996359
+        },
+        {
+          "name": "B164",
+          "center_wavelength": 1.75951,
+          "full_width_half_max": 0.00991949
+        },
+        {
+          "name": "B165",
+          "center_wavelength": 1.76989,
+          "full_width_half_max": 0.00987564
+        },
+        {
+          "name": "B166",
+          "center_wavelength": 1.78022,
+          "full_width_half_max": 0.00983203
+        },
+        {
+          "name": "B167",
+          "center_wavelength": 1.96766,
+          "full_width_half_max": 0.00904694
+        },
+        {
+          "name": "B168",
+          "center_wavelength": 1.97708,
+          "full_width_half_max": 0.00900775
+        },
+        {
+          "name": "B169",
+          "center_wavelength": 1.98645,
+          "full_width_half_max": 0.00896875
+        },
+        {
+          "name": "B170",
+          "center_wavelength": 1.99579,
+          "full_width_half_max": 0.00892995
+        },
+        {
+          "name": "B171",
+          "center_wavelength": 2.00508,
+          "full_width_half_max": 0.00889134
+        },
+        {
+          "name": "B172",
+          "center_wavelength": 2.01433,
+          "full_width_half_max": 0.00885292
+        },
+        {
+          "name": "B173",
+          "center_wavelength": 2.02354,
+          "full_width_half_max": 0.00881469
+        },
+        {
+          "name": "B174",
+          "center_wavelength": 2.03271,
+          "full_width_half_max": 0.00877665
+        },
+        {
+          "name": "B175",
+          "center_wavelength": 2.04183,
+          "full_width_half_max": 0.00873878
+        },
+        {
+          "name": "B176",
+          "center_wavelength": 2.05092,
+          "full_width_half_max": 0.00870111
+        },
+        {
+          "name": "B177",
+          "center_wavelength": 2.05996,
+          "full_width_half_max": 0.00866361
+        },
+        {
+          "name": "B178",
+          "center_wavelength": 2.06897,
+          "full_width_half_max": 0.00862632
+        },
+        {
+          "name": "B179",
+          "center_wavelength": 2.07793,
+          "full_width_half_max": 0.00858923
+        },
+        {
+          "name": "B180",
+          "center_wavelength": 2.08686,
+          "full_width_half_max": 0.00855236
+        },
+        {
+          "name": "B181",
+          "center_wavelength": 2.09574,
+          "full_width_half_max": 0.00851572
+        },
+        {
+          "name": "B182",
+          "center_wavelength": 2.10459,
+          "full_width_half_max": 0.00847932
+        },
+        {
+          "name": "B183",
+          "center_wavelength": 2.1134,
+          "full_width_half_max": 0.00844317
+        },
+        {
+          "name": "B184",
+          "center_wavelength": 2.12217,
+          "full_width_half_max": 0.00840728
+        },
+        {
+          "name": "B185",
+          "center_wavelength": 2.1309,
+          "full_width_half_max": 0.00837166
+        },
+        {
+          "name": "B186",
+          "center_wavelength": 2.1396,
+          "full_width_half_max": 0.00833632
+        },
+        {
+          "name": "B187",
+          "center_wavelength": 2.14826,
+          "full_width_half_max": 0.00830128
+        },
+        {
+          "name": "B188",
+          "center_wavelength": 2.15688,
+          "full_width_half_max": 0.00826653
+        },
+        {
+          "name": "B189",
+          "center_wavelength": 2.16547,
+          "full_width_half_max": 0.0082321
+        },
+        {
+          "name": "B190",
+          "center_wavelength": 2.17402,
+          "full_width_half_max": 0.008198
+        },
+        {
+          "name": "B191",
+          "center_wavelength": 2.18253,
+          "full_width_half_max": 0.00816422
+        },
+        {
+          "name": "B192",
+          "center_wavelength": 2.19101,
+          "full_width_half_max": 0.00813079
+        },
+        {
+          "name": "B193",
+          "center_wavelength": 2.19946,
+          "full_width_half_max": 0.00809771
+        },
+        {
+          "name": "B194",
+          "center_wavelength": 2.20786,
+          "full_width_half_max": 0.008065
+        },
+        {
+          "name": "B195",
+          "center_wavelength": 2.21624,
+          "full_width_half_max": 0.00803267
+        },
+        {
+          "name": "B196",
+          "center_wavelength": 2.22458,
+          "full_width_half_max": 0.00800072
+        },
+        {
+          "name": "B197",
+          "center_wavelength": 2.23289,
+          "full_width_half_max": 0.00796916
+        },
+        {
+          "name": "B198",
+          "center_wavelength": 2.24116,
+          "full_width_half_max": 0.00793802
+        },
+        {
+          "name": "B199",
+          "center_wavelength": 2.2494,
+          "full_width_half_max": 0.00790728
+        },
+        {
+          "name": "B200",
+          "center_wavelength": 2.25761,
+          "full_width_half_max": 0.00787694
+        },
+        {
+          "name": "B201",
+          "center_wavelength": 2.26579,
+          "full_width_half_max": 0.00784695
+        },
+        {
+          "name": "B202",
+          "center_wavelength": 2.27393,
+          "full_width_half_max": 0.00781727
+        },
+        {
+          "name": "B203",
+          "center_wavelength": 2.28204,
+          "full_width_half_max": 0.00778785
+        },
+        {
+          "name": "B204",
+          "center_wavelength": 2.29012,
+          "full_width_half_max": 0.00775866
+        },
+        {
+          "name": "B205",
+          "center_wavelength": 2.29817,
+          "full_width_half_max": 0.00772966
+        },
+        {
+          "name": "B206",
+          "center_wavelength": 2.30619,
+          "full_width_half_max": 0.00770079
+        },
+        {
+          "name": "B207",
+          "center_wavelength": 2.31418,
+          "full_width_half_max": 0.00767203
+        },
+        {
+          "name": "B208",
+          "center_wavelength": 2.32213,
+          "full_width_half_max": 0.00764333
+        },
+        {
+          "name": "B209",
+          "center_wavelength": 2.33005,
+          "full_width_half_max": 0.00761464
+        },
+        {
+          "name": "B210",
+          "center_wavelength": 2.33794,
+          "full_width_half_max": 0.00758593
+        },
+        {
+          "name": "B211",
+          "center_wavelength": 2.34581,
+          "full_width_half_max": 0.00755715
+        },
+        {
+          "name": "B212",
+          "center_wavelength": 2.35364,
+          "full_width_half_max": 0.00752827
+        },
+        {
+          "name": "B213",
+          "center_wavelength": 2.36144,
+          "full_width_half_max": 0.00749924
+        },
+        {
+          "name": "B214",
+          "center_wavelength": 2.36921,
+          "full_width_half_max": 0.00747001
+        },
+        {
+          "name": "B215",
+          "center_wavelength": 2.37695,
+          "full_width_half_max": 0.00744055
+        },
+        {
+          "name": "B216",
+          "center_wavelength": 2.38466,
+          "full_width_half_max": 0.00741082
+        },
+        {
+          "name": "B217",
+          "center_wavelength": 2.39234,
+          "full_width_half_max": 0.00738077
+        },
+        {
+          "name": "B218",
+          "center_wavelength": 2.4,
+          "full_width_half_max": 0.00735037
+        },
+        {
+          "name": "B219",
+          "center_wavelength": 2.40762,
+          "full_width_half_max": 0.00731957
+        },
+        {
+          "name": "B220",
+          "center_wavelength": 2.41521,
+          "full_width_half_max": 0.00728832
+        },
+        {
+          "name": "B221",
+          "center_wavelength": 2.42278,
+          "full_width_half_max": 0.00725659
+        },
+        {
+          "name": "B222",
+          "center_wavelength": 2.43032,
+          "full_width_half_max": 0.00722434
+        },
+        {
+          "name": "B223",
+          "center_wavelength": 2.43783,
+          "full_width_half_max": 0.00719152
+        },
+        {
+          "name": "B224",
+          "center_wavelength": 2.4453,
+          "full_width_half_max": 0.0071581
+        }
+      ],
+      "roles": [
+        "data"
+      ]
+    },
+    "image_vnir": {
+      "href": "https://download.geoservice.dlr.de/ENMAP/files/L1B/2026/09/07/DT0000216073/03/ENMAP01-____L1B-DT0000216073_20260907T150940Z_003_V010506_20260908T051021Z/ENMAP01-____L1B-DT0000216073_20260907T150940Z_003_V010506_20260908T051021Z-SPECTRAL_IMAGE_VNIR_COG.TIF",
+      "type": "image/tiff; application=geotiff; profile=cloud-optimized",
+      "title": "Spectral Image VNIR",
+      "description": "Visible and Near Infrared (VNIR) Earth image measurement data covering 1 tile (30x30km) in sensor geometry",
+      "proj:epsg": 4326,
+      "proj:shape": [
+        1024,
+        1000
+      ],
+      "proj:transform": [
+        0.0003445556556556565,
+        -8.002727272727333e-05,
+        -69.05202106419146,
+        -4.8221278421280915e-05,
+        -0.0002652627147046484,
+        -38.87835417228916,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "proj:geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              -69.13396899146419,
+              -39.198204470568
+            ],
+            [
+              -68.70746540853581,
+              -39.198204470568
+            ],
+            [
+              -68.70746540853581,
+              -38.87835417228916
+            ],
+            [
+              -69.13396899146419,
+              -38.87835417228916
+            ],
+            [
+              -69.13396899146419,
+              -39.198204470568
+            ]
+          ]
+        ]
+      },
+      "proj:bbox": [
+        -69.13396899146419,
+        -39.198204470568,
+        -68.70746540853581,
+        -38.87835417228916
+      ],
+      "raster:bands": [
+        {
+          "data_type": "uint16",
+          "scale": 5.75297909831e-07,
+          "offset": 0.0472300446393,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 5.92137945525e-07,
+          "offset": 0.0436377229138,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 5.68866847065e-07,
+          "offset": 0.0379711586832,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 6.34403908919e-07,
+          "offset": 0.0401763271671,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 7.05091084847e-07,
+          "offset": 0.0415744771382,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 7.83269428812e-07,
+          "offset": 0.0416785282743,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 8.56171348772e-07,
+          "offset": 0.0437066263454,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 9.08104626374e-07,
+          "offset": 0.0427304514964,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 9.35077765465e-07,
+          "offset": 0.0416467897295,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 9.77147726769e-07,
+          "offset": 0.0411823641468,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 9.85134243474e-07,
+          "offset": 0.0402020907217,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 1.01922735175e-06,
+          "offset": 0.0391321793319,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 1.02777493012e-06,
+          "offset": 0.0376081209956,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 1.03465842346e-06,
+          "offset": 0.0360667230971,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 9.97179276769e-07,
+          "offset": 0.0329537217383,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 1.0617858403e-06,
+          "offset": 0.033325895589,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 1.08375887968e-06,
+          "offset": 0.033001479062,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 1.05635894718e-06,
+          "offset": 0.0308598631464,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 1.07887144706e-06,
+          "offset": 0.0311535499716,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 1.09658985407e-06,
+          "offset": 0.0307982662186,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 1.03083456367e-06,
+          "offset": 0.0297995220402,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 1.0645340761e-06,
+          "offset": 0.0308760245938,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 1.12441328297e-06,
+          "offset": 0.0315736575708,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 1.12131021972e-06,
+          "offset": 0.0315022170565,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 1.14242944489e-06,
+          "offset": 0.0311447506079,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 1.14709358975e-06,
+          "offset": 0.0303051288404,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 1.17338526914e-06,
+          "offset": 0.0305476841397,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 1.1948775122e-06,
+          "offset": 0.0306060155947,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 1.18662268637e-06,
+          "offset": 0.0295364445761,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 1.18956101236e-06,
+          "offset": 0.0283082544045,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 1.22234338509e-06,
+          "offset": 0.0280372961599,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 1.22431000002e-06,
+          "offset": 0.026894846379,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 1.249820627e-06,
+          "offset": 0.026281917482,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 1.30728073151e-06,
+          "offset": 0.0261120575648,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 1.30580002895e-06,
+          "offset": 0.024798050437,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 1.31917751264e-06,
+          "offset": 0.0242226678356,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 1.34274073835e-06,
+          "offset": 0.023699101287,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 1.35653489702e-06,
+          "offset": 0.0229944823605,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 1.36318816749e-06,
+          "offset": 0.0217163919358,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 1.3727264432e-06,
+          "offset": 0.0204101391567,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 1.37962392045e-06,
+          "offset": 0.02004072316,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 1.37080246213e-06,
+          "offset": 0.0192047265471,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 1.40631124211e-06,
+          "offset": 0.019116103635,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 1.44040548729e-06,
+          "offset": 0.0187434417907,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 1.44409610204e-06,
+          "offset": 0.0175246013455,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 1.42903816192e-06,
+          "offset": 0.0162925381045,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 1.47583616203e-06,
+          "offset": 0.0156835609423,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 1.50091533429e-06,
+          "offset": 0.0153628740501,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 1.50967699151e-06,
+          "offset": 0.0145395416735,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 1.49785376801e-06,
+          "offset": 0.0142104501759,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 1.35363602157e-06,
+          "offset": 0.0136518436897,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 1.31817681056e-06,
+          "offset": 0.0164177684285,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 1.33604005902e-06,
+          "offset": 0.0210260352473,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 1.33613862851e-06,
+          "offset": 0.0223323026039,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 1.31447005178e-06,
+          "offset": 0.0218640720458,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 1.20985405007e-06,
+          "offset": 0.0204419874857,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 1.21092637705e-06,
+          "offset": 0.0203777884857,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 1.27345729664e-06,
+          "offset": 0.0212969264347,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 1.30944857829e-06,
+          "offset": 0.021593298754,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 1.34421598378e-06,
+          "offset": 0.0214120751797,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 1.23922275763e-06,
+          "offset": 0.0186206934924,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 7.49712427182e-07,
+          "offset": 0.0117451502033,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 1.28909176032e-06,
+          "offset": 0.0184401737976,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 1.39398596221e-06,
+          "offset": 0.0199041992603,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 1.37499001722e-06,
+          "offset": 0.0197759453354,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 1.34736702433e-06,
+          "offset": 0.018939730968,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 1.33566010601e-06,
+          "offset": 0.018736539265,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 1.31042233577e-06,
+          "offset": 0.0182576169676,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 1.17097605783e-06,
+          "offset": 0.0162303137351,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 1.16779682208e-06,
+          "offset": 0.0160889048946,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 1.20132852762e-06,
+          "offset": 0.0162277129323,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 1.27478872383e-06,
+          "offset": 0.0160454690513,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 1.25012599917e-06,
+          "offset": 0.0155760754714,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 1.22487458609e-06,
+          "offset": 0.0144339695581,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 1.23594301964e-06,
+          "offset": 0.0145015278051,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 1.19358087425e-06,
+          "offset": 0.0142133053414,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 1.21993587914e-06,
+          "offset": 0.0142225838302,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 1.17871006837e-06,
+          "offset": 0.0135737586484,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 1.05786250149e-06,
+          "offset": 0.0115871328197,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 9.54890006862e-07,
+          "offset": 0.0107547544825,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 9.03822139879e-07,
+          "offset": 0.0102087375972,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 8.73985085103e-07,
+          "offset": 0.0102338665777,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 7.7346000172e-07,
+          "offset": 0.00849456107584,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 5.00657437693e-07,
+          "offset": 0.00613915121478,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 4.96783952079e-07,
+          "offset": 0.00614101354246,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 4.91387641644e-07,
+          "offset": 0.00669095188057,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 5.61560027861e-07,
+          "offset": 0.00750485670707,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 6.84874276492e-07,
+          "offset": 0.00940450431951,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 7.11459617945e-07,
+          "offset": 0.00971456717332,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 7.31757487489e-07,
+          "offset": 0.0115223855538,
+          "sampling": "area",
+          "nodata": 0
+        },
+        {
+          "data_type": "uint16",
+          "scale": 7.28824277562e-07,
+          "offset": 0.0119844278608,
+          "sampling": "area",
+          "nodata": 0
+        }
+      ],
+      "eo:bands": [
+        {
+          "name": "B001",
+          "center_wavelength": 0.418416,
+          "full_width_half_max": 0.00699561
+        },
+        {
+          "name": "B002",
+          "center_wavelength": 0.424043,
+          "full_width_half_max": 0.0066675
+        },
+        {
+          "name": "B003",
+          "center_wavelength": 0.429457,
+          "full_width_half_max": 0.00642408
+        },
+        {
+          "name": "B004",
+          "center_wavelength": 0.434686,
+          "full_width_half_max": 0.00625124
+        },
+        {
+          "name": "B005",
+          "center_wavelength": 0.439757,
+          "full_width_half_max": 0.00613485
+        },
+        {
+          "name": "B006",
+          "center_wavelength": 0.444699,
+          "full_width_half_max": 0.00606076
+        },
+        {
+          "name": "B007",
+          "center_wavelength": 0.449539,
+          "full_width_half_max": 0.00601486
+        },
+        {
+          "name": "B008",
+          "center_wavelength": 0.454306,
+          "full_width_half_max": 0.00598302
+        },
+        {
+          "name": "B009",
+          "center_wavelength": 0.459031,
+          "full_width_half_max": 0.00595232
+        },
+        {
+          "name": "B010",
+          "center_wavelength": 0.46373,
+          "full_width_half_max": 0.0059199
+        },
+        {
+          "name": "B011",
+          "center_wavelength": 0.468411,
+          "full_width_half_max": 0.00588775
+        },
+        {
+          "name": "B012",
+          "center_wavelength": 0.47308,
+          "full_width_half_max": 0.0058579
+        },
+        {
+          "name": "B013",
+          "center_wavelength": 0.477744,
+          "full_width_half_max": 0.00583239
+        },
+        {
+          "name": "B014",
+          "center_wavelength": 0.482411,
+          "full_width_half_max": 0.00581325
+        },
+        {
+          "name": "B015",
+          "center_wavelength": 0.487087,
+          "full_width_half_max": 0.0058025
+        },
+        {
+          "name": "B016",
+          "center_wavelength": 0.49178,
+          "full_width_half_max": 0.0058022
+        },
+        {
+          "name": "B017",
+          "center_wavelength": 0.496497,
+          "full_width_half_max": 0.00581407
+        },
+        {
+          "name": "B018",
+          "center_wavelength": 0.501243,
+          "full_width_half_max": 0.00583751
+        },
+        {
+          "name": "B019",
+          "center_wavelength": 0.50602,
+          "full_width_half_max": 0.00587076
+        },
+        {
+          "name": "B020",
+          "center_wavelength": 0.510828,
+          "full_width_half_max": 0.00591208
+        },
+        {
+          "name": "B021",
+          "center_wavelength": 0.515672,
+          "full_width_half_max": 0.00595969
+        },
+        {
+          "name": "B022",
+          "center_wavelength": 0.52055,
+          "full_width_half_max": 0.00601183
+        },
+        {
+          "name": "B023",
+          "center_wavelength": 0.525467,
+          "full_width_half_max": 0.00606674
+        },
+        {
+          "name": "B024",
+          "center_wavelength": 0.530424,
+          "full_width_half_max": 0.00612279
+        },
+        {
+          "name": "B025",
+          "center_wavelength": 0.535422,
+          "full_width_half_max": 0.0061794
+        },
+        {
+          "name": "B026",
+          "center_wavelength": 0.540463,
+          "full_width_half_max": 0.00623648
+        },
+        {
+          "name": "B027",
+          "center_wavelength": 0.545551,
+          "full_width_half_max": 0.00629397
+        },
+        {
+          "name": "B028",
+          "center_wavelength": 0.550687,
+          "full_width_half_max": 0.00635179
+        },
+        {
+          "name": "B029",
+          "center_wavelength": 0.555873,
+          "full_width_half_max": 0.00640987
+        },
+        {
+          "name": "B030",
+          "center_wavelength": 0.561112,
+          "full_width_half_max": 0.00646815
+        },
+        {
+          "name": "B031",
+          "center_wavelength": 0.566405,
+          "full_width_half_max": 0.00652654
+        },
+        {
+          "name": "B032",
+          "center_wavelength": 0.571756,
+          "full_width_half_max": 0.00658497
+        },
+        {
+          "name": "B033",
+          "center_wavelength": 0.577166,
+          "full_width_half_max": 0.00664338
+        },
+        {
+          "name": "B034",
+          "center_wavelength": 0.582636,
+          "full_width_half_max": 0.00670177
+        },
+        {
+          "name": "B035",
+          "center_wavelength": 0.588171,
+          "full_width_half_max": 0.00676072
+        },
+        {
+          "name": "B036",
+          "center_wavelength": 0.593773,
+          "full_width_half_max": 0.00682113
+        },
+        {
+          "name": "B037",
+          "center_wavelength": 0.599446,
+          "full_width_half_max": 0.00688388
+        },
+        {
+          "name": "B038",
+          "center_wavelength": 0.605193,
+          "full_width_half_max": 0.00694987
+        },
+        {
+          "name": "B039",
+          "center_wavelength": 0.611017,
+          "full_width_half_max": 0.00701999
+        },
+        {
+          "name": "B040",
+          "center_wavelength": 0.616923,
+          "full_width_half_max": 0.00709511
+        },
+        {
+          "name": "B041",
+          "center_wavelength": 0.62292,
+          "full_width_half_max": 0.00717533
+        },
+        {
+          "name": "B042",
+          "center_wavelength": 0.628987,
+          "full_width_half_max": 0.00725495
+        },
+        {
+          "name": "B043",
+          "center_wavelength": 0.635112,
+          "full_width_half_max": 0.00733145
+        },
+        {
+          "name": "B044",
+          "center_wavelength": 0.641294,
+          "full_width_half_max": 0.00740537
+        },
+        {
+          "name": "B045",
+          "center_wavelength": 0.647537,
+          "full_width_half_max": 0.00747729
+        },
+        {
+          "name": "B046",
+          "center_wavelength": 0.653841,
+          "full_width_half_max": 0.00754777
+        },
+        {
+          "name": "B047",
+          "center_wavelength": 0.660207,
+          "full_width_half_max": 0.00761738
+        },
+        {
+          "name": "B048",
+          "center_wavelength": 0.666637,
+          "full_width_half_max": 0.00768669
+        },
+        {
+          "name": "B049",
+          "center_wavelength": 0.673131,
+          "full_width_half_max": 0.00775628
+        },
+        {
+          "name": "B050",
+          "center_wavelength": 0.679691,
+          "full_width_half_max": 0.0078267
+        },
+        {
+          "name": "B051",
+          "center_wavelength": 0.686319,
+          "full_width_half_max": 0.00789853
+        },
+        {
+          "name": "B052",
+          "center_wavelength": 0.693014,
+          "full_width_half_max": 0.00797235
+        },
+        {
+          "name": "B053",
+          "center_wavelength": 0.69978,
+          "full_width_half_max": 0.00804871
+        },
+        {
+          "name": "B054",
+          "center_wavelength": 0.706617,
+          "full_width_half_max": 0.0081281
+        },
+        {
+          "name": "B055",
+          "center_wavelength": 0.713524,
+          "full_width_half_max": 0.0082102
+        },
+        {
+          "name": "B056",
+          "center_wavelength": 0.720501,
+          "full_width_half_max": 0.00829433
+        },
+        {
+          "name": "B057",
+          "center_wavelength": 0.727545,
+          "full_width_half_max": 0.0083798
+        },
+        {
+          "name": "B058",
+          "center_wavelength": 0.734654,
+          "full_width_half_max": 0.00846592
+        },
+        {
+          "name": "B059",
+          "center_wavelength": 0.741826,
+          "full_width_half_max": 0.008552
+        },
+        {
+          "name": "B060",
+          "center_wavelength": 0.74906,
+          "full_width_half_max": 0.00863735
+        },
+        {
+          "name": "B061",
+          "center_wavelength": 0.756353,
+          "full_width_half_max": 0.00872128
+        },
+        {
+          "name": "B062",
+          "center_wavelength": 0.763703,
+          "full_width_half_max": 0.00880311
+        },
+        {
+          "name": "B063",
+          "center_wavelength": 0.771108,
+          "full_width_half_max": 0.00888214
+        },
+        {
+          "name": "B064",
+          "center_wavelength": 0.778567,
+          "full_width_half_max": 0.00895779
+        },
+        {
+          "name": "B065",
+          "center_wavelength": 0.786078,
+          "full_width_half_max": 0.00903034
+        },
+        {
+          "name": "B066",
+          "center_wavelength": 0.793639,
+          "full_width_half_max": 0.0091005
+        },
+        {
+          "name": "B067",
+          "center_wavelength": 0.801248,
+          "full_width_half_max": 0.00916897
+        },
+        {
+          "name": "B068",
+          "center_wavelength": 0.808905,
+          "full_width_half_max": 0.00923646
+        },
+        {
+          "name": "B069",
+          "center_wavelength": 0.816608,
+          "full_width_half_max": 0.00930368
+        },
+        {
+          "name": "B070",
+          "center_wavelength": 0.824355,
+          "full_width_half_max": 0.00937133
+        },
+        {
+          "name": "B071",
+          "center_wavelength": 0.832145,
+          "full_width_half_max": 0.00944012
+        },
+        {
+          "name": "B072",
+          "center_wavelength": 0.839976,
+          "full_width_half_max": 0.00951076
+        },
+        {
+          "name": "B073",
+          "center_wavelength": 0.847847,
+          "full_width_half_max": 0.00958396
+        },
+        {
+          "name": "B074",
+          "center_wavelength": 0.855757,
+          "full_width_half_max": 0.00966032
+        },
+        {
+          "name": "B075",
+          "center_wavelength": 0.863703,
+          "full_width_half_max": 0.00973971
+        },
+        {
+          "name": "B076",
+          "center_wavelength": 0.871683,
+          "full_width_half_max": 0.00982161
+        },
+        {
+          "name": "B077",
+          "center_wavelength": 0.879692,
+          "full_width_half_max": 0.00990551
+        },
+        {
+          "name": "B078",
+          "center_wavelength": 0.887729,
+          "full_width_half_max": 0.00999089
+        },
+        {
+          "name": "B079",
+          "center_wavelength": 0.895789,
+          "full_width_half_max": 0.0100772
+        },
+        {
+          "name": "B080",
+          "center_wavelength": 0.90387,
+          "full_width_half_max": 0.010164
+        },
+        {
+          "name": "B081",
+          "center_wavelength": 0.911968,
+          "full_width_half_max": 0.0102508
+        },
+        {
+          "name": "B082",
+          "center_wavelength": 0.92008,
+          "full_width_half_max": 0.0103369
+        },
+        {
+          "name": "B083",
+          "center_wavelength": 0.928204,
+          "full_width_half_max": 0.010422
+        },
+        {
+          "name": "B084",
+          "center_wavelength": 0.936335,
+          "full_width_half_max": 0.0105054
+        },
+        {
+          "name": "B085",
+          "center_wavelength": 0.94447,
+          "full_width_half_max": 0.0105862
+        },
+        {
+          "name": "B086",
+          "center_wavelength": 0.952608,
+          "full_width_half_max": 0.0106589
+        },
+        {
+          "name": "B087",
+          "center_wavelength": 0.960748,
+          "full_width_half_max": 0.010716
+        },
+        {
+          "name": "B088",
+          "center_wavelength": 0.968891,
+          "full_width_half_max": 0.01075
+        },
+        {
+          "name": "B089",
+          "center_wavelength": 0.977037,
+          "full_width_half_max": 0.0107533
+        },
+        {
+          "name": "B090",
+          "center_wavelength": 0.985186,
+          "full_width_half_max": 0.0107183
+        },
+        {
+          "name": "B091",
+          "center_wavelength": 0.993338,
+          "full_width_half_max": 0.0106375
+        }
+      ],
+      "roles": [
+        "data"
+      ]
+    },
+    "vnir": {
+      "href": "https://download.geoservice.dlr.de/ENMAP/files/L1B/2026/09/07/DT0000216073/03/ENMAP01-____L1B-DT0000216073_20260907T150940Z_003_V010506_20260908T051021Z/ENMAP01-____L1B-DT0000216073_20260907T150940Z_003_V010506_20260908T051021Z-QL_VNIR_COG.TIF",
+      "type": "image/tiff; application=geotiff; profile=cloud-optimized",
+      "title": "Quicklook VNIR",
+      "description": "Visible and Near Infrared (VNIR) quicklook in sensor geometry",
+      "eo:bands": [
+        {
+          "name": "b1",
+          "description": "red"
+        },
+        {
+          "name": "b2",
+          "description": "green"
+        },
+        {
+          "name": "b3",
+          "description": "blue"
+        },
+        {
+          "name": "b4",
+          "description": "alpha"
+        }
+      ],
+      "proj:epsg": 4326,
+      "proj:shape": [
+        1024,
+        1000
+      ],
+      "proj:transform": [
+        0.0003445556556556565,
+        -8.002727272727333e-05,
+        -69.05202106419146,
+        -4.8221278421280915e-05,
+        -0.0002652627147046484,
+        -38.87835417228916,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "proj:geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              -69.13396899146419,
+              -39.198204470568
+            ],
+            [
+              -68.70746540853581,
+              -39.198204470568
+            ],
+            [
+              -68.70746540853581,
+              -38.87835417228916
+            ],
+            [
+              -69.13396899146419,
+              -38.87835417228916
+            ],
+            [
+              -69.13396899146419,
+              -39.198204470568
+            ]
+          ]
+        ]
+      },
+      "proj:bbox": [
+        -69.13396899146419,
+        -39.198204470568,
+        -68.70746540853581,
+        -38.87835417228916
+      ],
+      "roles": [
+        "overview",
+        "visual"
+      ]
+    },
+    "thumbnail": {
+      "href": "https://download.geoservice.dlr.de/ENMAP/files/L1B/2026/09/07/DT0000216073/03/ENMAP01-____L1B-DT0000216073_20260907T150940Z_003_V010506_20260908T051021Z/ENMAP01-____L1B-DT0000216073_20260907T150940Z_003_V010506_20260908T051021Z-QL_VNIR_COG_thumbnail.png",
+      "type": "image/png",
+      "title": "Thumbnail VNIR",
+      "description": "Visible and Near Infrared (VNIR) thumbnail in sensor geometry",
+      "roles": [
+        "thumbnail"
+      ]
+    },
+    "swir": {
+      "href": "https://download.geoservice.dlr.de/ENMAP/files/L1B/2026/09/07/DT0000216073/03/ENMAP01-____L1B-DT0000216073_20260907T150940Z_003_V010506_20260908T051021Z/ENMAP01-____L1B-DT0000216073_20260907T150940Z_003_V010506_20260908T051021Z-QL_SWIR_COG.TIF",
+      "type": "image/tiff; application=geotiff; profile=cloud-optimized",
+      "title": "Quicklook SWIR",
+      "description": "Short-wave Infrared (SWIR) quicklook in sensor geometry",
+      "eo:bands": [
+        {
+          "name": "b1",
+          "description": "red"
+        },
+        {
+          "name": "b2",
+          "description": "green"
+        },
+        {
+          "name": "b3",
+          "description": "blue"
+        },
+        {
+          "name": "b4",
+          "description": "alpha"
+        }
+      ],
+      "proj:epsg": 4326,
+      "proj:shape": [
+        1024,
+        1000
+      ],
+      "proj:transform": [
+        0.0003445556556556565,
+        -8.002727272727333e-05,
+        -69.05202106419146,
+        -4.8221278421280915e-05,
+        -0.0002652627147046484,
+        -38.87835417228916,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "proj:geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              -69.13396899146419,
+              -39.198204470568
+            ],
+            [
+              -68.70746540853581,
+              -39.198204470568
+            ],
+            [
+              -68.70746540853581,
+              -38.87835417228916
+            ],
+            [
+              -69.13396899146419,
+              -38.87835417228916
+            ],
+            [
+              -69.13396899146419,
+              -39.198204470568
+            ]
+          ]
+        ]
+      },
+      "proj:bbox": [
+        -69.13396899146419,
+        -39.198204470568,
+        -68.70746540853581,
+        -38.87835417228916
+      ],
+      "roles": [
+        "overview",
+        "visual"
+      ]
+    },
+    "quality_classes": {
+      "href": "https://download.geoservice.dlr.de/ENMAP/files/L1B/2026/09/07/DT0000216073/03/ENMAP01-____L1B-DT0000216073_20260907T150940Z_003_V010506_20260908T051021Z/ENMAP01-____L1B-DT0000216073_20260907T150940Z_003_V010506_20260908T051021Z-QL_QUALITY_CLASSES_COG.TIF",
+      "type": "image/tiff; application=geotiff; profile=cloud-optimized",
+      "title": "Quality classes",
+      "description": "Classes quality layer",
+      "proj:epsg": 4326,
+      "proj:shape": [
+        1024,
+        1000
+      ],
+      "proj:transform": [
+        0.0003445556556556565,
+        -8.002727272727333e-05,
+        -69.05202106419146,
+        -4.8221278421280915e-05,
+        -0.0002652627147046484,
+        -38.87835417228916,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "proj:geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              -69.13396899146419,
+              -39.198204470568
+            ],
+            [
+              -68.70746540853581,
+              -39.198204470568
+            ],
+            [
+              -68.70746540853581,
+              -38.87835417228916
+            ],
+            [
+              -69.13396899146419,
+              -38.87835417228916
+            ],
+            [
+              -69.13396899146419,
+              -39.198204470568
+            ]
+          ]
+        ]
+      },
+      "proj:bbox": [
+        -69.13396899146419,
+        -39.198204470568,
+        -68.70746540853581,
+        -38.87835417228916
+      ],
+      "roles": [
+        "data-mask"
+      ]
+    },
+    "quality_cloud": {
+      "href": "https://download.geoservice.dlr.de/ENMAP/files/L1B/2026/09/07/DT0000216073/03/ENMAP01-____L1B-DT0000216073_20260907T150940Z_003_V010506_20260908T051021Z/ENMAP01-____L1B-DT0000216073_20260907T150940Z_003_V010506_20260908T051021Z-QL_QUALITY_CLOUD_COG.TIF",
+      "type": "image/tiff; application=geotiff; profile=cloud-optimized",
+      "title": "Quality cloud",
+      "description": "Cloud quality layer",
+      "proj:epsg": 4326,
+      "proj:shape": [
+        1024,
+        1000
+      ],
+      "proj:transform": [
+        0.0003445556556556565,
+        -8.002727272727333e-05,
+        -69.05202106419146,
+        -4.8221278421280915e-05,
+        -0.0002652627147046484,
+        -38.87835417228916,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "proj:geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              -69.13396899146419,
+              -39.198204470568
+            ],
+            [
+              -68.70746540853581,
+              -39.198204470568
+            ],
+            [
+              -68.70746540853581,
+              -38.87835417228916
+            ],
+            [
+              -69.13396899146419,
+              -38.87835417228916
+            ],
+            [
+              -69.13396899146419,
+              -39.198204470568
+            ]
+          ]
+        ]
+      },
+      "proj:bbox": [
+        -69.13396899146419,
+        -39.198204470568,
+        -68.70746540853581,
+        -38.87835417228916
+      ],
+      "roles": [
+        "data",
+        "cloud"
+      ]
+    },
+    "quality_cloud_shadow": {
+      "href": "https://download.geoservice.dlr.de/ENMAP/files/L1B/2026/09/07/DT0000216073/03/ENMAP01-____L1B-DT0000216073_20260907T150940Z_003_V010506_20260908T051021Z/ENMAP01-____L1B-DT0000216073_20260907T150940Z_003_V010506_20260908T051021Z-QL_QUALITY_CLOUDSHADOW_COG.TIF",
+      "type": "image/tiff; application=geotiff; profile=cloud-optimized",
+      "title": "Quality cloud shadow",
+      "description": "Cloud shadow quality layer",
+      "proj:epsg": 4326,
+      "proj:shape": [
+        1024,
+        1000
+      ],
+      "proj:transform": [
+        0.0003445556556556565,
+        -8.002727272727333e-05,
+        -69.05202106419146,
+        -4.8221278421280915e-05,
+        -0.0002652627147046484,
+        -38.87835417228916,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "proj:geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              -69.13396899146419,
+              -39.198204470568
+            ],
+            [
+              -68.70746540853581,
+              -39.198204470568
+            ],
+            [
+              -68.70746540853581,
+              -38.87835417228916
+            ],
+            [
+              -69.13396899146419,
+              -38.87835417228916
+            ],
+            [
+              -69.13396899146419,
+              -39.198204470568
+            ]
+          ]
+        ]
+      },
+      "proj:bbox": [
+        -69.13396899146419,
+        -39.198204470568,
+        -68.70746540853581,
+        -38.87835417228916
+      ],
+      "roles": [
+        "data-mask",
+        "cloud-shadow"
+      ]
+    },
+    "quality_haze": {
+      "href": "https://download.geoservice.dlr.de/ENMAP/files/L1B/2026/09/07/DT0000216073/03/ENMAP01-____L1B-DT0000216073_20260907T150940Z_003_V010506_20260908T051021Z/ENMAP01-____L1B-DT0000216073_20260907T150940Z_003_V010506_20260908T051021Z-QL_QUALITY_HAZE_COG.TIF",
+      "type": "image/tiff; application=geotiff; profile=cloud-optimized",
+      "title": "Quality haze",
+      "description": "Haze quality layer",
+      "proj:epsg": 4326,
+      "proj:shape": [
+        1024,
+        1000
+      ],
+      "proj:transform": [
+        0.0003445556556556565,
+        -8.002727272727333e-05,
+        -69.05202106419146,
+        -4.8221278421280915e-05,
+        -0.0002652627147046484,
+        -38.87835417228916,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "proj:geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              -69.13396899146419,
+              -39.198204470568
+            ],
+            [
+              -68.70746540853581,
+              -39.198204470568
+            ],
+            [
+              -68.70746540853581,
+              -38.87835417228916
+            ],
+            [
+              -69.13396899146419,
+              -38.87835417228916
+            ],
+            [
+              -69.13396899146419,
+              -39.198204470568
+            ]
+          ]
+        ]
+      },
+      "proj:bbox": [
+        -69.13396899146419,
+        -39.198204470568,
+        -68.70746540853581,
+        -38.87835417228916
+      ],
+      "roles": [
+        "data-mask"
+      ]
+    },
+    "quality_cirrus": {
+      "href": "https://download.geoservice.dlr.de/ENMAP/files/L1B/2026/09/07/DT0000216073/03/ENMAP01-____L1B-DT0000216073_20260907T150940Z_003_V010506_20260908T051021Z/ENMAP01-____L1B-DT0000216073_20260907T150940Z_003_V010506_20260908T051021Z-QL_QUALITY_CIRRUS_COG.TIF",
+      "type": "image/tiff; application=geotiff; profile=cloud-optimized",
+      "title": "Quality cirrus",
+      "description": "Cirrus quality layer",
+      "proj:epsg": 4326,
+      "proj:shape": [
+        1024,
+        1000
+      ],
+      "proj:transform": [
+        0.0003445556556556565,
+        -8.002727272727333e-05,
+        -69.05202106419146,
+        -4.8221278421280915e-05,
+        -0.0002652627147046484,
+        -38.87835417228916,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "proj:geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              -69.13396899146419,
+              -39.198204470568
+            ],
+            [
+              -68.70746540853581,
+              -39.198204470568
+            ],
+            [
+              -68.70746540853581,
+              -38.87835417228916
+            ],
+            [
+              -69.13396899146419,
+              -38.87835417228916
+            ],
+            [
+              -69.13396899146419,
+              -39.198204470568
+            ]
+          ]
+        ]
+      },
+      "proj:bbox": [
+        -69.13396899146419,
+        -39.198204470568,
+        -68.70746540853581,
+        -38.87835417228916
+      ],
+      "roles": [
+        "data-mask"
+      ]
+    },
+    "quality_snow": {
+      "href": "https://download.geoservice.dlr.de/ENMAP/files/L1B/2026/09/07/DT0000216073/03/ENMAP01-____L1B-DT0000216073_20260907T150940Z_003_V010506_20260908T051021Z/ENMAP01-____L1B-DT0000216073_20260907T150940Z_003_V010506_20260908T051021Z-QL_QUALITY_SNOW_COG.TIF",
+      "type": "image/tiff; application=geotiff; profile=cloud-optimized",
+      "title": "Quality snow",
+      "description": "Snow quality layer",
+      "proj:epsg": 4326,
+      "proj:shape": [
+        1024,
+        1000
+      ],
+      "proj:transform": [
+        0.0003445556556556565,
+        -8.002727272727333e-05,
+        -69.05202106419146,
+        -4.8221278421280915e-05,
+        -0.0002652627147046484,
+        -38.87835417228916,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "proj:geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              -69.13396899146419,
+              -39.198204470568
+            ],
+            [
+              -68.70746540853581,
+              -39.198204470568
+            ],
+            [
+              -68.70746540853581,
+              -38.87835417228916
+            ],
+            [
+              -69.13396899146419,
+              -38.87835417228916
+            ],
+            [
+              -69.13396899146419,
+              -39.198204470568
+            ]
+          ]
+        ]
+      },
+      "proj:bbox": [
+        -69.13396899146419,
+        -39.198204470568,
+        -68.70746540853581,
+        -38.87835417228916
+      ],
+      "roles": [
+        "data-mask",
+        "snow-ice"
+      ]
+    },
+    "quality_testflags_swir": {
+      "href": "https://download.geoservice.dlr.de/ENMAP/files/L1B/2026/09/07/DT0000216073/03/ENMAP01-____L1B-DT0000216073_20260907T150940Z_003_V010506_20260908T051021Z/ENMAP01-____L1B-DT0000216073_20260907T150940Z_003_V010506_20260908T051021Z-QL_QUALITY_TESTFLAGS_SWIR_COG.TIF",
+      "type": "image/tiff; application=geotiff; profile=cloud-optimized",
+      "title": "Quality test flags",
+      "description": "Test flags quality layer",
+      "proj:epsg": 4326,
+      "proj:shape": [
+        1024,
+        1000
+      ],
+      "proj:transform": [
+        0.0003445556556556565,
+        -8.002727272727333e-05,
+        -69.05202106419146,
+        -4.8221278421280915e-05,
+        -0.0002652627147046484,
+        -38.87835417228916,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "proj:geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              -69.13396899146419,
+              -39.198204470568
+            ],
+            [
+              -68.70746540853581,
+              -39.198204470568
+            ],
+            [
+              -68.70746540853581,
+              -38.87835417228916
+            ],
+            [
+              -69.13396899146419,
+              -38.87835417228916
+            ],
+            [
+              -69.13396899146419,
+              -39.198204470568
+            ]
+          ]
+        ]
+      },
+      "proj:bbox": [
+        -69.13396899146419,
+        -39.198204470568,
+        -68.70746540853581,
+        -38.87835417228916
+      ],
+      "roles": [
+        "data-mask"
+      ]
+    },
+    "defective_pixel_mask_swir": {
+      "href": "https://download.geoservice.dlr.de/ENMAP/files/L1B/2026/09/07/DT0000216073/03/ENMAP01-____L1B-DT0000216073_20260907T150940Z_003_V010506_20260908T051021Z/ENMAP01-____L1B-DT0000216073_20260907T150940Z_003_V010506_20260908T051021Z-QL_PIXELMASK_SWIR_COG.TIF",
+      "type": "image/tiff; application=geotiff; profile=cloud-optimized",
+      "title": "Defective pixel mask",
+      "description": "Defective pixel mask layer",
+      "proj:epsg": 4326,
+      "proj:shape": [
+        1024,
+        1000
+      ],
+      "proj:transform": [
+        0.0003445556556556565,
+        -8.002727272727333e-05,
+        -69.05202106419146,
+        -4.8221278421280915e-05,
+        -0.0002652627147046484,
+        -38.87835417228916,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "proj:geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              -69.13396899146419,
+              -39.198204470568
+            ],
+            [
+              -68.70746540853581,
+              -39.198204470568
+            ],
+            [
+              -68.70746540853581,
+              -38.87835417228916
+            ],
+            [
+              -69.13396899146419,
+              -38.87835417228916
+            ],
+            [
+              -69.13396899146419,
+              -39.198204470568
+            ]
+          ]
+        ]
+      },
+      "proj:bbox": [
+        -69.13396899146419,
+        -39.198204470568,
+        -68.70746540853581,
+        -38.87835417228916
+      ],
+      "roles": [
+        "data-mask"
+      ]
+    },
+    "defective_pixel_mask_vnir": {
+      "href": "https://download.geoservice.dlr.de/ENMAP/files/L1B/2026/09/07/DT0000216073/03/ENMAP01-____L1B-DT0000216073_20260907T150940Z_003_V010506_20260908T051021Z/ENMAP01-____L1B-DT0000216073_20260907T150940Z_003_V010506_20260908T051021Z-QL_PIXELMASK_VNIR_COG.TIF",
+      "type": "image/tiff; application=geotiff; profile=cloud-optimized",
+      "title": "Defective pixel mask",
+      "description": "Defective pixel mask layer",
+      "roles": [
+        "data-mask"
+      ]
+    }
+  },
+  "links": [
+    {
+      "title": "Root",
+      "rel": "root",
+      "href": "https://geoservice.dlr.de/eoc/ogc/stac/v1",
+      "type": "application/json"
+    },
+    {
+      "title": "Parent",
+      "rel": "parent",
+      "href": "https://geoservice.dlr.de/eoc/ogc/stac/v1",
+      "type": "application/json"
+    },
+    {
+      "title": "Self",
+      "rel": "self",
+      "href": "https://geoservice.dlr.de/eoc/ogc/stac/v1/collections/ENMAP_HSI_L1B/items/ENMAP01-____L1B-DT0000216073_20260907T150940Z_003_V010506_20260908T051021Z",
+      "type": "application/geo%2Bjson"
+    },
+    {
+      "title": "Item",
+      "rel": "item",
+      "href": "https://geoservice.dlr.de/eoc/ogc/stac/v1/collections/ENMAP_HSI_L1B/items/ENMAP01-____L1B-DT0000216073_20260907T150940Z_003_V010506_20260908T051021Z",
+      "type": "application/geo%2Bjson"
+    },
+    {
+      "title": "Item as HTML",
+      "rel": "alternate",
+      "href": "https://geoservice.dlr.de/eoc/ogc/stac/v1/collections/ENMAP_HSI_L1B/items/ENMAP01-____L1B-DT0000216073_20260907T150940Z_003_V010506_20260908T051021Z",
+      "type": "text/html"
+    },
+    {
+      "title": "Items",
+      "rel": "items",
+      "href": "https://geoservice.dlr.de/eoc/ogc/stac/v1/collections/ENMAP_HSI_L1B/items",
+      "type": "application/geo%2Bjson"
+    },
+    {
+      "title": "Items as HTML",
+      "rel": "items",
+      "href": "https://geoservice.dlr.de/eoc/ogc/stac/v1/collections/ENMAP_HSI_L1B/items",
+      "type": "text/html"
+    },
+    {
+      "title": "Collection",
+      "rel": "collection",
+      "href": "https://geoservice.dlr.de/eoc/ogc/stac/v1/collections/ENMAP_HSI_L1B",
+      "type": "application/json"
+    },
+    {
+      "title": "Collection as HTML",
+      "rel": "collection",
+      "href": "https://geoservice.dlr.de/eoc/ogc/stac/v1/collections/ENMAP_HSI_L1B",
+      "type": "text/html"
+    },
+    {
+      "title": "Collections",
+      "rel": "collection",
+      "href": "https://geoservice.dlr.de/eoc/ogc/stac/v1/collections",
+      "type": "application/json"
+    },
+    {
+      "title": "Collections as HTML",
+      "rel": "collection",
+      "href": "https://geoservice.dlr.de/eoc/ogc/stac/v1/collections",
+      "type": "text/html"
+    },
+    {
+      "title": "OpenSearch GeoJSON",
+      "rel": "item",
+      "href": "https://geoservice.dlr.de/eoc/oseo/search?parentIdentifier=ENMAP_HSI_L1B&identifier=ENMAP01-____L1B-DT0000216073_20260907T150940Z_003_V010506_20260908T051021Z&httpAccept=application%2Fgeo%252Bjson",
+      "type": "application/geo+json"
+    },
+    {
+      "title": "OpenSearch Atom XML",
+      "rel": "item",
+      "href": "https://geoservice.dlr.de/eoc/oseo/search?parentIdentifier=ENMAP_HSI_L1B&identifier=ENMAP01-____L1B-DT0000216073_20260907T150940Z_003_V010506_20260908T051021Z&httpAccept=application%2Fatom%2Bxml",
+      "type": "application/atom+xml"
+    },
+    {
+      "title": "OpenSearch O&M XML",
+      "rel": "item",
+      "href": "https://geoservice.dlr.de/eoc/oseo/metadata?parentId=ENMAP_HSI_L1B&uid=ENMAP01-____L1B-DT0000216073_20260907T150940Z_003_V010506_20260908T051021Z&httpAccept=application%2Fgml%2Bxml",
+      "type": "application/gml+xml"
+    },
+    {
+      "title": "Queryables",
+      "rel": "http://www.opengis.net/def/rel/ogc/1.0/queryables",
+      "href": "https://geoservice.dlr.de/eoc/ogc/stac/collections/ENMAP_HSI_L1B/queryables",
+      "type": "application/schema+json"
+    }
+  ]
+}

@@ -20,7 +20,7 @@ import SpecComplex as sc
 from PIL import Image
 
 # --- Configuration ---
-LOCATION = 'Tait'
+LOCATION = 'LakeFire2024'
 TIME_THRESHOLD_SECONDS = 120  # Group acquisitions within 2 minutes into the same temporal pass
 SOURCE_DIR = "C:/satelliteImagery/enmap"
 OUTPUT_DIR = SOURCE_DIR
@@ -30,7 +30,7 @@ TARGET_GREEN_NM = 540.0
 TARGET_BLUE_NM = 480.0
 
 SUN_ELEVATION_THRESHOLD = 30
-ENMAP_CLOUD_DILATION = 4
+ENMAP_CLOUD_DILATION = 0
 ENMAP_REJECT_CLOUD = True
 ENMAP_REJECT_CLOUD_SHADOW = True
 ENMAP_REJECT_HAZE = True

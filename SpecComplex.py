@@ -1,3 +1,5 @@
+import os
+import math
 import numpy as np
 import warnings
 from scipy import ndimage
@@ -460,6 +462,72 @@ def maximumDistance_volumes_test(pixels, num_endmembers):
     return maximumDistance_volumes(pixels, num_endmembers, return_heights=True)
 
 maximumDistance_volumes_heights = maximumDistance_volumes_test
+
+def estimate_effective_dimensionality(pixels, k_max, sigma_n, kappa=3.0):
+    """
+    Estimate the effective spectral dimensionality (ESD) of a tile by
+    monitoring the orthogonal height sequence h_k from MaxD extraction.
+
+    Noise-calibrated stopping criterion:
+        k* = max{k : h_k > kappa * sigma_n * sqrt(B - k + 1)}
+
+    Additionally computes the Spectral Innovation Integral (SII):
+        SII = sum_{k} max(0, log(h_k) - log(tau_k))
+
+    NOTE FOR FUTURE RESEARCH:
+    If the raw k* counts are found to lack true cross-sensor band invariance in practice,
+    consider applying band-normalization to the heights prior to thresholding:
+        h_tilde_k = h_k / sqrt(B)
+    This normalizes the expected Euclidean norm growth that occurs when adding more spectral bands.
+
+    References:
+        - Ren & Chang, IEEE TAES 2003 (ATGP-NPD)
+        - Chang 2006 (MaxD threshold)
+
+    Args:
+        pixels: ndarray of shape (bands, num_pixels) or (H, W, bands).
+        k_max: int, maximum number of endmembers to extract.
+        sigma_n: float, global scene-level noise standard deviation.
+        kappa: float, confidence multiplier. 2.0 = ~95%, 3.0 = ~99.7%.
+
+    Returns:
+        esd: int — effective spectral dimensionality count.
+        sii: float — Spectral Innovation Integral.
+        heights: ndarray of shape (k_max,) — full orthogonal height profile.
+    """
+    # Reshape if 3D patch input
+    if pixels.ndim == 3:
+        h, w, num_bands = pixels.shape
+        pixels_2d = np.reshape(pixels, (h * w, num_bands), order="F").astype(np.float32).T
+    else:
+        pixels_2d = pixels.astype(np.float32)
+
+    num_bands, num_pixels = pixels_2d.shape
+    k_max = min(k_max, num_bands, num_pixels)
+
+    # --- Extract heights via MaxD ---
+    _, _, heights = maximumDistance_volumes(pixels, k_max, return_heights=True)
+
+    # --- Adaptive noise threshold at each step ---
+    thresholds = np.zeros(k_max, dtype=np.float64)
+    for j in range(k_max):
+        remaining_dims = max(num_bands - j, 1)
+        thresholds[j] = kappa * sigma_n * np.sqrt(remaining_dims)
+
+    # --- Count contiguous significant heights and calculate SII ---
+    esd = 1  # origin itself
+    sii = 0.0
+    for j in range(1, k_max):
+        if heights[j] > thresholds[j]:
+            esd += 1
+            # Add to Spectral Innovation Integral (log excess)
+            log_h = math.log(max(heights[j], 1e-12))
+            log_tau = math.log(max(thresholds[j], 1e-12))
+            sii += max(0.0, log_h - log_tau)
+        else:
+            break  # contiguity enforced: stop at first failure
+
+    return esd, sii, heights
 
 def SMACC_volumes(pixels, num_endmembers):
     """

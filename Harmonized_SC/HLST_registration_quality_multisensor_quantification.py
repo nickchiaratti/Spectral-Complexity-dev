@@ -33,10 +33,10 @@ import warnings
 # ==========================================
 # 1. CONFIGURATION
 # ==========================================
-Location = "Rochesterv2"
+Location = "SantaBarbara"
 
 # Point directly to the finalized ARD Master Cube
-SOURCE_CUBE_PATH = f"C:/satelliteImagery/MGRS30mConstellation/Harmonized_MGRS_Stack_Rochesterv2_SC_EM-7_Norm-None.h5"
+SOURCE_CUBE_PATH = f"C:/satelliteImagery/MGRS30mConstellation/Harmonized_MGRS_Stack_{Location}_SC_EM-7_Norm-None.h5"
 
 # Target search window size (pixels)
 SPAN = 100
@@ -46,7 +46,7 @@ MIN_VALID_OVERLAP = 0.9
 
 # Maximum physically permissible translation shift (meters). 
 # Offsets beyond this are explicitly rejected as extreme georeferencing outliers.
-MAX_VALID_OFFSET = 40
+MAX_VALID_OFFSET = 100
 
 # ==========================================
 # 2. UTILITY FUNCTIONS
@@ -161,6 +161,58 @@ def find_optimal_window(mask_ref, mask_mov, ref_bnd, span=100):
                     
     return best_y, best_x, best_valid_frac
 
+def plot_cross_sensor_registration_accuracy(df_pairs, output_path=None):
+    """
+    Produces and saves the cross-sensor geometric registration accuracy box-and-swarm plot.
+    """
+    fig_box, ax_box = plt.subplots(figsize=(10, 8))
+    fig_box.canvas.manager.set_window_title(
+        "Cross-Sensor Geometric Registration Accuracy")
+
+    sns.stripplot(
+        data=df_pairs, x='Sensor_Pair', y='Magnitude_Error_m',
+        color='steelblue', alpha=0.6, jitter=True, size=6, ax=ax_box
+    )
+
+    # 30m GSD threshold annotation
+    ax_box.axhline(30, color='red', linestyle='--', lw=2, zorder=5)
+    ax_box.text(
+        0.98, 30, '  30m Pixel GSD Threshold',
+        transform=ax_box.get_yaxis_transform(),
+        va='bottom', ha='right', color='red',
+        fontsize=18, fontweight='bold'
+    )
+
+    ax_box.set_ylabel('Absolute Translation Error (meters)', fontsize=20)
+    ax_box.set_xlabel('Evaluated Sensor Pair', fontsize=20)
+    ax_box.set_title('Cross-Sensor Geometric Registration Accuracy',
+                     fontsize=24, fontweight='bold')
+    ax_box.grid(True, axis='y', alpha=0.3, linestyle='--')
+    ax_box.tick_params(axis='both', which='major', labelsize=16)
+
+    fig_box.tight_layout()
+    if output_path:
+        fig_box.savefig(output_path, dpi=300)
+    
+    return fig_box, ax_box
+
+def analyze_and_plot_registration_quality(h5_path):
+    """
+    External entry point to run the registration analysis and plot the results
+    for a given dataset (HDF5 cube).
+    """
+    print(f"--- Running Multi-Sensor Co-Registration Analytics on {h5_path} ---")
+    try:
+        h5_src = h5py.File(h5_path, 'r')
+    except Exception as e:
+        print(f"CRITICAL ERROR: Could not open Source Cube: {e}")
+        return
+        
+    # Precalculates transformations and saves plots automatically
+    viewer = MultiSensorCoRegistrationViewer(h5_src)
+    h5_src.close()
+
+
 # ==========================================
 # 3. INTERACTIVE VIEWER & DASHBOARD CLASS
 # ==========================================
@@ -169,11 +221,10 @@ class MultiSensorCoRegistrationViewer:
         self.h5_src = h5_src
         
         self.timeline = []
-        grids = [g for g in self.h5_src['/HDFEOS/GRIDS'].keys() if g in ['HLSL30', 'HLSS30', 'TANAGER', 'ENMAP', 'DRAGONETTE']]
+        grids = [g for g in self.h5_src['/HDFEOS/GRIDS'].keys() if g != 'HARMONIZED']
         for grid_name in grids:
             grp = self.h5_src[f"/HDFEOS/GRIDS/{grid_name}/Data Fields"]
             if 'surface_reflectance' not in grp: continue
-            
             times = grp['surface_reflectance'].attrs.get('acquisition_time')
             if times is None: continue
             
@@ -434,34 +485,8 @@ class MultiSensorCoRegistrationViewer:
                   f"Mean={vals.mean():.2f}m, Median={vals.median():.2f}m, "
                   f"Max={vals.max():.2f}m")
 
-        self.fig_box, ax_box = plt.subplots(figsize=(10, 8))
-        self.fig_box.canvas.manager.set_window_title(
-            "Cross-Sensor Geometric Registration Accuracy")
-
-        sns.stripplot(
-            data=df_pairs, x='Sensor_Pair', y='Magnitude_Error_m',
-            color='steelblue', alpha=0.6, jitter=True, size=6, ax=ax_box
-        )
-
-        # 30m GSD threshold annotation
-        ax_box.axhline(30, color='red', linestyle='--', lw=2, zorder=5)
-        ax_box.text(
-            0.98, 30, '  30m Pixel GSD Threshold',
-            transform=ax_box.get_yaxis_transform(),
-            va='bottom', ha='right', color='red',
-            fontsize=18, fontweight='bold'
-        )
-
-        ax_box.set_ylabel('Absolute Translation Error (meters)', fontsize=20)
-        ax_box.set_xlabel('Evaluated Sensor Pair', fontsize=20)
-        ax_box.set_title('Cross-Sensor Geometric Registration Accuracy',
-                         fontsize=24, fontweight='bold')
-        ax_box.grid(True, axis='y', alpha=0.3, linestyle='--')
-        ax_box.tick_params(axis='both', which='major', labelsize=16)
-
-        self.fig_box.tight_layout()
         fig_box_path = os.path.join(base_dir, f"{base_name}_cross_sensor_registration_accuracy.png")
-        self.fig_box.savefig(fig_box_path, dpi=300)
+        self.fig_box, ax_box = plot_cross_sensor_registration_accuracy(df_pairs, fig_box_path)
 
     def _init_ui(self):
         self.fig, (self.ax1, self.ax2) = plt.subplots(1, 2, figsize=(15, 7))

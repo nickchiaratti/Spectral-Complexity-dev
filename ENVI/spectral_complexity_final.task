@@ -1,0 +1,63 @@
+{
+  "name": "SpectralComplexityFinal",
+  "baseClass": "ENVITaskFromProcedure",
+  "routine": "spectral_complexity_final_task",
+  "display_name": "Spectral Complexity Final Map",
+  "description": "Calculates the final smoothed map of spectral complexity volumes over a sliding window.",
+  "version": "5.3",
+  "parameters": [
+    {
+      "name": "INPUT_RASTER",
+      "display_name": "Input Raster",
+      "dataType": "ENVIRaster",
+      "direction": "input",
+      "required": true,
+      "description": "The input hyperspectral or multispectral raster."
+    },
+    {
+      "name": "TILE_SIZE",
+      "display_name": "Tile Size",
+      "dataType": "Int",
+      "direction": "input",
+      "required": false,
+      "default": 5,
+      "description": "The size of the sliding window tile."
+    },
+    {
+      "name": "STRIDE",
+      "display_name": "Stride",
+      "dataType": "Int",
+      "direction": "input",
+      "required": false,
+      "default": 1,
+      "description": "The sliding window step size."
+    },
+    {
+      "name": "NUM_ENDMEMBERS",
+      "display_name": "Number of Endmembers",
+      "dataType": "Int",
+      "direction": "input",
+      "required": false,
+      "default": 3,
+      "description": "Number of endmembers to extract."
+    },
+
+    {
+      "name": "OUTPUT_RASTER",
+      "display_name": "Output Raster",
+      "dataType": "ENVIRaster",
+      "direction": "output",
+      "required": true,
+      "uri_param": "OUTPUT_RASTER_URI",
+      "description": "The output final map raster."
+    },
+    {
+      "name": "OUTPUT_RASTER_URI",
+      "dataType": "ENVIURI",
+      "direction": "input",
+      "required": false,
+      "hidden": true,
+      "description": "Hidden URI parameter."
+    }
+  ]
+}

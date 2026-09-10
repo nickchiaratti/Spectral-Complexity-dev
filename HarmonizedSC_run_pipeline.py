@@ -14,6 +14,7 @@ platform._wmi_query = _dummy_wmi_query
 import yaml
 import subprocess
 from pathlib import Path
+import h5py
 
 import HLS30.HLS30_earthAccess_to_hdf5 as HLS30_earthAccess_to_hdf5
 import Harmonized_SC.constellation_to_MGRS_HDFEOS5 as constellation_to_MGRS_HDFEOS5
@@ -25,6 +26,7 @@ import Harmonized_SC.plot_sampling_rate as plot_sampling_rate
 import Harmonized_SC.plot_water_mask as plot_water_mask
 import Harmonized_SC.plot_sliding_volume_global_stats as plot_sliding_volume_global_stats
 import Harmonized_SC.SpecComplex_cross_sensor_correlation as SpecComplex_cross_sensor_correlation
+import Harmonized_SC.HLST_registration_quality_multisensor_quantification as HLST_registration_quality_multisensor_quantification
 import Harmonized_SC.mgrs_view as mgrs_view
 
 # ==========================================
@@ -101,6 +103,7 @@ def main():
         ("plot_water_mask", plot_water_mask.main),
         ("plot_sliding_volume_global_stats", plot_sliding_volume_global_stats.plot_global_stats),
         ("plot_cross_sensor_correlations", SpecComplex_cross_sensor_correlation.plot_cross_sensor_correlations),
+        ("plot_registration_quality", HLST_registration_quality_multisensor_quantification.analyze_and_plot_registration_quality),
         ("HLST_specComplex_viewer", HLST_specComplex_viewer.main)
     ]
 
@@ -135,7 +138,6 @@ def main():
             func(h5_path=calc_output_path)
             continue
         elif name == "plot_sliding_volume_global_stats":
-            import h5py
             with h5py.File(calc_output_path, 'r') as h5f:
                 if '/HDFEOS/GRIDS/HARMONIZED/Data Fields' in h5f:
                     data_fields = h5f['/HDFEOS/GRIDS/HARMONIZED/Data Fields'].keys()
@@ -153,6 +155,10 @@ def main():
             continue
         elif name == "plot_cross_sensor_correlations":
             print(f"Plotting cross-sensor correlation summary for {location_name}...")
+            func(h5_path=calc_output_path)
+            continue
+        elif name == "plot_registration_quality":
+            print(f"Plotting registration quality summary for {location_name}...")
             func(h5_path=calc_output_path)
             continue
         elif name == "HLST_specComplex_viewer":

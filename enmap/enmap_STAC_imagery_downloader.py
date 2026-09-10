@@ -19,7 +19,7 @@ import yaml
 # Target collection
 STAC_API_URL = "https://geoservice.dlr.de/eoc/ogc/stac/v1"
 COLLECTION_ID = "ENMAP_HSI_L2A"
-TARGET_LOCATION = 'Malibu'
+TARGET_LOCATION = 'LakeFire2024'
 
 def auto_cas_login(session, user, password):
     """Automatically logs into DLR's CAS SSO to establish download session cookies."""

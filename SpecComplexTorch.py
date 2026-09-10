@@ -243,7 +243,85 @@ def maximumDistance_volumes_torch_test(img_cube, num_endmembers):
 
 maximumDistance_volumes_heights_torch = maximumDistance_volumes_torch_test
 
-def process_volume_sliding_tile(frame_data, tile_size, stride, num_endmembers):
+def estimate_effective_dimensionality_torch(img_cube, k_max, sigma_n, kappa=3.0):
+    """
+    Estimate the effective spectral dimensionality (ESD) of each tile by
+    monitoring the orthogonal height sequence h_k from MaxD extraction.
+
+    Noise-calibrated stopping criterion:
+        k* = max{k : h_k > kappa * sigma_n * sqrt(B - k + 1)}
+
+    Additionally computes the Spectral Innovation Integral (SII) as a continuous
+    confidence metric of endmember strength above the noise floor:
+        SII = sum_{k} max(0, log(h_k) - log(tau_k))
+
+    NOTE FOR FUTURE RESEARCH:
+    If the raw k* counts are found to lack true cross-sensor band invariance in practice,
+    consider applying band-normalization to the heights prior to thresholding:
+        h_tilde_k = h_k / sqrt(B)
+    This normalizes the expected Euclidean norm growth that occurs when adding more spectral bands.
+
+    References:
+        - Ren & Chang, IEEE TAES 2003 (ATGP-NPD)
+        - Chang 2006 (MaxD threshold)
+
+    Args:
+        img_cube: Tensor of shape (B_batch, C_bands, N_pixels) float32.
+        k_max: int, maximum number of endmembers to extract.
+        sigma_n: float or Tensor (B_batch,), global scene-level noise standard deviation.
+        kappa: float, confidence multiplier. 2.0 = ~95%, 3.0 = ~99.7%.
+
+    Returns:
+        esd: (B_batch,) int32 tensor — effective spectral dimensionality count.
+        sii: (B_batch,) float32 tensor — Spectral Innovation Integral.
+        heights: (B_batch, k_max) float32 tensor — full orthogonal height profile.
+    """
+    B_batch, C_bands, N_pixels = img_cube.shape
+    device = img_cube.device
+    dtype = img_cube.dtype
+
+    # Clamp k_max to the algebraic rank ceiling
+    k_max = min(k_max, C_bands, N_pixels)
+
+    if not isinstance(sigma_n, torch.Tensor):
+        sigma_n = torch.full((B_batch,), float(sigma_n), dtype=dtype, device=device)
+    else:
+        sigma_n = sigma_n.to(device=device, dtype=dtype)
+
+    # --- Extract heights via the existing MaxD engine ---
+    _, _, heights = maximumDistance_volumes_torch(img_cube, k_max, return_heights=True)
+
+    # --- Build the adaptive noise threshold for each step k ---
+    # At step k, the projected noise vector lives in (B - k + 1) dimensions,
+    # so its expected norm is sigma_n * sqrt(B - k + 1).
+    k_indices = torch.arange(k_max, device=device, dtype=dtype)  # [0, 1, ..., k_max-1]
+    remaining_dims = (C_bands - k_indices).clamp(min=1)  # (k_max,)
+    thresholds = kappa * sigma_n.unsqueeze(1) * torch.sqrt(remaining_dims.unsqueeze(0))  # (B, k_max)
+
+    # --- Count endmembers whose height exceeds the noise threshold ---
+    # Index 0 is the origin (h=0), so ESD counts from index 1 onward
+    significant = heights[:, 1:] > thresholds[:, 1:]  # (B, k_max-1) bool
+
+    # ESD = number of contiguous significant heights starting from index 1
+    contiguous = torch.cumprod(significant.int(), dim=1)  # (B, k_max-1)
+    esd = contiguous.sum(dim=1).to(torch.int32) + 1  # +1 for the origin pixel itself
+
+    # --- Spectral Innovation Integral (SII) ---
+    # Sum of the log-excess of heights over their respective thresholds
+    log_h = torch.log(heights[:, 1:] + 1e-12)
+    log_tau = torch.log(thresholds[:, 1:] + 1e-12)
+    excess = torch.clamp(log_h - log_tau, min=0.0)
+    
+    # We only sum the excess for the contiguous valid endmembers to prevent late-stage noise 
+    # spikes from inflating the SII.
+    sii = (excess * contiguous).sum(dim=1)
+
+    return esd, sii, heights
+
+
+def process_volume_sliding_tile(frame_data, tile_size, stride, num_endmembers, 
+                                compute_esd=False, compute_sii=False, 
+                                global_sigma_n=0.0, esd_kappa=3.0):
     """
     GPU-accelerated Spectral Complexity calculation with CPU-host memory spooling.
     
@@ -253,6 +331,27 @@ def process_volume_sliding_tile(frame_data, tile_size, stride, num_endmembers):
     to a fixed fraction of total GPU memory regardless of image or band count.
     
     Precision: float32, consistent with SpecComplex.py reference implementation.
+    
+    Args:
+        frame_data: ndarray of shape (bands, height, width), surface reflectance.
+        tile_size: int, spatial window size (e.g., 3 for 3x3).
+        stride: int, sliding window stride.
+        num_endmembers: int, maximum number of endmembers to extract per tile.
+        compute_esd: bool, if True also computes the Height-Based Effective
+                     Spectral Dimensionality (HESD) per tile.
+        compute_sii: bool, if True also computes the Spectral Innovation Integral.
+        global_sigma_n: float, global scene-level noise standard deviation.
+        esd_kappa: float, confidence multiplier for noise threshold (default 3.0).
+    
+    Returns:
+        final_map: ndarray (height, width), spatially averaged volume metric. 
+                   If tile_size > 3, this spatial averaging is bypassed and 
+                   this returns a direct copy of neighborhood_map to preserve sharpness.
+        neighborhood_map: ndarray (height, width), center-pixel volume metric.
+        esd_map: (Only if compute_esd=True) ndarray (height, width) uint8,
+                 effective spectral dimensionality (k*) per tile center pixel.
+        sii_map: (Only if compute_sii=True) ndarray (height, width) float32,
+                 Spectral Innovation Integral per tile center pixel.
     """
     COMPUTE_DTYPE = torch.float32
     BYTES_PER_ELEMENT = 4  # float32
@@ -265,10 +364,11 @@ def process_volume_sliding_tile(frame_data, tile_size, stride, num_endmembers):
     # 1. Load data onto CPU only — system RAM absorbs the full unfold allocation
     tensor_data = torch.from_numpy(frame_data).to('cpu', dtype=COMPUTE_DTYPE)
     
+    # Filter out anomalous data outside surface reflectance range +/- 1.5
+    tensor_data[(tensor_data < -1.5) | (tensor_data > 1.5)] = float('nan')
+    
     # 2. Calculate dynamic batch size and chunk size to maximize GPU utilization 
-    #    without exceeding 60% VRAM. The overhead multiplier accounts for the peak 
-    #    intermediate tensors created during MaxD (data_proj clone, diff broadcasts) 
-    #    and QR (Q, R, workspace).
+    #    without exceeding 60% VRAM.
     N_pixels = tile_size * tile_size
     out_h = (height - tile_size) // stride + 1
     out_w = (width - tile_size) // stride + 1
@@ -276,15 +376,15 @@ def process_volume_sliding_tile(frame_data, tile_size, stride, num_endmembers):
 
     if device == 'cuda':
         total_vram = torch.cuda.get_device_properties(device).total_memory
-        target_vram = total_vram * 0.60
-        # Reduced from 20 to 5 since maximumDistance_volumes_torch allocates far fewer intermediate tensors
-        overhead_multiplier = 5
+        target_vram = total_vram * 0.50
+        # Add +2 overhead for ESD when compute_esd is enabled
+        overhead_multiplier = 7 if (compute_esd or compute_sii) else 5
         bytes_per_window = overhead_multiplier * bands * N_pixels * BYTES_PER_ELEMENT
         batch_size = max(1, int(target_vram // bytes_per_window))
         
-        # Dynamically adapt chunk_rows based on band count and spatial width.
-        # For multispectral data (7-10 bands), chunk_rows will equal out_h (full frame in 1 GPU pass).
-        # For hyperspectral data (200-400+ bands), chunk_rows throttles dynamically to prevent OOM.
+        # Cap batch size to prevent Windows TDR (Timeout Detection and Recovery) timeouts.
+        batch_size = min(batch_size, 500000)
+        
         bytes_per_row = out_w * bytes_per_window
         chunk_rows = max(1, min(out_h, int(target_vram // max(1, bytes_per_row))))
     else:
@@ -295,6 +395,10 @@ def process_volume_sliding_tile(frame_data, tile_size, stride, num_endmembers):
     # Accumulators live on CPU to prevent VRAM growth across iterations
     vol_vals = torch.zeros(L, dtype=COMPUTE_DTYPE, device='cpu')
     valid_mask = torch.zeros(L, dtype=torch.bool, device='cpu')
+    if compute_esd:
+        esd_vals = torch.zeros(L, dtype=torch.uint8, device='cpu')
+    if compute_sii:
+        sii_vals = torch.zeros(L, dtype=torch.float32, device='cpu')
     
     # 4. Process windows in memory-safe batches — transfer chunk to GPU, compute, return to CPU
     with torch.no_grad():
@@ -316,13 +420,10 @@ def process_volume_sliding_tile(frame_data, tile_size, stride, num_endmembers):
                 batch_windows = chunk_windows[i:i+batch_size].to(device)  # (B, C, N)
         
                 # Find windows that have enough valid pixels to extract endmembers
-                # A pixel is valid if all its band values are not NaN.
                 pixel_validity = ~torch.isnan(batch_windows).any(dim=1)  # (B, N)
                 valid_pixels_per_window = pixel_validity.sum(dim=1)  # (B)
             
                 # Strict Validity: Window is only processed if ALL pixels are valid.
-                # This matches the Docstring specification of SpecComplex.py 
-                # "Window is only processed if ALL pixels are valid."
                 batch_valid = valid_pixels_per_window == N_pixels
             
                 # Store validity on CPU
@@ -332,21 +433,34 @@ def process_volume_sliding_tile(frame_data, tile_size, stride, num_endmembers):
                     continue
                 
                 valid_data = batch_windows[batch_valid].clone()
-                valid_pixel_mask = pixel_validity[batch_valid]  # (B_valid, N)
-            
+                
                 # Zero out NaNs to prevent NaN propagation during tensor math
                 valid_data[torch.isnan(valid_data)] = 0.0
             
-                # 4. Single-pass combined extraction and volume calculation
+                # 4a. Single-pass combined extraction and volume calculation
                 endmembers, volume = maximumDistance_volumes_torch(valid_data, num_endmembers)
                 
-                # 4d. Extract target metric and immediately move result to CPU
+                # 4b. Extract target metric and immediately move result to CPU
                 if volume.shape[1] > 2:
                     vol_val = torch.max(volume[:, 2:], dim=1)[0]
                 else:
                     vol_val = torch.zeros(volume.shape[0], dtype=COMPUTE_DTYPE, device=device)
                 
                 vol_vals[global_start_idx + i : global_start_idx + i + batch_windows.shape[0]][batch_valid.cpu()] = vol_val.cpu()
+                
+                # 4c. Compute ESD / SII if requested
+                if compute_esd or compute_sii:
+                    esd_batch, sii_batch, _ = estimate_effective_dimensionality_torch(
+                        valid_data, k_max=num_endmembers, sigma_n=global_sigma_n, kappa=esd_kappa
+                    )
+                    if compute_esd:
+                        esd_vals[global_start_idx + i : global_start_idx + i + batch_windows.shape[0]][batch_valid.cpu()] = esd_batch.to(torch.uint8).cpu()
+                    if compute_sii:
+                        sii_vals[global_start_idx + i : global_start_idx + i + batch_windows.shape[0]][batch_valid.cpu()] = sii_batch.cpu()
+                
+                # Explicitly synchronize to flush the GPU command queue.
+                if device == 'cuda':
+                    torch.cuda.synchronize()
         
     # 5. Neighborhood map — assign each tile's volume directly to its center pixel.
     out_h = (height - tile_size) // stride + 1
@@ -363,22 +477,38 @@ def process_volume_sliding_tile(frame_data, tile_size, stride, num_endmembers):
                      center_offset:center_offset + out_w][~valid_grid] = np.nan
                      
     # 6. Final Map — Fast Spatial Averaging via 2D Convolution (mean filter)
-    # Replaces massive 3D PyTorch fold with a native 2D NumPy/SciPy filter
-    # Fill NaNs with 0s so they don't corrupt the convolution arithmetic
-    clean_neighborhood = np.nan_to_num(neighborhood_map, nan=0.0)
-    valid_binary = ~np.isnan(neighborhood_map)
-    
-    # Sum of volumes in the sliding window
-    sum_map = uniform_filter(clean_neighborhood, size=tile_size, mode='constant', cval=0.0) 
-    # Count of valid tiles in the sliding window
-    count_map = uniform_filter(valid_binary.astype(np.float32), size=tile_size, mode='constant', cval=0.0)
-    
-    # Divide to get the average (handling divide-by-zero where count_map is 0)
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", category=RuntimeWarning)
-        final_map = np.where(count_map > 0, sum_map / count_map, np.nan)
+    if tile_size > 3:
+        # Disable spatial averaging for 5x5, 7x7 etc to prevent excessive blurring
+        final_map = neighborhood_map.copy()
+    else:
+        clean_neighborhood = np.nan_to_num(neighborhood_map, nan=0.0)
+        valid_binary = ~np.isnan(neighborhood_map)
         
-    return final_map, neighborhood_map
+        sum_map = uniform_filter(clean_neighborhood, size=tile_size, mode='constant', cval=0.0) 
+        count_map = uniform_filter(valid_binary.astype(np.float32), size=tile_size, mode='constant', cval=0.0)
+        
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", category=RuntimeWarning)
+            final_map = np.where(count_map > 0, sum_map / count_map, np.nan)
+    
+    result = (final_map, neighborhood_map)
+    
+    if compute_esd:
+        esd_map = np.zeros((height, width), dtype=np.uint8)
+        esd_grid = esd_vals.numpy().reshape(out_h, out_w)
+        esd_map[center_offset:center_offset + out_h, center_offset:center_offset + out_w] = esd_grid
+        esd_map[center_offset:center_offset + out_h, center_offset:center_offset + out_w][~valid_grid] = 0
+        result += (esd_map,)
+        
+    if compute_sii:
+        sii_map = np.full((height, width), np.nan, dtype=np.float32)
+        sii_grid = sii_vals.numpy().reshape(out_h, out_w)
+        sii_map[center_offset:center_offset + out_h, center_offset:center_offset + out_w] = sii_grid
+        sii_map[center_offset:center_offset + out_h, center_offset:center_offset + out_w][~valid_grid] = np.nan
+        result += (sii_map,)
+        
+    return result
+
 
 def process_msd_sliding_tile(frame_data, tile_size, stride):
     """
@@ -391,6 +521,9 @@ def process_msd_sliding_tile(frame_data, tile_size, stride):
 
     bands, height, width = frame_data.shape
     tensor_data = torch.from_numpy(frame_data).to('cpu', dtype=COMPUTE_DTYPE)
+    
+    # Filter out anomalous data outside surface reflectance range +/- 1.5
+    tensor_data[(tensor_data < -1.5) | (tensor_data > 1.5)] = float('nan')
     
     out_h = (height - tile_size) // stride + 1
     out_w = (width - tile_size) // stride + 1

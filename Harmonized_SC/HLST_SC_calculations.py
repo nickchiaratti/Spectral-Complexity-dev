@@ -132,12 +132,75 @@ def compute_frame_metrics(payload):
                 em_out = endmembers
             telemetry['Global_Endmembers'] = time.perf_counter() - t0
     
+        # --- 3b. Global Scene-Level Noise Estimation (Block-DCT Method) ---
+        global_sigma_n = 0.0
+        if flags.get('esd', False):
+            t0 = time.perf_counter()
+            import scipy.fftpack as fftpack
+            
+            # 1. Define block size and extract valid dimensions
+            bh, bw = 8, 8
+            B, H_c, W_c = frame_sr.shape
+            num_blocks_h = H_c // bh
+            num_blocks_w = W_c // bw
+            
+            if num_blocks_h > 0 and num_blocks_w > 0:
+                # 2. Crop to perfectly fit blocks and reshape
+                cropped = frame_sr[:, :num_blocks_h*bh, :num_blocks_w*bw]
+                # Reshape to isolate 8x8 blocks
+                blocks = cropped.reshape(B, num_blocks_h, bh, num_blocks_w, bw)
+                # Transpose and flatten to shape (num_blocks, B, bh, bw)
+                blocks = blocks.transpose(1, 3, 0, 2, 4).reshape(-1, B, bh, bw)
+                
+                # 3. Filter out blocks containing NaNs, Infs, or fill values
+                block_valid_mask = ~np.isnan(blocks).any(axis=(1,2,3)) & np.isfinite(blocks).all(axis=(1,2,3)) & (blocks != -32768/10000.0).all(axis=(1,2,3))
+                valid_blocks = blocks[block_valid_mask]
+                
+                if len(valid_blocks) > 0:
+                    # 4. Apply 2D DCT on the spatial dimensions (last two axes)
+                    # norm='ortho' guarantees energy (variance) is preserved in the transform
+                    dct_blocks = fftpack.dctn(valid_blocks, axes=(2,3), norm='ortho')
+                    
+                    # 5. Extract high-frequency coefficients (bottom-right triangle where i+j >= 10)
+                    i, j = np.indices((bh, bw))
+                    hf_mask = (i + j) >= 10 
+                    
+                    # hf_coeffs shape: (num_valid_blocks, B, 15)
+                    hf_coeffs = dct_blocks[:, :, hf_mask]
+                    
+                    # 6. Compute robust variance (MAD) from high-frequency coefficients
+                    # This isolates the noise floor, mathematically independent of material diversity
+                    median_val = np.median(hf_coeffs)
+                    mad = np.median(np.abs(hf_coeffs - median_val))
+                    
+                    # Convert MAD to standard deviation (for normal distribution)
+                    global_sigma_n = mad / 0.6745
+            
+            # Fallback if image is extremely small or entirely masked
+            if global_sigma_n == 0.0:
+                global_sigma_n = 1e-4
+
+            telemetry['Global_Noise_Est'] = time.perf_counter() - t0
+
         # --- 4. Sliding Window Complexity ---
-        if flags['volume'] or flags['neighborhood_volume'] or flags['neighborhood_z_score']:
+        esd_map, sii_map = None, None
+        if flags['volume'] or flags['neighborhood_volume'] or flags['neighborhood_z_score'] or flags.get('esd', False):
             t0 = time.perf_counter()
             # Note: process_volume_sliding_tile prunes invalid pixels internally
             # Returns both the spatially-averaged map and the per-center-pixel neighborhood map
-            slide_map, neighborhood_map = scTorch.process_volume_sliding_tile(frame_sr, TILE_SIZE, SLIDING_STRIDE, NUM_ENDMEMBERS)
+            slide_result = scTorch.process_volume_sliding_tile(
+                frame_sr, TILE_SIZE, SLIDING_STRIDE, NUM_ENDMEMBERS,
+                compute_esd=flags.get('esd', False),
+                compute_sii=flags.get('esd', False),
+                global_sigma_n=global_sigma_n
+            )
+            
+            slide_map = slide_result[0]
+            neighborhood_map = slide_result[1]
+            if flags.get('esd', False):
+                esd_map = slide_result[2]
+                sii_map = slide_result[3]
+                
             telemetry['Sliding_Volume_Map'] = time.perf_counter() - t0
 
         # --- 4b. SMACC Sliding Window Complexity ---
@@ -246,6 +309,8 @@ def compute_frame_metrics(payload):
             'ndbi': ndbi,
             'slide': slide_map,
             'neighborhood': neighborhood_map,
+            'esd_map': esd_map if flags.get('esd', False) else None,
+            'sii_map': sii_map if flags.get('esd', False) else None,
             'smacc_slide': smacc_slide_map,
             'msd': msd_map,
             'z_map': z_map,
@@ -302,6 +367,7 @@ def main(target_location=None, tile_size=3, num_endmembers=7, norm_param=None, f
     CALC_NEIGHBORHOOD_Z_SCORE = False
     CALC_TEMPORAL_Z_SCORE = True
     CALC_PIXEL_TEMPORAL_Z_SCORE = False
+    CALC_ESD = True  # Height-Based Effective Spectral Dimensionality
 
     # ==========================================
     # 3. FILE MANAGEMENT & I/O
@@ -518,6 +584,8 @@ def main(target_location=None, tile_size=3, num_endmembers=7, norm_param=None, f
             ds_harm_neighborhood_z = overwrite_dset(harm_grp, 'neighborhood_volume_z_score', (total_frames, height, width), dtype='int16', scale_factor=scale_fac_z, fill_value=fill_val, spatial_ref=spatial_ref, geo_transform=master_gt, chunks=chunks_3d) if CALC_NEIGHBORHOOD_Z_SCORE else None
             ds_harm_temp_z = overwrite_dset(harm_grp, 'temporal_z_score', (total_frames, height, width), dtype='int16', scale_factor=scale_fac_z, fill_value=fill_val, spatial_ref=spatial_ref, geo_transform=master_gt, chunks=chunks_3d) if CALC_TEMPORAL_Z_SCORE else None
             ds_harm_pixel_temp_z = overwrite_dset(harm_grp, 'pixel_temporal_z_score', (total_frames, height, width), dtype='int16', scale_factor=scale_fac_z, fill_value=fill_val, spatial_ref=spatial_ref, geo_transform=master_gt, chunks=chunks_3d) if CALC_PIXEL_TEMPORAL_Z_SCORE else None
+            ds_harm_esd = overwrite_dset(harm_grp, 'effective_spectral_dimensionality', (total_frames, height, width), dtype='uint8', spatial_ref=spatial_ref, geo_transform=master_gt, chunks=chunks_3d) if CALC_ESD else None
+            ds_harm_sii = overwrite_dset(harm_grp, 'spectral_innovation_integral', (total_frames, height, width), dtype='float32', spatial_ref=spatial_ref, geo_transform=master_gt, chunks=chunks_3d) if CALC_ESD else None
 
             sensor_dsets = {}
             import os
@@ -604,7 +672,8 @@ def main(target_location=None, tile_size=3, num_endmembers=7, norm_param=None, f
                     'neighborhood_z_score': CALC_NEIGHBORHOOD_Z_SCORE, 'robust_scale': CALC_ROBUST_SCALE,
                     'box_cox': CALC_BOX_COX,
                     'smacc_volume': CALC_SMACC_VOLUME,
-                    'smacc_zscore': CALC_SMACC_ZSCORE
+                    'smacc_zscore': CALC_SMACC_ZSCORE,
+                    'esd': CALC_ESD
                 },
                 'MASKING': MASKING,
                 'NUM_ENDMEMBERS': NUM_ENDMEMBERS,
@@ -672,6 +741,9 @@ def main(target_location=None, tile_size=3, num_endmembers=7, norm_param=None, f
                 ds_harm_box_cox[global_idx, ...] = sc.scale_to_int16(result['box_cox_map'], scale_factor=scale_fac_z)
             if CALC_NEIGHBORHOOD_Z_SCORE:
                 ds_harm_neighborhood_z[global_idx, ...] = sc.scale_to_int16(result['neighborhood_z_map'], scale_factor=scale_fac_z)
+            if CALC_ESD and 'esd_map' in result:
+                ds_harm_esd[global_idx, ...] = result['esd_map']
+                ds_harm_sii[global_idx, ...] = result['sii_map']
         
             if CALC_GLOBAL_ENDMEMBERS:
                 sensor_dsets[grid_name]['em'][t_local, ...] = sc.scale_to_int16(result['em'], scale_factor=scale_fac_indices) if result['em'] is not None else np.nan
