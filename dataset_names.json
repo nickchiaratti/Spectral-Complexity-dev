@@ -1,0 +1,54 @@
+{
+    "sliding_volume_map": {
+        "long": "Spectral Complexity",
+        "short": "SC"
+    },
+    "neighborhood_volume_map": {
+        "long": "Spectral Complexity Neighborhood Map",
+        "short": "Neigh. SC"
+    },
+    "pixel_temporal_z_score": {
+        "long": "Spectral Complexity Pixel Temporal Z-Score",
+        "short": "SC Pixel Z-Score"
+    },
+    "sliding_volume_box_cox": {
+        "long": "Spectral Complexity Z-Score (Box-Cox)",
+        "short": "Box-Cox SC"
+    },
+    "sliding_volume_robust_scale": {
+        "long": "Spectral Complexity Robust Scale",
+        "short": "Robust SC"
+    },
+    "temporal_z_score": {
+        "long": "Spectral Complexity Global Temporal Z-Score",
+        "short": "SC Global Z-Score"
+    },
+    "sliding_volume_z_score": {
+        "long": "Spectral Complexity Z-Score",
+        "short": "SC Z-Score"
+    },
+    "neighborhood_volume_z_score": {
+        "long": "Spectral Complexity Neighborhood Z-Score",
+        "short": "Neigh. Z-Score"
+    },
+    "sliding_volume_z_score_masked": {
+        "long": "Spectral Complexity Z-Score",
+        "short": "Z-Score"
+    },
+    "sliding_volume_local_z_score": {
+        "long": "Spectral Complexity Local Z-Score",
+        "short": "Local Z-Score"
+    },
+    "sliding_volume_map_5x5": {
+        "long": "Spectral Complexity 5x5 window",
+        "short": "SC 5x5"
+    },
+    "sliding_volume_map_7x7": {
+        "long": "Spectral Complexity 7x7 window",
+        "short": "SC 7x7"
+    },
+    "ndvi_map": {
+        "long": "NDVI",
+        "short": "NDVI"
+    }
+}

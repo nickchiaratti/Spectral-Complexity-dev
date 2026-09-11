@@ -120,11 +120,11 @@ def compute_frame_metrics(payload):
         endmembers, endmember_idx, vol_curve, em_out = None, None, None, None
         if flags['endmembers']:
             t0 = time.perf_counter()
-            # Tanager PRUNING specifically for Global Endmember calculation
-            eval_sr = np.delete(frame_sr, np.where(~gw_mask), axis=0) if sensor_type == "TANAGER" else frame_sr
+            # Sensor-specific PRUNING specifically for Global Endmember calculation
+            eval_sr = np.delete(frame_sr, np.where(~gw_mask), axis=0) if sensor_type in ["TANAGER", "ENMAP"] else frame_sr
             endmembers, endmember_idx, vol_curve = sc.process_volume_frame(eval_sr, NUM_ENDMEMBERS, 'minEndmember', NORM_PARAM)
         
-            if sensor_type == "TANAGER":
+            if sensor_type in ["TANAGER", "ENMAP"]:
                 em_full = np.full((num_bands, NUM_ENDMEMBERS), np.nan, dtype=np.float32)
                 em_full[gw_mask==1, :] = endmembers
                 em_out = em_full

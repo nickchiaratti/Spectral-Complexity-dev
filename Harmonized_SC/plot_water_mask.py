@@ -13,46 +13,23 @@ if str(script_dir.parent) not in sys.path:
     sys.path.insert(0, str(script_dir.parent))
 import SpecComplex as sc
 
-# ==========================================
-# CONFIGURATION
-# ==========================================
-script_dir = os.path.dirname(os.path.abspath(__file__))
-LOCATION = "Tait"
-CONFIG_FILE_PATH = os.path.join(script_dir, "locations_config.yaml")
-if not os.path.exists(CONFIG_FILE_PATH):
-    CONFIG_FILE_PATH = os.path.join(os.path.dirname(script_dir), "locations_config.yaml")
-SATELLITE_DATA_DIR = "C:/satelliteImagery/HLST30"
 
-def get_file_path(location):
-    """
-    Attempt to find the correct base HDF5 file path for the location.
-    The exact filename can vary (some include year, some don't).
-    """
-    # Search for any Harmonized files for this location
-    matches = glob.glob(os.path.join(SATELLITE_DATA_DIR, f"HLST_{location}_Harmonized*.h5"))
-    
-    if matches:
-        # Sort so that SC_EM files are preferred and selected first
-        matches.sort(key=lambda x: "SC_EM" in os.path.basename(x), reverse=True)
-        return matches[0]
-        
-    # Default fallback
-    base_name = f"HLST_{location}_Harmonized.h5"
-    return os.path.join(SATELLITE_DATA_DIR, base_name)
 
-def main(target_location=LOCATION):
-    print(f"Using location: {target_location}")
-
-    file_path = get_file_path(target_location)
-    print(f"Opening data cube: {file_path}")
-    
-    base_file_path = os.path.join(SATELLITE_DATA_DIR, f"HLST_{target_location}_Harmonized.h5")
-    
-    if not os.path.exists(file_path) or not os.path.exists(base_file_path):
-        print("ERROR: Required HDF5 files not found! Ensure the pipeline has run and base cubes exist.")
+def main(h5_path):
+    if not h5_path or not os.path.exists(h5_path):
+        print(f"ERROR: Invalid or missing HDF5 file: {h5_path}")
         return
 
-    with h5py.File(file_path, 'r') as h5, h5py.File(base_file_path, 'r') as h5_base:
+    print(f"Opening data cube: {h5_path}")
+    
+    # Reconstruct the base HDF5 file path by stripping the Spectral Complexity suffixes
+    base_file_path = h5_path.split('_SC_')[0] + '.h5'
+    
+    if not os.path.exists(base_file_path):
+        print(f"ERROR: Required base HDF5 file not found! Ensure the pipeline has run and base cubes exist.\n -> Checked {base_file_path}")
+        return
+
+    with h5py.File(h5_path, 'r') as h5, h5py.File(base_file_path, 'r') as h5_base:
         harm_grp = h5['/HDFEOS/GRIDS/HARMONIZED/Data Fields']
         ortho_visual_ds = harm_grp['ortho_visual'] 
         
@@ -129,8 +106,8 @@ def main(target_location=LOCATION):
         axes[2].axis('off')
         
         plt.tight_layout()
-        output_dir = os.path.dirname(file_path)
-        base_name = os.path.splitext(os.path.basename(file_path))[0]
+        output_dir = os.path.dirname(h5_path)
+        base_name = os.path.splitext(os.path.basename(h5_path))[0]
         output_plot = os.path.join(output_dir, f"{base_name}_water_mask.png")
         plt.savefig(output_plot, dpi=300)
         print(f"\nPlot saved to: {output_plot}")
@@ -138,10 +115,10 @@ def main(target_location=LOCATION):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Plot water mask")
-    parser.add_argument('--location', type=str, default=LOCATION, help="Target location")
+    parser.add_argument('--file', '-f', type=str, required=True, help="Path to specific HDF5 file")
     args = parser.parse_args()
     
     try:
-        main(target_location=args.location)
+        main(h5_path=args.file)
     except Exception as e:
         print(f"\nERROR: {e}")

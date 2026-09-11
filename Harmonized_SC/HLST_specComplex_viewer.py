@@ -22,6 +22,7 @@ from pyproj import Transformer, CRS
 import yaml
 import glob
 import sys
+import json
 from pathlib import Path
 script_dir = Path(__file__).resolve().parent
 if str(script_dir.parent) not in sys.path:
@@ -59,20 +60,18 @@ except Exception:
 complexity_type = 'sliding_volume_z_score' #'sliding_volume_map' #'sliding_volume_z_score' # or 'sliding_volume_map'
 complexity_type_comparison = 'ndvi_map'
 
-COMPLEXITY_DICT = {
-    'sliding_volume_map': 'Spectral Complexity',
-    'neighborhood_volume_map': 'Spectral Complexity Neighborhood Map',
-    'pixel_temporal_z_score': 'Spectral Complexity Pixel Temporal Z-Score',
-    'sliding_volume_box_cox': 'Spectral Complexity Z-Score (Box-Cox)',
-    'temporal_z_score': 'Spectral Complexity Global Temporal Z-Score',
-    'sliding_volume_z_score': 'Spectral Complexity Z-Score',
-    'neighborhood_volume_z_score': 'Spectral Complexity Neighborhood Z-Score',
-    'sliding_volume_z_score_masked': 'Spectral Complexity Z-Score',
-    'sliding_volume_local_z_score': 'Spectral Complexity Local Z-Score',
-    'sliding_volume_map_5x5': 'Spectral Complexity 5x5 window',
-    'sliding_volume_map_7x7': 'Spectral Complexity 7x7 window',
-    'ndvi_map': 'NDVI',
-}
+try:
+    dict_path = os.path.join(script_dir.parent, "dataset_names.json")
+    with open(dict_path, "r") as f:
+        _raw_dict = json.load(f)
+    COMPLEXITY_DICT = {k: v['long'] for k, v in _raw_dict.items()}
+except Exception:
+    COMPLEXITY_DICT = {
+        'sliding_volume_map': 'Spectral Complexity',
+        'sliding_volume_z_score': 'Spectral Complexity Z-Score',
+        'sliding_volume_box_cox': 'Spectral Complexity Z-Score (Box-Cox)',
+        'ndvi_map': 'NDVI'
+    }
 LOG_SCALE = ('map' in complexity_type)
 START_YEAR = 2022
 END_YEAR = 2026
@@ -604,7 +603,9 @@ class HarmonizedComplexityViewer:
         def update_map(ax, data, data_for_stats, mask_arr, im_attr, overlay_attr, cbar_attr, title, draw_crosshair=False):
             mh, mw = data.shape
             with np.errstate(all='ignore'):
-                if DISPLAY_NORMALIZATION and not np.all(np.isnan(data_for_stats)):
+                if np.all(np.isnan(data_for_stats)):
+                    v_min, v_max = np.nan, np.nan
+                elif DISPLAY_NORMALIZATION:
                     v_min, v_max = np.nanpercentile(data_for_stats, (2, 98))
                 else:
                     v_min, v_max = np.nanmin(data_for_stats), np.nanmax(data_for_stats)

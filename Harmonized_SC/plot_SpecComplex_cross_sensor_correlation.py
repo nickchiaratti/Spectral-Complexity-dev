@@ -34,19 +34,20 @@ import SpecComplex as sc
 # 1. CONFIGURATION
 # ==========================================
 # Maximum allowable time difference to consider frames a "Match"
-MATCH_TOLERANCE_DAYS = 5.0 
+MATCH_TOLERANCE_DAYS = 7.0 
 
 # ==========================================
 # 2. DATA EXTRACTION ENGINE
 # ==========================================
 class HLST_Statistical_Extractor:
-    def __init__(self, filepath, pair_name, sensor1_list, sensor2_list):
+    def __init__(self, filepath, pair_name, sensor1_list, sensor2_list, target_dataset='sliding_volume_z_score'):
         print(f"\nMounting ARD Cube: {filepath}")
         print(f"Preparing Extraction for: {pair_name}")
         self.h5 = h5py.File(filepath, 'r')
         self.pair_name = pair_name
         self.sensor1_list = sensor1_list
         self.sensor2_list = sensor2_list
+        self.target_dataset = target_dataset
         
         harm_path = '/HDFEOS/GRIDS/HARMONIZED/Data Fields'
         if harm_path not in self.h5:
@@ -55,8 +56,8 @@ class HLST_Statistical_Extractor:
         self.harm_grp = self.h5[harm_path]
         
         # Datasets
-        self.ds_vol = self.harm_grp['sliding_volume_map']
-        self.ds_zscore = self.harm_grp['sliding_volume_box_cox']#'sliding_volume_z_score']
+        self.ds_vol = self.harm_grp['sliding_volume_map'] if 'sliding_volume_map' in self.harm_grp else None
+        self.ds_target = self.harm_grp[self.target_dataset]
         self.ds_mask = self.harm_grp['common_mask']
         
         # Relational Vectors
@@ -99,12 +100,12 @@ class HLST_Statistical_Extractor:
                 })
                 
         print(f" -> Discovered {len(self.matched_pairs)} matched temporal brackets for {self.pair_name} (Tolerance: <= {MATCH_TOLERANCE_DAYS} days).")
-        if len(self.matched_pairs) < 5:
-            print(f" -> Insufficient satellite collections for {self.pair_name}. Need at least 5.")
+        if len(self.matched_pairs) < 1:
+            print(f" -> Insufficient satellite collections for {self.pair_name}. Need at least 1.")
             return False
         return True
 
-    def extract_matched_distributions(self):
+    def extract_matched_distributions(self, extract_vol=True):
         """Extracts and additively concatenates spatial intersections for all matched dates for both Vol and Z-Score."""
         if not self.find_matched_pairs():
             return False
@@ -116,41 +117,42 @@ class HLST_Statistical_Extractor:
         self.pair_data = []
         
         for i, pair in enumerate(self.matched_pairs):
-            vol_1 = sc.read_scaled_int16(self.ds_vol, np.s_[pair['idx_1'], :, :])
-            vol_2 = sc.read_scaled_int16(self.ds_vol, np.s_[pair['idx_2'], :, :])
-            z_1 = sc.read_scaled_int16(self.ds_zscore, np.s_[pair['idx_1'], :, :])
-            z_2 = sc.read_scaled_int16(self.ds_zscore, np.s_[pair['idx_2'], :, :])
+            z_1 = sc.read_scaled_int16(self.ds_target, np.s_[pair['idx_1'], :, :])
+            z_2 = sc.read_scaled_int16(self.ds_target, np.s_[pair['idx_2'], :, :])
             
             mask_1 = self.ds_mask[pair['idx_1'], :, :]
             mask_2 = self.ds_mask[pair['idx_2'], :, :]
             
             # STRICT GUARDRAIL: Only intersecting physical pixels that are clear in BOTH sensors (mask == 0)
-            # Ensure neither the volume nor the normalized z-score contains NaNs
-            joint_mask = (mask_1 == 0) & (mask_2 == 0) & (vol_1 > 0) & (vol_2 > 0) & \
-                         (~np.isnan(vol_1)) & (~np.isnan(vol_2)) & \
-                         (~np.isnan(z_1)) & (~np.isnan(z_2))
+            if extract_vol:
+                vol_1 = sc.read_scaled_int16(self.ds_vol, np.s_[pair['idx_1'], :, :])
+                vol_2 = sc.read_scaled_int16(self.ds_vol, np.s_[pair['idx_2'], :, :])
+                joint_mask = (mask_1 == 0) & (mask_2 == 0) & (vol_1 > 0) & (vol_2 > 0) & \
+                             (~np.isnan(vol_1)) & (~np.isnan(vol_2)) & \
+                             (~np.isnan(z_1)) & (~np.isnan(z_2))
+            else:
+                joint_mask = (mask_1 == 0) & (mask_2 == 0) & (~np.isnan(z_1)) & (~np.isnan(z_2))
             
-            intersect_1_v = vol_1[joint_mask]
-            intersect_2_v = vol_2[joint_mask]
             intersect_1_z = z_1[joint_mask]
             intersect_2_z = z_2[joint_mask]
             
-            if len(intersect_1_v) > 10:
-                vol_1_global.append(intersect_1_v)
-                vol_2_global.append(intersect_2_v)
+            if len(intersect_1_z) > 10:
+                if extract_vol:
+                    vol_1_global.append(vol_1[joint_mask])
+                    vol_2_global.append(vol_2[joint_mask])
+                
                 z_1_global.append(intersect_1_z)
                 z_2_global.append(intersect_2_z)
                 
+                # Do NOT duplicate arrays to prevent memory overload. Lazy loaded on demand.
                 self.pair_data.append({
                     'date_1': pair['date_1'],
                     'date_2': pair['date_2'],
+                    'idx_1': pair['idx_1'],
+                    'idx_2': pair['idx_2'],
                     'space_1': pair['space_1'],
                     'space_2': pair['space_2'],
-                    'diff_days': pair['diff_days'],
-                    'vol_1': intersect_1_v,
-                    'vol_2': intersect_2_v,
-                    'z_1': intersect_1_z,
-                    'z_2': intersect_2_z
+                    'diff_days': pair['diff_days']
                 })
                 
         if not self.pair_data:
@@ -333,14 +335,33 @@ class InteractiveDashboard:
         data = self.ard.pair_data[self.current_idx]
         dt_1, dt_2, diff_days = data['date_1'], data['date_2'], data['diff_days']
         sp_1, sp_2 = data['space_1'], data['space_2']
+        idx_1, idx_2 = data['idx_1'], data['idx_2']
+        
+        # Lazy load frame from HDF5
+        vol_1 = sc.read_scaled_int16(self.ard.ds_vol, np.s_[idx_1, :, :])
+        vol_2 = sc.read_scaled_int16(self.ard.ds_vol, np.s_[idx_2, :, :])
+        z_1 = sc.read_scaled_int16(self.ard.ds_target, np.s_[idx_1, :, :])
+        z_2 = sc.read_scaled_int16(self.ard.ds_target, np.s_[idx_2, :, :])
+        mask_1 = self.ard.ds_mask[idx_1, :, :]
+        mask_2 = self.ard.ds_mask[idx_2, :, :]
+        
+        joint_mask = (mask_1 == 0) & (mask_2 == 0) & (vol_1 > 0) & (vol_2 > 0) & \
+                     (~np.isnan(vol_1)) & (~np.isnan(vol_2)) & \
+                     (~np.isnan(z_1)) & (~np.isnan(z_2))
+                     
+        intersect_1_v = vol_1[joint_mask]
+        intersect_2_v = vol_2[joint_mask]
+        intersect_1_z = z_1[joint_mask]
+        intersect_2_z = z_2[joint_mask]
+        
         title_str = f"Spatial Match [{self.current_idx + 1}/{len(self.ard.pair_data)}]\n{sp_1}: {dt_1} vs {sp_2}: {dt_2} (Δ {diff_days:.1f}d)"
         
         # Top Row: Raw Volume Update
-        self._plot_spatial_scatter(self.ax_spatial_v, self.cax_v, data['vol_1'], data['vol_2'], 
+        self._plot_spatial_scatter(self.ax_spatial_v, self.cax_v, intersect_1_v, intersect_2_v, 
                                    title_str, f"{sp_1} Volume (Local)", f"{sp_2} Volume (Local)", is_log=True)
         
         # Bottom Row: Z-Score Update
-        self._plot_spatial_scatter(self.ax_spatial_z, self.cax_z, data['z_1'], data['z_2'], 
+        self._plot_spatial_scatter(self.ax_spatial_z, self.cax_z, intersect_1_z, intersect_2_z, 
                                    title_str, f"{sp_1} Z-Score (Local)", f"{sp_2} Z-Score (Local)", is_log=False)
         
         self.fig.canvas.draw_idle()
@@ -358,25 +379,20 @@ class InteractiveDashboard:
 # ==========================================
 # 4. SUMMARY FIGURE GENERATION (Publication / Pipeline)
 # ==========================================
-def create_summary_figure(filepath, comparisons, output_filename=None, output_dir=None):
+def create_summary_figure(filepath, comparisons, output_filename=None, output_dir=None, target_dataset='sliding_volume_z_score'):
     """
     Creates a multi-panel hexbin cross-correlation summary figure.
     """
     valid_comparisons = []
-    extractors = []
     
     for comp in comparisons:
         try:
-            extractor = HLST_Statistical_Extractor(
-                filepath, comp["name"], comp["s1"], comp["s2"]
-            )
-            if extractor.extract_matched_distributions():
+            extractor = HLST_Statistical_Extractor(filepath, comp["name"], comp["s1"], comp["s2"], target_dataset=target_dataset)
+            if extractor.find_matched_pairs():
                 valid_comparisons.append(comp)
-                extractors.append(extractor)
-            if hasattr(extractor, 'h5'):
-                extractor.h5.close()
+            extractor.h5.close()
         except Exception as e:
-            print(f"  -> Skipping {comp['name']}: {e}")
+            print(f"  -> Skipping {comp['name']} pre-check: {e}")
 
     if not valid_comparisons:
         print(f"  -> No comparison pairs met criteria for summary figure.")
@@ -390,37 +406,54 @@ def create_summary_figure(filepath, comparisons, output_filename=None, output_di
     hb_list = []
     first_clim = None
 
-    for ax, comp, extractor in zip(axes, valid_comparisons, extractors):
-        data_1 = extractor.z_1_global
-        data_2 = extractor.z_2_global
-
-        slope, intercept, r_val, _, _ = stats.linregress(data_1, data_2)
-        if first_clim is None:
-            hb = ax.hexbin(data_1, data_2, gridsize=50, cmap='cividis', bins='log', mincnt=1)
-            first_clim = hb.get_clim()
-        else:
-            hb = ax.hexbin(data_1, data_2, gridsize=50, cmap='cividis', bins='log', mincnt=1, vmin=first_clim[0], vmax=first_clim[1])
-        hb_list.append(hb)
-
-        x_sp = np.array([data_1.min(), data_1.max()])
-        y_sp = intercept + slope * x_sp
-        sign = '+' if intercept >= 0 else '-'
-
-        n_pixels = len(data_1)
-        eq_text = (f"Pixels: {n_pixels:.1e}\n"
-                   f"$r$: {r_val:.3f}\n"
-                   f"$y = {slope:.2f}x {sign} {abs(intercept):.2f}$")
-
-        ax.plot(x_sp, y_sp, 'cyan', linestyle='--', lw=1.5, label='Trend')
-
-        ax.set_title(comp["name"], fontsize=10, fontweight='bold')
-        ax.set_xlabel(comp.get("s1_label", "Sensor 1 $Z$-Score"), fontsize=9)
-        ax.set_ylabel(comp.get("s2_label", "Sensor 2 $Z$-Score"), fontsize=9)
-        ax.grid(True, linestyle='--', alpha=0.5)
-
-        ax.text(0.05, 0.95, eq_text, transform=ax.transAxes,
-                bbox=dict(facecolor='white', alpha=0.8, edgecolor='gray', pad=2),
-                color='black', fontsize=8, va='top')
+    for ax, comp in zip(axes, valid_comparisons):
+        try:
+            extractor = HLST_Statistical_Extractor(filepath, comp["name"], comp["s1"], comp["s2"], target_dataset=target_dataset)
+            
+            # We only need Z-Scores for the summary figure, saving 50% memory
+            if not extractor.extract_matched_distributions(extract_vol=False):
+                extractor.h5.close()
+                continue
+                
+            data_1 = extractor.z_1_global
+            data_2 = extractor.z_2_global
+    
+            slope, intercept, r_val, _, _ = stats.linregress(data_1, data_2)
+            if first_clim is None:
+                hb = ax.hexbin(data_1, data_2, gridsize=50, cmap='cividis', bins='log', mincnt=1)
+                first_clim = hb.get_clim()
+            else:
+                hb = ax.hexbin(data_1, data_2, gridsize=50, cmap='cividis', bins='log', mincnt=1, vmin=first_clim[0], vmax=first_clim[1])
+            hb_list.append(hb)
+    
+            x_sp = np.array([data_1.min(), data_1.max()])
+            y_sp = intercept + slope * x_sp
+            sign = '+' if intercept >= 0 else '-'
+    
+            n_pixels = len(data_1)
+            eq_text = (f"Pixels: {n_pixels:.1e}\n"
+                       f"$r$: {r_val:.3f}\n"
+                       f"$y = {slope:.2f}x {sign} {abs(intercept):.2f}$")
+    
+            ax.plot(x_sp, y_sp, 'cyan', linestyle='--', lw=1.5, label='Trend')
+    
+            ax.set_title(comp["name"], fontsize=10, fontweight='bold')
+            ax.set_xlabel(comp.get("s1_label", "Sensor 1 $Z$-Score"), fontsize=9)
+            ax.set_ylabel(comp.get("s2_label", "Sensor 2 $Z$-Score"), fontsize=9)
+            ax.grid(True, linestyle='--', alpha=0.5)
+    
+            ax.text(0.05, 0.95, eq_text, transform=ax.transAxes,
+                    bbox=dict(facecolor='white', alpha=0.8, edgecolor='gray', pad=2),
+                    color='black', fontsize=8, va='top')
+                    
+            # FREE MEMORY IMMEDIATELY TO PREVENT RAM CRASH
+            extractor.h5.close()
+            del data_1, data_2, extractor
+            import gc
+            gc.collect()
+            
+        except Exception as e:
+            print(f"  -> Skipping {comp['name']}: {e}")
 
     if hb_list:
         cb = fig.colorbar(hb_list[0], ax=axes if isinstance(axes, list) else axes.ravel().tolist(), fraction=0.02, pad=0.02)
@@ -433,7 +466,7 @@ def create_summary_figure(filepath, comparisons, output_filename=None, output_di
 
     if output_filename is None:
         base_name = os.path.splitext(os.path.basename(filepath))[0]
-        output_filename = f"{base_name}_cross_sensor_correlation.png"
+        output_filename = f"{base_name}_{target_dataset}_cross_sensor_correlation.png"
 
     out_path = os.path.join(output_dir, output_filename)
     fig.savefig(out_path, dpi=500, bbox_inches='tight')
@@ -441,7 +474,7 @@ def create_summary_figure(filepath, comparisons, output_filename=None, output_di
     print(f"  -> Saved Cross-Sensor Correlation Summary Plot to: {out_path}")
     return out_path
 
-def plot_cross_sensor_correlations(target_location=None, h5_path=None, location=None):
+def plot_cross_sensor_correlations(target_location=None, h5_path=None, location=None, target_dataset='sliding_volume_z_score'):
     """
     Main entry point for pipeline execution.
     """
@@ -458,40 +491,49 @@ def plot_cross_sensor_correlations(target_location=None, h5_path=None, location=
         print(f"Warning: Cannot plot cross-sensor correlation, file not found: {h5_path}")
         return
 
+    import json
+    try:
+        dict_path = os.path.join(script_dir.parent, "dataset_names.json")
+        with open(dict_path, "r") as f:
+            _raw_dict = json.load(f)
+        dataset_name = _raw_dict.get(target_dataset, {}).get("short", "$Z$-Score")
+    except Exception:
+        dataset_name = "$Z$-Score"
+
     cross_comparisons = [
         {
             "name": "Landsat vs Sentinel",
-            "s1_label": "Landsat $Z$-Score", "s2_label": "Sentinel $Z$-Score",
+            "s1_label": f"Landsat {dataset_name}", "s2_label": f"Sentinel {dataset_name}",
             "s1": ["LANDSAT_8", "LANDSAT-8", "LANDSAT_9", "LANDSAT-9"],
             "s2": ["Sentinel-2A", "SENTINEL-2A", "Sentinel-2B", "SENTINEL-2B"]
         },
         {
             "name": "Landsat vs Tanager",
-            "s1_label": "Landsat $Z$-Score", "s2_label": "Tanager $Z$-Score",
+            "s1_label": f"Landsat {dataset_name}", "s2_label": f"Tanager {dataset_name}",
             "s1": ["LANDSAT_8", "LANDSAT-8", "LANDSAT_9", "LANDSAT-9"],
             "s2": ["Tanager-1", "TANAGER-1"]
         },
         {
             "name": "Sentinel vs Tanager",
-            "s1_label": "Sentinel $Z$-Score", "s2_label": "Tanager $Z$-Score",
+            "s1_label": f"Sentinel {dataset_name}", "s2_label": f"Tanager {dataset_name}",
             "s1": ["Sentinel-2A", "SENTINEL-2A", "Sentinel-2B", "SENTINEL-2B"],
             "s2": ["Tanager-1", "TANAGER-1"]
         },
         {
             "name": "Landsat vs EnMAP",
-            "s1_label": "Landsat $Z$-Score", "s2_label": "EnMAP $Z$-Score",
+            "s1_label": f"Landsat {dataset_name}", "s2_label": f"EnMAP {dataset_name}",
             "s1": ["LANDSAT_8", "LANDSAT-8", "LANDSAT_9", "LANDSAT-9"],
             "s2": ["EnMAP", "ENMAP", "enmap"]
         },
         {
             "name": "Sentinel vs EnMAP",
-            "s1_label": "Sentinel $Z$-Score", "s2_label": "EnMAP $Z$-Score",
+            "s1_label": f"Sentinel {dataset_name}", "s2_label": f"EnMAP {dataset_name}",
             "s1": ["Sentinel-2A", "SENTINEL-2A", "Sentinel-2B", "SENTINEL-2B"],
             "s2": ["EnMAP", "ENMAP", "enmap"]
         }
     ]
 
-    create_summary_figure(h5_path, cross_comparisons)
+    create_summary_figure(h5_path, cross_comparisons, target_dataset=target_dataset)
 
 # ==========================================
 # 5. EXECUTION POINT

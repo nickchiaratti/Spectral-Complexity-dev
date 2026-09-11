@@ -389,14 +389,22 @@ def plot_global_stats(target_location=None, h5_path=None, location=None, metric=
         fontsize=13, fontweight='bold', y=0.96
     )
 
+    total_pixels_per_frame = dset.shape[1] * dset.shape[2]
+    min_pixel_thresh = 0.15 * total_pixels_per_frame
+
     for name, idxs in sensors.items():
         if not idxs: continue
         # Sort indices chronologically to ensure valid line connections across temporal timeline
         sorted_idxs = sorted(idxs, key=lambda i: dates[i])
-        s_dates = [dates[i] for i in sorted_idxs]
-        s_means = [means[i] for i in sorted_idxs]
-        s_stds = [stds[i] for i in sorted_idxs]
-        s_counts = [counts[i] for i in sorted_idxs]
+        
+        # Filter out frames with < 15% valid pixels as they are not representative of real trends
+        valid_idxs = [i for i in sorted_idxs if counts[i] >= min_pixel_thresh]
+        if not valid_idxs: continue
+
+        s_dates = [dates[i] for i in valid_idxs]
+        s_means = [means[i] for i in valid_idxs]
+        s_stds = [stds[i] for i in valid_idxs]
+        s_counts = [counts[i] for i in valid_idxs]
 
         # Bounding bars for ± 1.645 * sigma (parametric 90% spatial bounding range at frame)
         y_err = 1.645 * np.array(s_stds)
@@ -410,7 +418,7 @@ def plot_global_stats(target_location=None, h5_path=None, location=None, metric=
         ax_series.plot(
             s_dates, s_means,
             marker=markers[name], color=colors[name],
-            label=f"{name} ({len(sorted_idxs)} frames)",
+            label=f"{name} ({len(valid_idxs)} frames)",
             linestyle='-', linewidth=1.5, markersize=4,
             alpha=0.9, zorder=2
         )
@@ -418,7 +426,7 @@ def plot_global_stats(target_location=None, h5_path=None, location=None, metric=
         ax_count2.plot(
             s_dates, s_counts,
             marker=markers[name], color=colors[name],
-            label=f"{name} ({len(sorted_idxs)} frames)",
+            label=f"{name} ({len(valid_idxs)} frames)",
             linestyle='', markersize=3, alpha=0.7
         )
 

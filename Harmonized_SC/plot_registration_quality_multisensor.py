@@ -165,7 +165,7 @@ def plot_cross_sensor_registration_accuracy(df_pairs, output_path=None):
     """
     Produces and saves the cross-sensor geometric registration accuracy box-and-swarm plot.
     """
-    fig_box, ax_box = plt.subplots(figsize=(10, 8))
+    fig_box, ax_box = plt.subplots(figsize=(14, 14))
     fig_box.canvas.manager.set_window_title(
         "Cross-Sensor Geometric Registration Accuracy")
 

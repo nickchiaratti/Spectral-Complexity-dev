@@ -12,7 +12,7 @@ if str(script_dir.parent) not in sys.path:
     sys.path.insert(0, str(script_dir.parent))
 import SpecComplex
 
-LOCATION = 'SanRafael'
+LOCATION = 'LakeFire2024'
 
 SPACECRAFT_STYLE = {
     'Landsat-8': {'color': '#E69F00', 'marker': '^'},
@@ -38,7 +38,7 @@ FALLBACK_COLORS = ['#E69F00', '#56B4E9', '#009E73', '#F0E442', '#0072B2', '#D55E
 FALLBACK_MARKERS = ['o', 's', '^', 'D', 'p', 'v', 'X', 'P', '<', '>']
 
 
-def analyze_sampling_rate(h5_path, output_plot_path=None, max_masked_ratio=0.60):
+def analyze_sampling_rate(h5_path, output_plot_path=None, max_masked_ratio=0.95):
     print(f"Analyzing {h5_path}...")
     
     if not os.path.exists(h5_path):
@@ -225,6 +225,13 @@ def analyze_sampling_rate(h5_path, output_plot_path=None, max_masked_ratio=0.60)
         c_val = int(row['Count'])
         table_str += f"{y_val:<6} | {m_val:<8} | {s_val:<8} | {c_val:<6}\n"
         
+    table_str += "\n"
+    sensor_header = f"{'Sensor':<18} | {'Count':<6}"
+    table_str += sensor_header + "\n" + "-" * len(sensor_header) + "\n"
+    for sc in unique_scs:
+        sc_df = df[df['spacecraft'] == sc]
+        table_str += f"{sc[:18]:<18} | {len(sc_df):<6}\n"
+        
     props = dict(boxstyle='round', facecolor='whitesmoke', alpha=0.8)
     ax_text.text(0.05, 0.5, "Summary Statistics\n\n" + table_str, 
                  fontsize=11, fontfamily='monospace', 
@@ -248,8 +255,8 @@ if __name__ == '__main__':
     parser.add_argument('--file', '-f', default=f"C:/satelliteImagery/MGRS30mConstellation/Harmonized_MGRS_Stack_{LOCATION}_SC_EM-7_Norm-None.h5", 
                         help="Path to the HDF5 file.")
     parser.add_argument('--output', '-o', default=None, help="Optional path to output plot image file.")
-    parser.add_argument('--cloud-thresh', '-c', type=float, default=0.60, 
-                        help="Maximum allowed masked/cloud ratio per frame (default: 0.60).")
+    parser.add_argument('--cloud-thresh', '-c', type=float, default=0.95, 
+                        help="Maximum allowed masked/cloud ratio per frame (default: 0.95).")
     args = parser.parse_args()
     
     analyze_sampling_rate(args.file, output_plot_path=args.output, max_masked_ratio=args.cloud_thresh)

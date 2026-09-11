@@ -22,11 +22,7 @@ import Harmonized_SC.MGRS_grid_constellation as MGRS_grid_constellation
 import Harmonized_SC.HLST_constellation_to_hdf5 as HLST_constellation_to_hdf5
 import Harmonized_SC.HLST_SC_calculations as HLST_SC_calculations
 import Harmonized_SC.HLST_specComplex_viewer as HLST_specComplex_viewer
-import Harmonized_SC.plot_sampling_rate as plot_sampling_rate
-import Harmonized_SC.plot_water_mask as plot_water_mask
-import Harmonized_SC.plot_sliding_volume_global_stats as plot_sliding_volume_global_stats
-import Harmonized_SC.SpecComplex_cross_sensor_correlation as SpecComplex_cross_sensor_correlation
-import Harmonized_SC.HLST_registration_quality_multisensor_quantification as HLST_registration_quality_multisensor_quantification
+import Harmonized_SC.plot_all_figures as plot_all_figures
 import Harmonized_SC.mgrs_view as mgrs_view
 
 # ==========================================
@@ -99,11 +95,7 @@ def main():
         download_step,
         constellation_step,
         ("HLST_SC_calculations", HLST_SC_calculations.main),
-        ("plot_sampling_rate", plot_sampling_rate.analyze_sampling_rate),
-        ("plot_water_mask", plot_water_mask.main),
-        ("plot_sliding_volume_global_stats", plot_sliding_volume_global_stats.plot_global_stats),
-        ("plot_cross_sensor_correlations", SpecComplex_cross_sensor_correlation.plot_cross_sensor_correlations),
-        ("plot_registration_quality", HLST_registration_quality_multisensor_quantification.analyze_and_plot_registration_quality),
+        ("plot_all_figures", plot_all_figures.generate_all_plots),
         ("HLST_specComplex_viewer", HLST_specComplex_viewer.main)
     ]
 
@@ -133,32 +125,8 @@ def main():
         elif name == "HLST_SC_calculations":
             func(target_location=target_location, tile_size=args.tile_size, num_endmembers=args.num_endmembers, norm_param=args.norm_param, file_path=base_h5_path)
             continue
-        elif name == "plot_sampling_rate":
-            print(f"Plotting sampling rate for {location_name}...")
-            func(h5_path=calc_output_path)
-            continue
-        elif name == "plot_sliding_volume_global_stats":
-            with h5py.File(calc_output_path, 'r') as h5f:
-                if '/HDFEOS/GRIDS/HARMONIZED/Data Fields' in h5f:
-                    data_fields = h5f['/HDFEOS/GRIDS/HARMONIZED/Data Fields'].keys()
-                else:
-                    data_fields = []
-                    
-            metrics_to_plot = []
-            if 'sliding_volume_z_score' in data_fields: metrics_to_plot.append('zscore')
-            if 'sliding_volume_robust_scale' in data_fields: metrics_to_plot.append('robust')
-            if 'sliding_volume_box_cox' in data_fields: metrics_to_plot.append('box_cox')
-            
-            for m in metrics_to_plot:
-                print(f"Plotting sliding volume global stats ({m}) for {location_name}...")
-                func(h5_path=calc_output_path, metric=m)
-            continue
-        elif name == "plot_cross_sensor_correlations":
-            print(f"Plotting cross-sensor correlation summary for {location_name}...")
-            func(h5_path=calc_output_path)
-            continue
-        elif name == "plot_registration_quality":
-            print(f"Plotting registration quality summary for {location_name}...")
+        elif name == "plot_all_figures":
+            print(f"Generating all summary plots for {location_name}...")
             func(h5_path=calc_output_path)
             continue
         elif name == "HLST_specComplex_viewer":
