@@ -278,7 +278,12 @@ def animate_pixel_endmembers(pixel_y, pixel_x, source_h5_path, inference_results
             grid = source_grids[i]
             frame_idx = source_frames[i]
             
-            sr_ds = f_raw[f"/HDFEOS/GRIDS/{grid}/Data Fields/surface_reflectance"]
+            try:
+                sr_ds = f_raw[f"/HDFEOS/GRIDS/{grid}/Data Fields/surface_reflectance"]
+            except (KeyError, OSError):
+                print(f"Error: Unable to load raw surface reflectance for {grid}. The underlying HDF5 file may be missing or links may be broken.")
+                continue
+                
             patch = sr_ds[frame_idx, :, y_start:y_end, x_start:x_end]
             
             w_attr = sr_ds.attrs.get('wavelengths')
@@ -518,7 +523,12 @@ def plot_segment_spectra(pixel_y, pixel_x, source_h5_path, inference_results_h5)
                 frame_idx = source_frames[i]
                 sensor = get_sensor_group(spacecrafts[i])
                 
-                sr_ds = f_raw[f"/HDFEOS/GRIDS/{grid}/Data Fields/surface_reflectance"]
+                try:
+                    sr_ds = f_raw[f"/HDFEOS/GRIDS/{grid}/Data Fields/surface_reflectance"]
+                except (KeyError, OSError):
+                    print(f"Error: Unable to load raw surface reflectance for {grid}. The underlying HDF5 file may be missing or links may be broken.")
+                    continue
+                    
                 patch = sr_ds[frame_idx, :, y_start:y_end, x_start:x_end]
                 
                 w_attr = sr_ds.attrs.get('wavelengths')
@@ -736,7 +746,12 @@ def plot_season_spectra(pixel_y, pixel_x, source_h5_path, inference_results_h5):
                 dt = datetime.fromtimestamp(acq_time[i], timezone.utc)
                 season = get_season(dt)
                 
-                sr_ds = f_raw[f"/HDFEOS/GRIDS/{grid}/Data Fields/surface_reflectance"]
+                try:
+                    sr_ds = f_raw[f"/HDFEOS/GRIDS/{grid}/Data Fields/surface_reflectance"]
+                except (KeyError, OSError):
+                    print(f"Error: Unable to load raw surface reflectance for {grid}. The underlying HDF5 file may be missing or links may be broken.")
+                    continue
+                    
                 patch = sr_ds[frame_idx, :, y_start:y_end, x_start:x_end]
                 
                 w_attr = sr_ds.attrs.get('wavelengths')
@@ -943,7 +958,12 @@ def plot_segment_endmembers(pixel_y, pixel_x, source_h5_path, inference_results_
                 frame_idx = source_frames[i]
                 sensor = get_sensor_group(spacecrafts[i])
                 
-                sr_ds = f_raw[f"/HDFEOS/GRIDS/{grid}/Data Fields/surface_reflectance"]
+                try:
+                    sr_ds = f_raw[f"/HDFEOS/GRIDS/{grid}/Data Fields/surface_reflectance"]
+                except (KeyError, OSError):
+                    print(f"Error: Unable to load raw surface reflectance for {grid}. The underlying HDF5 file may be missing or links may be broken.")
+                    continue
+                    
                 patch = sr_ds[frame_idx, :, y_start:y_end, x_start:x_end]
                 
                 w_attr = sr_ds.attrs.get('wavelengths')

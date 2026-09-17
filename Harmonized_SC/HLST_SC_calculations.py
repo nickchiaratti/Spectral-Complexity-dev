@@ -66,7 +66,26 @@ def compute_frame_metrics(payload):
             c_s = payload['col_offset']
             c_e = c_s + width
             
-            frame_sr = sc.load_scaled_reflectance(data_grp["surface_reflectance"], np.s_[t_local, :, r_s:r_e, c_s:c_e])
+            spatial_slice = np.s_[r_s:r_e, c_s:c_e]
+            
+            if sensor_type == "ENMAP":
+                frame_sr, valid_wavelengths = sc.load_enmap_sr(data_grp["surface_reflectance"], t_local, spatial_slice)
+                gw_mask = data_grp["surface_reflectance"].attrs.get("all_good_wavelengths")[t_local].astype(bool)
+            elif sensor_type == "TANAGER":
+                frame_sr, valid_wavelengths = sc.load_tanager_sr(data_grp["surface_reflectance"], t_local, spatial_slice)
+                gw_mask = data_grp["surface_reflectance"].attrs.get("all_good_wavelengths")[t_local].astype(bool)
+            else:
+                frame_sr = sc.load_scaled_reflectance(data_grp["surface_reflectance"], np.s_[t_local, :, r_s:r_e, c_s:c_e])
+                gw_mask = None
+                
+            if gw_mask is not None:
+                # Since frame_sr is now pruned of bad bands, we must remap the band indices
+                # to their new positions in the pruned array for spectral indices (NDVI/NDBI)
+                valid_indices_map = np.cumsum(gw_mask) - 1
+                red_idx = valid_indices_map[red_idx] if gw_mask[red_idx] else red_idx
+                nir_idx = valid_indices_map[nir_idx] if gw_mask[nir_idx] else nir_idx
+                swir_idx = valid_indices_map[swir_idx] if gw_mask[swir_idx] else swir_idx
+
             frame_mask = data_grp["common_mask"][t_local, r_s:r_e, c_s:c_e]
             raw_frame_ortho = data_grp["ortho_visual"][t_local, :, r_s:r_e, c_s:c_e]
 
@@ -74,11 +93,6 @@ def compute_frame_metrics(payload):
             if persistent_water_mask is not None:
                 # Flag persistent open water as masked/invalid in the frame's common_mask
                 frame_mask[persistent_water_mask] = 1
-
-            if sensor_type in ["TANAGER", "ENMAP"]:
-                gw_mask = data_grp["surface_reflectance"].attrs.get("all_good_wavelengths")[t_local].astype(bool)
-            else:
-                gw_mask = None
             
             # Dependency Resolution: Read existing volume map if Z-Score requires it but we aren't calculating it
             if flags['z_score'] and not flags['volume'] and not flags['neighborhood_volume']:
@@ -120,9 +134,8 @@ def compute_frame_metrics(payload):
         endmembers, endmember_idx, vol_curve, em_out = None, None, None, None
         if flags['endmembers']:
             t0 = time.perf_counter()
-            # Sensor-specific PRUNING specifically for Global Endmember calculation
-            eval_sr = np.delete(frame_sr, np.where(~gw_mask), axis=0) if sensor_type in ["TANAGER", "ENMAP"] else frame_sr
-            endmembers, endmember_idx, vol_curve = sc.process_volume_frame(eval_sr, NUM_ENDMEMBERS, 'minEndmember', NORM_PARAM)
+            # frame_sr is already pre-pruned for hyperspectral sensors
+            endmembers, endmember_idx, vol_curve = sc.process_volume_frame(frame_sr, NUM_ENDMEMBERS, 'minEndmember', NORM_PARAM)
         
             if sensor_type in ["TANAGER", "ENMAP"]:
                 em_full = np.full((num_bands, NUM_ENDMEMBERS), np.nan, dtype=np.float32)
@@ -184,6 +197,9 @@ def compute_frame_metrics(payload):
 
         # --- 4. Sliding Window Complexity ---
         esd_map, sii_map = None, None
+        
+        # frame_sr is already pre-pruned for hyperspectral sensors, so we can use it directly
+
         if flags['volume'] or flags['neighborhood_volume'] or flags['neighborhood_z_score'] or flags.get('esd', False):
             t0 = time.perf_counter()
             # Note: process_volume_sliding_tile prunes invalid pixels internally
@@ -353,7 +369,7 @@ def main(target_location=None, tile_size=3, num_endmembers=7, norm_param=None, f
     # --- ANALYTICAL FEATURE TOGGLES ---
     # Set to True to calculate and overwrite. Set to False to skip processing and 
     # retain existing datasets in the ARD cube.
-    CALC_NDVI = True
+    CALC_NDVI = False
     CALC_NDBI = False
     CALC_MSD = False
     CALC_GLOBAL_ENDMEMBERS = True
@@ -363,11 +379,11 @@ def main(target_location=None, tile_size=3, num_endmembers=7, norm_param=None, f
     CALC_Z_SCORE = True
     CALC_SMACC_ZSCORE = False
     CALC_ROBUST_SCALE = False
-    CALC_BOX_COX = True
+    CALC_BOX_COX = False
     CALC_NEIGHBORHOOD_Z_SCORE = False
-    CALC_TEMPORAL_Z_SCORE = True
+    CALC_TEMPORAL_Z_SCORE = False
     CALC_PIXEL_TEMPORAL_Z_SCORE = False
-    CALC_ESD = True  # Height-Based Effective Spectral Dimensionality
+    CALC_ESD = False  # Height-Based Effective Spectral Dimensionality
 
     # ==========================================
     # 3. FILE MANAGEMENT & I/O

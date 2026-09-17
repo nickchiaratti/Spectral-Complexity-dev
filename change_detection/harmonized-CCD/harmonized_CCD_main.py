@@ -40,7 +40,7 @@ def tqdm_joblib(tqdm_object):
 # 1. CONFIGURATION
 # ==========================================
 # Input/Output
-LOCATION = "CentralGreece"
+LOCATION = "LakeFire2024"
 
 def get_source_h5_path(location):
     candidates = [
@@ -55,7 +55,7 @@ def get_source_h5_path(location):
     return #f"C:/satelliteImagery/MGRS30mConstellation/Harmonized_MGRS_Stack_{location}_SC_EM-7_Norm-None.h5"
 
 H5_PATH = get_source_h5_path(LOCATION)
-TARGET_METRIC = 'sliding_volume_box_cox'
+TARGET_METRIC = 'sliding_volume_z_score'
 
 if TARGET_METRIC == 'sliding_volume_z_score':
     TARGET_NAME = 'Spectral Complexity (Z-Score)'

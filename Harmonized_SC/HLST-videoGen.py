@@ -2,6 +2,7 @@ import os
 import h5py
 import numpy as np
 import matplotlib.pyplot as plt
+import matplotlib.patches as patches
 import matplotlib.animation as animation
 from datetime import datetime, timezone
 from contextlib import ExitStack
@@ -18,12 +19,12 @@ background_color = 'w'
 text_color = 'black'
 TEXT_OVERLAY = True
 
-Location = "SanRafael"
-ARD_CUBE_PATH = f"C:/satelliteImagery/HLST30/HLST_{Location}_Harmonized_SC_EM-7_Norm-None.h5"
-OUTPUT_DIR = f"C:/satelliteImagery/HLST30/HLST_{Location}_Videos"
+Location = "LakeFire2024"
+ARD_CUBE_PATH = f"C:/satelliteImagery/MGRS30mConstellation/Harmonized_MGRS_Stack_{Location}_SC_EM-7_Norm-None.h5"
+OUTPUT_DIR = f"C:/satelliteImagery/MGRS30mConstellation/HLST_{Location}_Videos"
 
-COMPLEXITY_TYPE = 'sliding_volume_box_cox' #'sliding_volume_map'
-SOURCE_GRID = 'HLSL30' #None # Set to a specific grid (e.g., 'HLSL30') or None for all
+COMPLEXITY_TYPE = 'sliding_volume_z_score' #'sliding_volume_map'
+SOURCE_GRID = 'ENMAP' #None # Set to a specific grid (e.g., 'HLSL30') or None for all
 
 START_DATE = datetime(2022, 4, 1, tzinfo=timezone.utc)
 END_DATE = datetime(2026, 8, 1, tzinfo=timezone.utc)
@@ -61,12 +62,12 @@ COVERAGE_EVALUATION_MODE = 'PERCENTAGE'
 ENFORCE_QA_MASKING = True
 
 # Used strictly if COVERAGE_EVALUATION_MODE = 'PERCENTAGE'
-MIN_FRAME_VALIDITY_PERCENTAGE = 0.9
+MIN_FRAME_VALIDITY_PERCENTAGE = 0.2
 
 # Video Output Configuration
 FPS = 2
 DPI = 60
-EXPORT_GIF = True
+EXPORT_GIF = False  
 GIF_DPI = 60
 SHOW_PIXEL_INDICATORS = False
 
@@ -89,7 +90,7 @@ def map_locations(dset):
         raise ValueError("CRITICAL ERROR: GeoTransform or spatial_ref missing from ARD dataset.")
         
     if isinstance(spatial_ref, bytes): spatial_ref = spatial_ref.decode('utf-8')
-    crs = CRS.from_wkt(spatial_ref)
+    crs = CRS.from_user_input(spatial_ref)
     transformer = Transformer.from_crs("EPSG:4326", crs, always_xy=True)
     
     affine = rasterio.transform.Affine.from_gdal(*geo_transform)
@@ -335,9 +336,19 @@ def generate_videos():
         cbar_side.ax.yaxis.set_tick_params(color=text_color, labelcolor=text_color)
         cbar_side.outline.set_edgecolor(text_color)
 
-        txt_rgb = ax_rgb.text(0.5, -0.05, "", transform=ax_rgb.transAxes, ha='center', va='top', color=text_color, fontsize=12, fontweight='bold', bbox=dict(facecolor=background_color, alpha=0.6, pad=3))
-        txt_comp = ax_comp.text(0.5, -0.05, "", transform=ax_comp.transAxes, ha='center', va='top', color=text_color, fontsize=12, fontweight='bold', bbox=dict(facecolor=background_color, alpha=0.6, pad=3))
-        txt_side = fig_side.text(0.5, 0.03, "", ha='center', va='center', color=text_color, fontsize=14, fontweight='bold', bbox=dict(facecolor=background_color, alpha=0.6, pad=5))
+        prog_bars = []
+        prog_txts = []
+        for f in [fig_rgb, fig_comp, fig_side]:
+            ax_prog = f.add_axes([0.05, 0.02, 0.9, 0.04])
+            ax_prog.set_xlim(0, 1)
+            ax_prog.set_ylim(0, 1)
+            ax_prog.axis('off')
+            ax_prog.add_patch(patches.Rectangle((0, 0), 1, 1, facecolor='lightgray', edgecolor='black', linewidth=1))
+            fg = patches.Rectangle((0, 0), 0, 1, facecolor='dodgerblue', edgecolor='black', linewidth=1)
+            ax_prog.add_patch(fg)
+            prog_bars.append(fg)
+            txt = ax_prog.text(0.5, 0.5, "", ha='center', va='center', color='black', fontsize=12, fontweight='bold')
+            prog_txts.append(txt)
         
         #ax_s1.set_title("Ortho Visual", color=text_color, fontweight='bold')
         #ax_s2.set_title(f"Complexity ({COMPLEXITY_TYPE})", color=text_color, fontweight='bold')
@@ -394,7 +405,7 @@ def generate_videos():
                 rgba = np.nan_to_num(rgba, nan=0.0)
                 
                 # --- 2. Extract Complexity Map from HARMONIZED dataset ---
-                comp_data = frame['vol_dset'][frame['vol_idx'], ...].copy()
+                comp_data = frame['vol_dset'][frame['vol_idx'], ...].astype(np.float32)
                 
                 if raw_ortho.shape[-1] == 4:
                     comp_data[rgba[..., 3] == 0.0] = np.nan
@@ -432,9 +443,12 @@ def generate_videos():
                             ind_list[loc_idx].set_markeredgecolor(loc['color'])
 
                 if TEXT_OVERLAY:
-                    txt_rgb.set_text(time_str)
-                    txt_comp.set_text(time_str)
-                    txt_side.set_text(time_str)
+                    total_seconds = (END_DATE - START_DATE).total_seconds()
+                    elapsed_seconds = (frame['dt_et'] - START_DATE).total_seconds()
+                    progress = max(0.0, min(1.0, elapsed_seconds / total_seconds)) if total_seconds > 0 else 1.0
+                    for fg, txt in zip(prog_bars, prog_txts):
+                        fg.set_width(progress)
+                        txt.set_text(time_str)
                 
                 writer_rgb.grab_frame()
                 writer_comp.grab_frame()

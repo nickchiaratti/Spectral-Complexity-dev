@@ -383,7 +383,8 @@ def process_volume_sliding_tile(frame_data, tile_size, stride, num_endmembers,
         batch_size = max(1, int(target_vram // bytes_per_window))
         
         # Cap batch size to prevent Windows TDR (Timeout Detection and Recovery) timeouts.
-        batch_size = min(batch_size, 500000)
+        # A cap of 500k was causing kernel execution to exceed the 2s limit, resulting in "CUDA error: unspecified launch failure"
+        batch_size = min(batch_size, 20000)
         
         bytes_per_row = out_w * bytes_per_window
         chunk_rows = max(1, min(out_h, int(target_vram // max(1, bytes_per_row))))

@@ -388,11 +388,14 @@ def create_summary_figure(filepath, comparisons, output_filename=None, output_di
     for comp in comparisons:
         try:
             extractor = HLST_Statistical_Extractor(filepath, comp["name"], comp["s1"], comp["s2"], target_dataset=target_dataset)
-            if extractor.find_matched_pairs():
+            if extractor.extract_matched_distributions(extract_vol=False):
+                comp['data_1'] = np.copy(extractor.z_1_global)
+                comp['data_2'] = np.copy(extractor.z_2_global)
                 valid_comparisons.append(comp)
             extractor.h5.close()
+            del extractor
         except Exception as e:
-            print(f"  -> Skipping {comp['name']} pre-check: {e}")
+            print(f"  -> Skipping {comp['name']} check/extraction: {e}")
 
     if not valid_comparisons:
         print(f"  -> No comparison pairs met criteria for summary figure.")
@@ -408,15 +411,8 @@ def create_summary_figure(filepath, comparisons, output_filename=None, output_di
 
     for ax, comp in zip(axes, valid_comparisons):
         try:
-            extractor = HLST_Statistical_Extractor(filepath, comp["name"], comp["s1"], comp["s2"], target_dataset=target_dataset)
-            
-            # We only need Z-Scores for the summary figure, saving 50% memory
-            if not extractor.extract_matched_distributions(extract_vol=False):
-                extractor.h5.close()
-                continue
-                
-            data_1 = extractor.z_1_global
-            data_2 = extractor.z_2_global
+            data_1 = comp['data_1']
+            data_2 = comp['data_2']
     
             slope, intercept, r_val, _, _ = stats.linregress(data_1, data_2)
             if first_clim is None:
@@ -447,13 +443,12 @@ def create_summary_figure(filepath, comparisons, output_filename=None, output_di
                     color='black', fontsize=8, va='top')
                     
             # FREE MEMORY IMMEDIATELY TO PREVENT RAM CRASH
-            extractor.h5.close()
-            del data_1, data_2, extractor
+            del comp['data_1'], comp['data_2'], data_1, data_2
             import gc
             gc.collect()
             
         except Exception as e:
-            print(f"  -> Skipping {comp['name']}: {e}")
+            print(f"  -> Skipping {comp['name']} plot generation: {e}")
 
     if hb_list:
         cb = fig.colorbar(hb_list[0], ax=axes if isinstance(axes, list) else axes.ravel().tolist(), fraction=0.02, pad=0.02)

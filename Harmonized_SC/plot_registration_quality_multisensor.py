@@ -29,11 +29,14 @@ from skimage.transform import EuclideanTransform, warp
 from scipy.optimize import minimize
 from scipy.stats import pearsonr
 import warnings
+import sys
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import SpecComplex as sc
 
 # ==========================================
 # 1. CONFIGURATION
 # ==========================================
-Location = "SantaBarbara"
+Location = "LakeFire2024"
 
 # Point directly to the finalized ARD Master Cube
 SOURCE_CUBE_PATH = f"C:/satelliteImagery/MGRS30mConstellation/Harmonized_MGRS_Stack_{Location}_SC_EM-7_Norm-None.h5"
@@ -70,17 +73,24 @@ def get_reflectance_and_mask(grp, f_idx):
     red_band_idx = 3 # default
     green_band_idx = 2
     blue_band_idx = 1
+    full_cube = None
     
-    if "HLSL30" in source_grid:
+    if "HLSL30" in source_grid or "HLSS30" in source_grid:
         red_band_idx, green_band_idx, blue_band_idx = 3, 2, 1
-    elif "HLSS30" in source_grid:
-        red_band_idx, green_band_idx, blue_band_idx = 3, 2, 1
+        reflectance = sc.load_scaled_reflectance(grp['surface_reflectance'], np.s_[f_idx, red_band_idx, :, :])
     elif "TANAGER" in source_grid or "ENMAP" in source_grid or "DRAGONETTE" in source_grid:
-        wavelengths = grp['surface_reflectance'].attrs.get('wavelengths')
-        if wavelengths is not None:
-            red_band_idx = np.argmin(np.abs(wavelengths - 660.0))
-            green_band_idx = np.argmin(np.abs(wavelengths - 550.0))
-            blue_band_idx = np.argmin(np.abs(wavelengths - 480.0))
+        if "ENMAP" in source_grid:
+            full_cube, valid_wv = sc.load_enmap_sr(grp['surface_reflectance'], f_idx)
+        elif "TANAGER" in source_grid:
+            full_cube, valid_wv = sc.load_tanager_sr(grp['surface_reflectance'], f_idx)
+        else:
+            full_cube = sc.load_scaled_reflectance(grp['surface_reflectance'], np.s_[f_idx, :, :, :])
+            valid_wv = grp['surface_reflectance'].attrs.get('wavelengths')
+
+        if valid_wv is not None:
+            red_band_idx = np.argmin(np.abs(valid_wv - 660.0))
+            green_band_idx = np.argmin(np.abs(valid_wv - 550.0))
+            blue_band_idx = np.argmin(np.abs(valid_wv - 480.0))
         else:
             if "TANAGER" in source_grid:
                 red_band_idx, green_band_idx, blue_band_idx = 75, 45, 23
@@ -88,15 +98,10 @@ def get_reflectance_and_mask(grp, f_idx):
                 red_band_idx, green_band_idx, blue_band_idx = 48, 27, 12
             else:
                 red_band_idx, green_band_idx, blue_band_idx = 15, 8, 2
+                
+        reflectance = full_cube[red_band_idx, ...]
     else:
         raise ValueError(f"Unknown source grid: {source_grid}")
-        
-    # Read the specific 2D band
-    raw_reflectance = grp['surface_reflectance'][f_idx, red_band_idx, ...]
-    if raw_reflectance.dtype == np.int16:
-        reflectance = raw_reflectance.astype(np.float32) / 10000.0
-    else:
-        reflectance = raw_reflectance.astype(np.float32)
 
     # Extract RGB visual for plotting/display purposes
     if 'ortho_visual' in grp:
@@ -111,14 +116,19 @@ def get_reflectance_and_mask(grp, f_idx):
             valid_mask &= (bip_vis[..., 3] > 0)
     else:
         # Construct RGB from surface reflectance
-        r = grp['surface_reflectance'][f_idx, red_band_idx, ...].astype(np.float32)
-        g = grp['surface_reflectance'][f_idx, green_band_idx, ...].astype(np.float32)
-        b = grp['surface_reflectance'][f_idx, blue_band_idx, ...].astype(np.float32)
-        if grp['surface_reflectance'].dtype == np.int16:
-            r /= 10000.0
-            g /= 10000.0
-            b /= 10000.0
-        
+        if full_cube is not None:
+            r = full_cube[red_band_idx, ...]
+            g = full_cube[green_band_idx, ...]
+            b = full_cube[blue_band_idx, ...]
+        else:
+            r = sc.load_scaled_reflectance(grp['surface_reflectance'], np.s_[f_idx, red_band_idx, :, :])
+            g = sc.load_scaled_reflectance(grp['surface_reflectance'], np.s_[f_idx, green_band_idx, :, :])
+            b = sc.load_scaled_reflectance(grp['surface_reflectance'], np.s_[f_idx, blue_band_idx, :, :])
+            
+        # Optional: scale RGB for visual balance (like 98th percentile stretch)
+        r_scale = np.nanpercentile(r, 98) if np.nanmax(r) > 0 else 1.0
+        g_scale = np.nanpercentile(g, 98) if np.nanmax(g) > 0 else 1.0
+        b_scale = np.nanpercentile(b, 98) if np.nanmax(b) > 0 else 1.0        
         rgb = np.stack([r, g, b], axis=-1)
         # Apply a simple stretch for visualization
         rgb = np.clip(rgb * 3.0, 0, 1)
@@ -165,13 +175,17 @@ def plot_cross_sensor_registration_accuracy(df_pairs, output_path=None):
     """
     Produces and saves the cross-sensor geometric registration accuracy box-and-swarm plot.
     """
-    fig_box, ax_box = plt.subplots(figsize=(14, 14))
+    import matplotlib.colors as mcolors
+    import matplotlib.cm as cm
+
+    fig_box, ax_box = plt.subplots(figsize=(30, 14))
     fig_box.canvas.manager.set_window_title(
         "Cross-Sensor Geometric Registration Accuracy")
 
     sns.stripplot(
         data=df_pairs, x='Sensor_Pair', y='Magnitude_Error_m',
-        color='steelblue', alpha=0.6, jitter=True, size=6, ax=ax_box
+        hue='Rotation_deg', palette='cividis', alpha=0.8, jitter=True, size=8, ax=ax_box,
+        edgecolor='white', linewidth=0.5
     )
 
     # 30m GSD threshold annotation
@@ -190,9 +204,49 @@ def plot_cross_sensor_registration_accuracy(df_pairs, output_path=None):
     ax_box.grid(True, axis='y', alpha=0.3, linestyle='--')
     ax_box.tick_params(axis='both', which='major', labelsize=16)
 
-    fig_box.tight_layout()
+    # Replace the legend with a continuous colorbar
+    if ax_box.legend_ is not None:
+        ax_box.legend_.remove()
+        
+    norm = mcolors.Normalize(vmin=df_pairs['Rotation_deg'].min(), vmax=df_pairs['Rotation_deg'].max())
+    sm = cm.ScalarMappable(cmap='cividis', norm=norm)
+    sm.set_array([])
+    cbar = fig_box.colorbar(sm, ax=ax_box, pad=0.02, aspect=30)
+    cbar.set_label('Absolute Rotation (°)', fontsize=20)
+    cbar.ax.tick_params(labelsize=16)
+    
+    # Calculate summary statistics per pair
+    stats_lines = ["Pairwise Summary Statistics", "-"*30]
+    
+    # Sort pairs alphabetically to match plot order
+    sorted_pairs = sorted(df_pairs['Sensor_Pair'].unique())
+    
+    for pair in sorted_pairs:
+        group = df_pairs[df_pairs['Sensor_Pair'] == pair]
+        
+        mean_err = group['Magnitude_Error_m'].mean()
+        med_err = group['Magnitude_Error_m'].median()
+        
+        mean_rot = group['Rotation_deg'].mean()
+        med_rot = group['Rotation_deg'].median()
+        
+        stats_lines.append(f"{pair} (N={len(group)})")
+        stats_lines.append(f"  Trans Error: {mean_err:.2f}m (Med: {med_err:.2f}m)")
+        stats_lines.append(f"  Rot Offset:  {mean_rot:.3f}° (Med: {med_rot:.3f}°)")
+        stats_lines.append("") # blank line between pairs
+    
+    stats_text = "\n".join(stats_lines).strip()
+    
+    props = dict(boxstyle='round', facecolor='white', alpha=0.9, edgecolor='gray')
+    # Use a slightly smaller font if there are many pairs
+    font_size = 14 if len(sorted_pairs) > 3 else 16
+    ax_box.text(1.15, 0.5, stats_text, transform=ax_box.transAxes, fontsize=font_size,
+                verticalalignment='center', bbox=props, family='monospace')
+
+    fig_box.subplots_adjust(right=0.65)
+    
     if output_path:
-        fig_box.savefig(output_path, dpi=300)
+        fig_box.savefig(output_path, dpi=300, bbox_inches='tight')
     
     return fig_box, ax_box
 
@@ -442,9 +496,10 @@ class MultiSensorCoRegistrationViewer:
         self.fig_sum.suptitle(f"Sequential Frame-to-Frame Registration Analysis | Window: {SPAN}x{SPAN}px", fontsize=24)
         self.fig_sum.tight_layout()
         
-        # Determine base directory and prefix from SOURCE_CUBE_PATH
-        base_dir = os.path.dirname(SOURCE_CUBE_PATH)
-        base_name = os.path.splitext(os.path.basename(SOURCE_CUBE_PATH))[0]
+        # Determine base directory and prefix from the current h5 file
+        h5_path = self.h5_src.filename
+        base_dir = os.path.dirname(h5_path)
+        base_name = os.path.splitext(os.path.basename(h5_path))[0]
         
         fig_sum_path = os.path.join(base_dir, f"{base_name}_frame_to_frame_stability.png")
         self.fig_sum.savefig(fig_sum_path, dpi=300)
@@ -473,7 +528,11 @@ class MultiSensorCoRegistrationViewer:
 
             pair = tuple(sorted([_classify_sensor(b_sc), _classify_sensor(t_sc)]))
             pair_label = f"{pair[0]}-{pair[1]}"
-            rows.append({'Sensor_Pair': pair_label, 'Magnitude_Error_m': c['mag']})
+            rows.append({
+                'Sensor_Pair': pair_label, 
+                'Magnitude_Error_m': c['mag'],
+                'Rotation_deg': abs(c['opt_theta'])
+            })
 
         df_pairs = pd.DataFrame(rows)
 

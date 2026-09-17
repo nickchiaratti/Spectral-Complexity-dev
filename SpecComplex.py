@@ -691,6 +691,87 @@ def load_scaled_reflectance(dataset, slice_obj=np.s_[...]):
     # (assuming float32 data is already in 0.0 - 1.0 range).
     return data
 
+def load_enmap_sr(dataset, frame_idx, spatial_slice=np.s_[:, :]):
+    """
+    Consistent method to load EnMAP surface reflectance from source .h5 files.
+    Correctly handles int to float conversion, converts EnMAP specific bad pixels (-32767) 
+    to NaN, and strips water absorption/defective bands.
+    
+    Args:
+        dataset: HDF5 dataset for surface_reflectance (4D: time, band, y, x).
+        frame_idx: The time index to load.
+        spatial_slice: Numpy slice object for the spatial dimensions (y, x).
+                       Defaults to loading the full spatial extent.
+                       
+    Returns:
+        float_data_pruned: (bands_valid, height, width) float32 surface reflectance array.
+        valid_wavelengths: (bands_valid,) float array of the remaining wavelengths.
+    """
+    # 1. Base load and scale (handles dataset.fillvalue, usually -32768)
+    if isinstance(spatial_slice, tuple):
+        raw_slice = (frame_idx, slice(None)) + spatial_slice
+    else:
+        raw_slice = (frame_idx, slice(None), spatial_slice)
+        
+    float_data = load_scaled_reflectance(dataset, raw_slice)
+    
+    # 2. EnMAP-specific nodata/bad pixel handling (-32767 scaled to float)
+    scale = dataset.attrs.get("scale_to_float", 1.0)
+    enmap_bad_pixel_scaled = -32767 * scale
+    
+    # Catch stray invalid pixels from L2A processing that are marked as -32767
+    float_data[np.isclose(float_data, enmap_bad_pixel_scaled, atol=1e-6)] = np.nan
+    
+    # 3. Strip bad bands using the dataset metadata
+    gw_attr = dataset.attrs.get("all_good_wavelengths")
+    wavelengths = dataset.attrs.get("wavelengths")[:]
+    
+    if gw_attr is not None:
+        gw_mask = gw_attr[frame_idx].astype(bool)
+        float_data_pruned = float_data[gw_mask, ...]
+        valid_wavelengths = wavelengths[gw_mask]
+    else:
+        # If dataset already stripped of bad bands, just return as-is
+        float_data_pruned = float_data
+        valid_wavelengths = wavelengths
+        
+    return float_data_pruned, valid_wavelengths
+
+def load_tanager_sr(dataset, frame_idx, spatial_slice=np.s_[:, :]):
+    """
+    Consistent method to load Tanager surface reflectance from source .h5 files.
+    Correctly handles int to float conversion and strips water absorption/defective bands.
+    
+    Args:
+        dataset: HDF5 dataset for surface_reflectance (4D: time, band, y, x).
+        frame_idx: The time index to load.
+        spatial_slice: Numpy slice object for the spatial dimensions (y, x).
+                       Defaults to loading the full spatial extent.
+                       
+    Returns:
+        float_data_pruned: (bands_valid, height, width) float32 surface reflectance array.
+        valid_wavelengths: (bands_valid,) float array of the remaining wavelengths.
+    """
+    if isinstance(spatial_slice, tuple):
+        raw_slice = (frame_idx, slice(None)) + spatial_slice
+    else:
+        raw_slice = (frame_idx, slice(None), spatial_slice)
+        
+    float_data = load_scaled_reflectance(dataset, raw_slice)
+    
+    gw_attr = dataset.attrs.get("all_good_wavelengths")
+    wavelengths = dataset.attrs.get("wavelengths")[:]
+    
+    if gw_attr is not None:
+        gw_mask = gw_attr[frame_idx].astype(bool)
+        float_data_pruned = float_data[gw_mask, ...]
+        valid_wavelengths = wavelengths[gw_mask]
+    else:
+        float_data_pruned = float_data
+        valid_wavelengths = wavelengths
+    
+    return float_data_pruned, valid_wavelengths
+
 def scale_to_int16(float_data, scale_factor=10000.0, nodata_value=-32768):
     """
     Scales a float32 array to int16 to reduce storage size.
