@@ -61,9 +61,6 @@ def process_spectir_glt(run_id):
     wavelengths = np.zeros(bands, dtype='float32')
     if 'wavelength' in ref_img.metadata:
         wavelengths = np.array([float(w) for w in ref_img.metadata['wavelength']], dtype='float32')
-        # Convert to nanometers if in micrometers
-        if np.max(wavelengths) < 10.0:
-            wavelengths = wavelengths * 1000.0
         
     fill_value = 0 # Default fill value if not found
     if 'data ignore value' in ref_img.metadata:
@@ -103,6 +100,15 @@ def process_spectir_glt(run_id):
             fillvalue=fill_value, 
             chunks=chunks_dim
         )
+        
+        scale_val = 10000.0
+        if 'reflectance scale factor' in ref_img.metadata:
+            try:
+                val = ref_img.metadata['reflectance scale factor']
+                scale_val = float(val[0]) if isinstance(val, list) else float(val)
+            except Exception:
+                pass
+        ds_ref.attrs['Scale_Factor'] = np.array([scale_val], dtype='float32')
         
         ds_vis = grp.create_dataset(
             "ortho_visual", 

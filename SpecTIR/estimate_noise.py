@@ -85,6 +85,48 @@ def estimate_noise_mlr(image_cube, valid_mask):
     
     return sigma_n
 
+def estimate_noise_mnf(image_cube, valid_mask):
+    """
+    Estimates noise covariance using ENVI's standard shift-difference method.
+    Calculates noise by differencing adjacent pixels to the right and above.
+    Includes a 2/3 statistical correction factor to account for variance inflation.
+    
+    Args:
+        image_cube (np.ndarray): Hyperspectral cube of shape (Bands, Height, Width).
+        valid_mask (np.ndarray): Boolean mask of valid pixels (Height, Width).
+        
+    Returns:
+        np.ndarray: B x B noise covariance matrix.
+    """
+    bands, height, width = image_cube.shape
+    
+    # 1. Create a combined valid mask to ensure all 3 pixels in the calculation are valid
+    current_mask = valid_mask[1:height, 0:width-1]
+    above_mask   = valid_mask[0:height-1, 0:width-1]
+    right_mask   = valid_mask[1:height, 1:width]
+    
+    combined_mask = current_mask & above_mask & right_mask
+    
+    if not np.any(combined_mask):
+        return np.zeros((bands, bands), dtype=np.float32)
+        
+    # 2. Extract the valid aligned pixels
+    current_pixels = image_cube[:, 1:height, 0:width-1][:, combined_mask].astype(np.float32)
+    above_pixels   = image_cube[:, 0:height-1, 0:width-1][:, combined_mask].astype(np.float32)
+    right_pixels   = image_cube[:, 1:height, 1:width][:, combined_mask].astype(np.float32)
+    
+    # 3. Calculate the differences and average
+    noise_estimate = ((current_pixels - above_pixels) + (current_pixels - right_pixels)) / 2.0
+    
+    # 4. Compute covariance (rowvar=True because rows are bands)
+    estimated_cov = np.cov(noise_estimate, rowvar=True)
+    
+    # 5. Apply statistical correction factor (1.5 variance inflation)
+    sigma_n = estimated_cov * (2.0 / 3.0)
+    
+    return sigma_n
+
+
 def estimate_noise_dct(image_cube, valid_mask, block_size=8):
     """
     Estimates the full noise covariance matrix using Discrete Cosine Transform (DCT).
@@ -158,12 +200,9 @@ def estimate_noise_dct(image_cube, valid_mask, block_size=8):
     
     return sigma_n
 
-def main():
-    h5_file = r"C:\satelliteImagery\share2012\SpecTIR\SpecTIR_Ortho_Stack_0920-1706.h5"
-    if not os.path.exists(h5_file):
-        print(f"Error: Could not find {h5_file}")
-        return
-        
+
+
+def process_file(h5_file):
     print(f"Opening {h5_file} for noise estimation...")
     with h5py.File(h5_file, 'r+') as f:
         grp_path = "HDFEOS/GRIDS/SPECTIR/Data Fields"
@@ -176,14 +215,26 @@ def main():
         fill_val = ds_ref.fillvalue if ds_ref.fillvalue is not None else 0
         
         print(f"Reading surface_reflectance cube into memory (Shape: {ds_ref.shape})...")
-        image_cube = ds_ref[0, ...] 
+        # Allocate float32 directly to save 13 GiB of intermediate int16 memory
+        image_cube = np.empty(ds_ref.shape[1:], dtype=np.float32)
+        ds_ref.read_direct(image_cube, np.s_[0, ...], np.s_[...])
+        
+        scale_factor = ds_ref.attrs.get('Scale_Factor', 10000.0)
+        if isinstance(scale_factor, np.ndarray): scale_factor = scale_factor[0]
+        
+        image_cube /= float(scale_factor) # In-place division
         
         if 'nodata_mask' in grp:
             print("Reading nodata_mask from HDF5...")
             valid_mask = ~grp['nodata_mask'][0, 0, ...]
         else:
             print(f"No nodata_mask found. Falling back to fill_value ({fill_val}) heuristic...")
-            valid_mask = np.all(image_cube != fill_val, axis=0)
+            scaled_fill_val = fill_val / float(scale_factor)
+            valid_mask = np.all(image_cube != scaled_fill_val, axis=0)
+            
+        # Filter out anomalous data outside surface reflectance range
+        invalid_values = (image_cube < -1.5) | (image_cube > 1.5)
+        valid_mask = valid_mask & ~np.any(invalid_values, axis=0)
         
         print("Computing SSD Noise Covariance...")
         ssd_noise = estimate_noise_ssd(image_cube, valid_mask)
@@ -194,10 +245,20 @@ def main():
         print("Computing DCT Noise Covariance...")
         dct_noise = estimate_noise_dct(image_cube, valid_mask)
         
+        print("Computing MNF Noise Covariance...")
+        mnf_noise = estimate_noise_mnf(image_cube, valid_mask)
+        
         # Save to HDF5
         bands = image_cube.shape[0]
         
-        for name, data in [("ssd_noise_cov", ssd_noise), ("mlr_noise_cov", mlr_noise), ("dct_noise_cov", dct_noise)]:
+        datasets_to_save = [
+            ("ssd_noise_cov", ssd_noise), 
+            ("mlr_noise_cov", mlr_noise), 
+            ("dct_noise_cov", dct_noise),
+            ("mnf_noise_cov", mnf_noise),
+        ]
+        
+        for name, data in datasets_to_save:
             if name in grp:
                 print(f"Dataset '{name}' already exists. Overwriting...")
                 del grp[name]
@@ -214,7 +275,22 @@ def main():
             ds.attrs['description'] = f"Estimated full noise covariance matrix (Bands x Bands) using {method} method"
             print(f"Saved dataset: {name}")
 
-    print("Noise estimation completed successfully.")
+    print(f"Noise estimation completed successfully for {h5_file}.")
 
-if __name__ == "__main__":
+def main():
+    target_dir = r"C:\satelliteImagery\share2012\SpecTIR"
+        
+    h5_files = [
+        os.path.join(target_dir, f) for f in os.listdir(target_dir) 
+        if f.startswith("SpecTIR_Ortho_Stack_") and f.endswith(".h5")
+    ]
+    
+    if not h5_files:
+        print("No matching .h5 files found.")
+        return
+        
+    for h5_file in h5_files:
+        process_file(h5_file)
+
+if __name__ == '__main__':
     main()

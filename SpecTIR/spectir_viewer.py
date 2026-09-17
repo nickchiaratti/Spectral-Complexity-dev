@@ -31,60 +31,77 @@ def main():
             if 'ortho_visual' not in grp:
                 print("Error: 'ortho_visual' dataset not found.")
                 return
-            if 'neighborhood_map_3x3' not in grp:
-                print("Error: 'neighborhood_map_3x3' dataset not found.")
-                return
-            if 'heights_map_3x3' not in grp:
-                print("Error: 'heights_map_3x3' dataset not found.")
-                return
                 
             print("Reading datasets...")
             ortho = grp['ortho_visual'][:]
-            nm = grp['neighborhood_map_3x3'][:]
-            heights_map = grp['heights_map_3x3'][:]
-            
-            # Squeeze extra dimensions (like the frame dimension)
             ortho = np.squeeze(ortho)
-            nm = np.squeeze(nm)
-            heights_map = np.squeeze(heights_map)
             
-            # Mask the neighborhood map if nodata_mask is present
+            tile_sizes = [3, 5, 7, 9, 11, 13, 15]
+            noise_sources = ['ssd', 'mlr', 'dct', 'mnf']
+            
+            nms = {}
+            heights_maps = {}
+            noise_heights_maps = {}
+            
+            nodata_mask = None
             if 'nodata_mask' in grp:
                 nodata_mask = np.squeeze(grp['nodata_mask'][:])
-                nm = np.ma.masked_where(nodata_mask, nm)
             
-            # Ensure NaNs and Infs are unconditionally masked out
-            nm = np.ma.masked_invalid(nm)
+            for t in tile_sizes:
+                nm_name = f'neighborhood_map_{t}x{t}'
+                h_name = f'heights_map_{t}x{t}'
+                
+                if nm_name in grp and h_name in grp:
+                    nm_data = np.squeeze(grp[nm_name][:])
+                    h_data = np.squeeze(grp[h_name][:])
+                    
+                    if nodata_mask is not None:
+                        nm_data = np.ma.masked_where(nodata_mask, nm_data)
+                    nm_data = np.ma.masked_invalid(nm_data)
+                    
+                    nms[t] = nm_data
+                    heights_maps[t] = h_data
+                    
+                    noise_heights_maps[t] = {}
+                    for src in noise_sources:
+                        n_name = f'noise_heights_map_{src}_{t}x{t}'
+                        if n_name in grp:
+                            noise_heights_maps[t][src] = np.squeeze(grp[n_name][:])
+                        else:
+                            noise_heights_maps[t][src] = None
+                else:
+                    print(f"Warning: Data for tile size {t}x{t} not found.")
             
-            # If ortho is channels-first, transpose it for matplotlib (e.g. 4, H, W -> H, W, 4)
             if ortho.ndim == 3 and ortho.shape[0] in [3, 4]:
                 ortho = np.transpose(ortho, (1, 2, 0))
                 
-            print(f"Ortho visual shape for display: {ortho.shape}")
-            print(f"Neighborhood map shape for display: {nm.shape}")
-                
-            fig, axes = plt.subplots(1, 2, figsize=(14, 7))
+            fig, axes = plt.subplots(1, 8, figsize=(18, 10))
+            axes = axes.flatten()
             
             # Plot ortho_visual
             axes[0].imshow(ortho)
             axes[0].set_title("Ortho Visual")
             axes[0].axis('off')
             
-            # Plot neighborhood map
-            # Calculate 1st and 99th percentiles for contrast stretch
-            valid_nm = nm.compressed()
-            vmin_val, vmax_val = np.percentile(valid_nm, [1, 99]) if valid_nm.size > 0 else (None, None)
+            # Keep track of which axes have which tile size for drawing boxes
+            ax_tile_map = {}
             
-            # Handle potential NaNs in the neighborhood map visually with cividis colormap
-            im = axes[1].imshow(nm, cmap='cividis', vmin=vmin_val, vmax=vmax_val)
-            axes[1].set_title("Neighborhood Map (3x3)")
-            axes[1].axis('off')
+            # Plot neighborhood maps
+            for idx, t in enumerate(tile_sizes):
+                ax = axes[idx + 1]
+                if t in nms:
+                    nm = nms[t]
+                    valid_nm = nm.compressed()
+                    vmin_val, vmax_val = np.percentile(valid_nm, [1, 99]) if valid_nm.size > 0 else (None, None)
+                    
+                    im = ax.imshow(nm, cmap='cividis', vmin=vmin_val, vmax=vmax_val)
+                    ax.set_title(f"Neighborhood Map ({t}x{t})")
+                    plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04).set_label("Spectral Complexity Volume")
+                    ax_tile_map[ax] = t
+                else:
+                    ax.set_title(f"Missing {t}x{t}")
+                ax.axis('off')
             
-            # Add a colorbar to the neighborhood map
-            cbar = plt.colorbar(im, ax=axes[1], fraction=0.046, pad=0.04)
-            cbar.set_label("Spectral Complexity Volume")
-            
-            # State for interactivity
             state = {
                 'patches': [],
                 'fig_hist': None,
@@ -92,52 +109,69 @@ def main():
             }
 
             def onclick(event):
-                # Ensure click is inside one of the axes
                 if event.inaxes not in axes:
                     return
                 
-                # Get integer coordinates
                 ix, iy = int(round(event.xdata)), int(round(event.ydata))
                 
-                # Ensure within bounds
-                height, width = nm.shape
+                # Assume all images share height/width from ortho
+                height, width = ortho.shape[:2]
                 if ix < 0 or ix >= width or iy < 0 or iy >= height:
                     return
                 
-                # Remove old patches
                 for p in state['patches']:
                     p.remove()
                 state['patches'].clear()
                 
-                # Draw 3x3 square (centered on ix, iy implies bottom-left is ix-1.5, iy-1.5)
-                for ax in axes:
-                    rect = patches.Rectangle((ix - 1.5, iy - 1.5), 3, 3, linewidth=1.5, edgecolor='red', facecolor='none')
-                    ax.add_patch(rect)
-                    state['patches'].append(rect)
+                # Draw crosshair on ortho
+                crosshair = axes[0].plot(ix, iy, marker='+', color='red', markersize=12, markeredgewidth=2)[0]
+                state['patches'].append(crosshair)
                 
-                # Update main figure
+                # Draw nxn square on corresponding neighborhood maps
+                for ax in axes[1:]:
+                    if ax in ax_tile_map:
+                        t = ax_tile_map[ax]
+                        offset = t / 2.0
+                        rect = patches.Rectangle((ix - offset, iy - offset), t, t, linewidth=1.5, edgecolor='red', facecolor='none')
+                        ax.add_patch(rect)
+                        state['patches'].append(rect)
+                
                 fig.canvas.draw_idle()
                 
-                # Extract heights
-                heights = heights_map[iy, ix, :]
-                
-                # Plot in secondary window
+                # Setup secondary window
                 if state['fig_hist'] is None or not plt.fignum_exists(state['fig_hist'].number):
-                    state['fig_hist'], state['ax_hist'] = plt.subplots(figsize=(6, 4))
+                    state['fig_hist'], state['ax_hist'] = plt.subplots(1, len(tile_sizes), figsize=(16, 8), sharey=True)
                     state['fig_hist'].canvas.manager.set_window_title('Spectral Complexity Analysis')
+                    plt.tight_layout(pad=3.0)
                 
-                ax_h = state['ax_hist']
-                ax_h.clear()
+                ax_hists = state['ax_hist']
+                for idx, t in enumerate(tile_sizes):
+                    ax_h = ax_hists[idx]
+                    ax_h.clear()
+                    
+                    if t in heights_maps:
+                        heights = heights_maps[t][iy, ix, :]
+                        endmembers = np.arange(1, len(heights) + 1)
+                        
+                        ax_h.plot(endmembers, heights, marker='o', linestyle='-', color='blue', label='Heights')
+                        
+                        # Plot noise threshold lines
+                        colors = {'ssd': 'orange', 'mlr': 'green', 'dct': 'red', 'mnf': 'purple'}
+                        for src in noise_sources:
+                            if src in noise_heights_maps[t] and noise_heights_maps[t][src] is not None:
+                                nh = noise_heights_maps[t][src][iy, ix, :]
+                                ax_h.plot(endmembers, nh, linestyle='--', color=colors[src], label=f'{src.upper()} Noise')
+                        
+                        ax_h.set_title(f"Tile {t}x{t} at ({ix}, {iy})")
+                        ax_h.set_ylabel("Orthogonal Height")
+                        #ax_h.set_yscale("log")
+                        ax_h.grid(True)
+                        if idx == 0:
+                            ax_h.legend(loc='upper right', fontsize='small')
+                        if idx == len(tile_sizes) - 1:
+                            ax_h.set_xlabel("Endmember Index")
                 
-                # Plot heights vs endmember index
-                endmembers = np.arange(1, len(heights) + 1)
-                ax_h.plot(endmembers, heights, marker='o', linestyle='-', color='blue')
-                ax_h.set_title(f"Heights at Pixel ({ix}, {iy})")
-                ax_h.set_xlabel("Endmember Index")
-                ax_h.set_ylabel("Orthogonal Projection Height")
-                ax_h.grid(True)
-                
-                # Force draw
+                state['fig_hist'].tight_layout()
                 state['fig_hist'].canvas.draw_idle()
                 state['fig_hist'].show()
             
@@ -147,7 +181,9 @@ def main():
             plt.show()
             
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         print(f"An error occurred: {e}")
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
