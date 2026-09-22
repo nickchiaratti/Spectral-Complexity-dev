@@ -291,8 +291,8 @@ def process_volume_sliding_tile(frame_data, valid_mask=None, tile_size=TILE_SIZE
     Output is masked with NaN for any pixel identified as invalid.
     """
     if num_endmembers > tile_size * tile_size:
-        print(f"Warning: num_endmembers ({num_endmembers}) > pixels in a tile ({tile_size*tile_size}). Clamping to {tile_size*tile_size}.")
-        num_endmembers = tile_size * tile_size
+        print(f"Warning: num_endmembers ({num_endmembers}) > pixels in a tile ({tile_size*tile_size}). Clamping to {tile_size*tile_size+1}.")
+        num_endmembers = tile_size * tile_size+1
 
     bands, height, width = frame_data.shape
     img = np.transpose(frame_data, (1, 2, 0))
@@ -603,86 +603,95 @@ def process_h5_file(file_path, tile_size=TILE_SIZE, num_endmembers=NUM_ENDMEMBER
     try:
         with h5py.File(file_path, 'r+') as f:
             grp_path = "HDFEOS/GRIDS/SPECTIR/Data Fields"
-            if grp_path not in f or 'surface_reflectance' not in f[grp_path]:
-                print(f"Error: '{grp_path}/surface_reflectance' dataset not found in the file.")
-            else:
-                grp = f[grp_path]
-                print("Reading surface_reflectance...")
-                # Avoid loading all frames into RAM at once; use dataset reference
-                sr_data = grp['surface_reflectance']
-                num_frames = sr_data.shape[0]
-                
-                neighborhood_maps = []
-                heights_maps = []
-                
-                nodata_mask = None
-                if 'nodata_mask' in grp:
-                    nodata_mask = grp['nodata_mask'][:]
-                
-                fill_val = sr_data.fillvalue if sr_data.fillvalue is not None else 0
-                
-                # Dynamically read Scale_Factor
-                scale_factor = sr_data.attrs.get('Scale_Factor')
-                
-                
-                cov_sources = ['ssd', 'mlr', 'dct', 'mnf']
-                covariances = []
-                valid_sources = []
-                for src in cov_sources:
-                    cov_name = f"{src}_noise_cov"
-                    if cov_name in grp:
-                        covariances.append(grp[cov_name][:])
-                        valid_sources.append(src)
-                    else:
-                        print(f"Warning: {cov_name} not found.")
-                
-                if len(covariances) > 0:
-                    Sigma_n = np.stack(covariances, axis=0) # shape (n, B, B)
+            grp = f[grp_path]
+            print("Reading surface_reflectance...")
+            # Avoid loading all frames into RAM at once; use dataset reference
+            sr_data = grp['surface_reflectance']
+            num_frames = sr_data.shape[0]
+            
+            neighborhood_maps = []
+            heights_maps = []
+            
+            nodata_mask = None
+            if 'nodata_mask' in grp:
+                nodata_mask = grp['nodata_mask'][:]
+            
+            fill_val = sr_data.fillvalue
+        
+            # Dynamically read Scale_Factor and safely extract scalar
+            scale_factor = sr_data.attrs.get('Scale_Factor')
+            #if hasattr(scale_factor, 'item'):
+            #    scale_factor = scale_factor.item() if scale_factor.size == 1 else scale_factor[0]
+            scale_factor = float(scale_factor[0])
+            
+            
+            cov_sources = ['mnf']#['ssd', 'mlr', 'dct', ]
+            covariances = []
+            valid_sources = []
+            for src in cov_sources:
+                cov_name = f"{src}_noise_cov"
+                if cov_name in grp:
+                    covariances.append(grp[cov_name][:])
+                    valid_sources.append(src)
                 else:
-                    Sigma_n = None
-    
+                    print(f"Warning: {cov_name} not found.")
+            
+            if len(covariances) > 0:
+                Sigma_n = np.stack(covariances, axis=0) # shape (n, B, B)
+            else:
+                Sigma_n = None
+
+            
+            frame_results_list = []
+            for i in range(num_frames):
+                print(f"Processing frame {i+1}/{num_frames} with tile_size={tile_size} and num_endmembers={num_endmembers}...")
                 
-                frame_results_list = []
-                for i in range(num_frames):
-                    print(f"Processing frame {i+1}/{num_frames} with tile_size={tile_size} and num_endmembers={num_endmembers}...")
-                    
-                    # Load single frame as raw int16 (takes ~13 GiB instead of ~40 GiB for float conversion)
-                    raw_frame = sr_data[i]
-                    
-                    v_mask = None
-                    if nodata_mask is not None:
-                        v_mask = ~nodata_mask[i, 0]
-                    else:
-                        # Fallback to checking for fill_value across all bands using raw_frame
-                        v_mask = np.all(raw_frame != fill_val, axis=0)
-                    
-                    # Filter out anomalous data outside surface reflectance range (equivalent to +/- 1.5 in float)
-                    invalid_values = (raw_frame < -15000) | (raw_frame > 15000)
-                    v_mask = v_mask & ~np.any(invalid_values, axis=0)
-                        
-                    import gc
-                    gc.collect()
-                    
-                    if torch.cuda.is_available():
-                        results = process_volume_sliding_tile_torch(raw_frame, valid_mask=v_mask, tile_size=tile_size, num_endmembers=num_endmembers, Sigma_n=Sigma_n, valid_sources=valid_sources, scale_factor=scale_factor)
-                    else:
-                        frame_data = raw_frame.astype(np.float32) / scale_factor
-                        results = process_volume_sliding_tile(frame_data, valid_mask=v_mask, tile_size=tile_size, num_endmembers=num_endmembers, Sigma_n=Sigma_n, valid_sources=valid_sources)
-                        
-                    frame_results_list.append(results)
-                    
-                final_results = {}
-                if len(frame_results_list) > 0:
-                    for key in frame_results_list[0].keys():
-                        final_results[key] = np.stack([res[key] for res in frame_results_list], axis=0)
+                # Load single frame as raw int16 (takes ~13 GiB instead of ~40 GiB for float conversion)
+                raw_frame = sr_data[i]
                 
-                for ds_name, ds_data in final_results.items():
-                    if ds_name in grp:
-                        print(f"Dataset {ds_name} already exists in {grp_path}. Overwriting...")
-                        del grp[ds_name]
-                    print(f"Saving dataset: {ds_name} to {grp_path} with shape {ds_data.shape}")
-                    grp.create_dataset(ds_name, data=ds_data)
-                print("Processing complete and saved to file.")
+                v_mask = None
+                if nodata_mask is not None:
+                    v_mask = ~nodata_mask[i, 0]
+                else:
+                    # Fallback to checking for fill_value across all bands using raw_frame
+                    v_mask = np.all(raw_frame != fill_val, axis=0)
+                
+                # Filter out anomalous data outside surface reflectance range (equivalent to -0.5 to 1.5 in float)
+                invalid_values = (raw_frame < -5000) | (raw_frame > 15000)
+                v_mask = v_mask & ~np.any(invalid_values, axis=0)
+                    
+                import gc
+                gc.collect()
+                
+                if torch.cuda.is_available():
+                    results = process_volume_sliding_tile_torch(raw_frame, valid_mask=v_mask, tile_size=tile_size, num_endmembers=num_endmembers, Sigma_n=Sigma_n, valid_sources=valid_sources, scale_factor=scale_factor)
+                else:
+                    frame_data = raw_frame.astype(np.float32) / scale_factor
+                    results = process_volume_sliding_tile(frame_data, valid_mask=v_mask, tile_size=tile_size, num_endmembers=num_endmembers, Sigma_n=Sigma_n, valid_sources=valid_sources)
+                    
+                frame_results_list.append(results)
+                
+            final_results = {}
+            if len(frame_results_list) > 0:
+                for key in frame_results_list[0].keys():
+                    final_results[key] = np.stack([res[key] for res in frame_results_list], axis=0)
+            
+
+            for ds_name, ds_data in final_results.items():
+                if ds_name in grp:
+                    print(f"Dataset {ds_name} already exists in {grp_path}. Overwriting...")
+                    del grp[ds_name]
+                print(f"Saving dataset: {ds_name} to {grp_path} with shape {ds_data.shape}")
+                
+                ds = grp.create_dataset(ds_name, data=ds_data, compression="gzip", compression_opts=5)
+                if 'GLT' in grp:
+                    if 'spatial_ref' in grp['GLT'].attrs:
+                        ds.attrs['spatial_ref'] = grp['GLT'].attrs['spatial_ref']
+                    if 'GeoTransform' in grp['GLT'].attrs:
+                        ds.attrs['GeoTransform'] = grp['GLT'].attrs['GeoTransform']
+                    ds.attrs['glt_mapping_dataset'] = 'GLT'
+                        
+            print("Processing complete and saved to file.")
     except Exception as e:
         import traceback
         traceback.print_exc()
@@ -696,10 +705,9 @@ if __name__ == '__main__':
         print(f"Error: Target directory {target_dir} not found.")
         sys.exit(1)
         
-    h5_files = [
-        os.path.join(target_dir, f) for f in os.listdir(target_dir) 
-        if f.startswith("SpecTIR_Ortho_Stack_") and f.endswith(".h5")
-    ]
+    h5_files = ["C:/satelliteImagery/share2012/SpecTIR/SpecTIR_Ortho_Stack_0920-1706.h5"]
+    #h5_files = [os.path.join(target_dir, f) for f in os.listdir(target_dir) 
+    #            if f.startswith("SpecTIR_Ortho_Stack_") and f.endswith(".h5")]
     
     if not h5_files:
         print("No matching .h5 files found.")
@@ -707,6 +715,6 @@ if __name__ == '__main__':
         
     for h5_file in h5_files:
         print(f"\n{'='*50}\nProcessing File: {h5_file}\n{'='*50}")
-        for i, TILE_SIZE in enumerate([3, 4, 5, 7, 9, 11, 13, 15, 17, 19, 21]):
+        for i, TILE_SIZE in enumerate([3, 5, 7, 9, 11, 13, 15, 17]):#, 19, 21]):
             print(f"Processing for TILE_SIZE={TILE_SIZE}...")
             process_h5_file(h5_file, TILE_SIZE, NUM_ENDMEMBERS)
