@@ -561,8 +561,8 @@ def calculate_noise_threshold_mc(Sigma_n, P_perp, num_pixels, M=5000, alpha=0.01
 def calculate_noise_threshold_from_traces_torch(trace_1, trace_2, num_pixels, alpha=0.01):
     trace_1_safe = torch.clamp(trace_1, min=1e-12)
     trace_2_safe = torch.clamp(trace_2, min=1e-12)
-    v = (trace_1 ** 2) / trace_2_safe
-    c = 2.0 * (trace_2 / trace_1_safe)
+    v = (trace_1_safe ** 2) / trace_2_safe
+    c = trace_2_safe / trace_1_safe
     N_candidates = num_pixels - 1
     p_adj = (1.0 - alpha) ** (1.0 / max(N_candidates, 1))
     
@@ -588,8 +588,8 @@ def calculate_noise_threshold_closed_form(Sigma_n, P_perp, num_pixels, alpha=0.0
     trace_1_safe = np.maximum(trace_1, 1e-12)
     trace_2_safe = np.maximum(trace_2, 1e-12)
     
-    v = (trace_1 ** 2) / trace_2_safe
-    c = 2.0 * (trace_2 / trace_1_safe)
+    v = (trace_1_safe ** 2) / trace_2_safe
+    c = trace_2_safe / trace_1_safe
     
     N_candidates = num_pixels - 1
     p_adj = (1.0 - alpha) ** (1.0 / max(N_candidates, 1))

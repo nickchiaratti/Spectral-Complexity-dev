@@ -920,30 +920,11 @@ def generate_rgba_from_hsi(frame_data, wavelengths, low=0.5, high=99.5, gamma=1.
     rgb_img = rgb_img.reshape(3, height, width)
     
     rgb = np.transpose(rgb_img, (1, 2, 0)) # (height, width, 3)
-    all_valid_pixels = rgb[valid_mask].flatten()
     
-    if all_valid_pixels.size == 0:
-        return np.zeros((height, width, 4), dtype=np.uint8)
-        
-    p_low, p_high = np.percentile(all_valid_pixels, (low, high))
-
-    for i in range(3):
-        band_data = rgb[:, :, i]
-        if p_low < p_high: 
-            # Manual linear stretch (highly optimized)
-            stretched = np.clip((band_data - p_low) / (p_high - p_low), 0.0, 1.0)
-            
-            # Non-linear Gamma Correction to improve mid-tone visibility
-            if gamma != 1.0:
-                # Prevent power warnings on 0 values
-                with np.errstate(invalid='ignore', divide='ignore'):
-                    stretched = np.power(stretched, 1.0 / gamma)
-                    # Clean up any potential inf/nan from power operation
-                    stretched = np.nan_to_num(stretched, nan=0.0, posinf=1.0, neginf=0.0)
-            
-            rgb[:, :, i] = stretched
-
-    # Scale to 8-bit for highly efficient HDF5 storage
+    # Scale to 8-bit for highly efficient HDF5 storage without contrast stretching
+    # Assume the max XYZ reflection is 1.0 (after scaling), so max RGB is roughly 1.0
+    # Values > 1.0 are clipped.
+    rgb = np.clip(rgb, 0.0, 1.0)
     rgb_8bit = (rgb * 255).astype(np.uint8)
     
     # 3. Construct the Alpha Channel

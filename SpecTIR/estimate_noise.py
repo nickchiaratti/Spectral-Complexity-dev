@@ -2,43 +2,63 @@ import numpy as np
 from scipy.fft import dctn
 import spectral
 
-def estimate_noise_ssd(image_cube):
+def estimate_noise_ssd(image_cube, valid_mask=None):
     """
-    Estimates noise covariance using Spatial Shift-Difference (SSD) via Spectral Python.
-    Uses an average of horizontal and vertical differences.
+    Estimates noise covariance using Spatial Shift-Difference (SSD) via manual differences.
+    Uses an average of horizontal and vertical differences, respecting the valid_mask.
     
     Args:
         image_cube (np.ndarray): Shape (Bands, Height, Width)
+        valid_mask (np.ndarray): Shape (Height, Width) boolean mask
     """
-    img_hwc = np.transpose(image_cube, (1, 2, 0))
-    n_right = spectral.noise_from_diffs(img_hwc, direction='right')
-    n_lower = spectral.noise_from_diffs(img_hwc, direction='lower')
+    bands, height, width = image_cube.shape
     
-    # Average the spatial covariances for robustness
-    sigma_n = (n_right.cov + n_lower.cov) / 2.0
+    diff_h = image_cube[:, :, 1:] - image_cube[:, :, :-1]
+    if valid_mask is not None:
+        mask_h = valid_mask[:, 1:] & valid_mask[:, :-1]
+        valid_diff_h = diff_h[:, mask_h]
+    else:
+        valid_diff_h = diff_h.reshape(bands, -1)
+        
+    diff_v = image_cube[:, 1:, :] - image_cube[:, :-1, :]
+    if valid_mask is not None:
+        mask_v = valid_mask[1:, :] & valid_mask[:-1, :]
+        valid_diff_v = diff_v[:, mask_v]
+    else:
+        valid_diff_v = diff_v.reshape(bands, -1)
+        
+    all_diffs = np.concatenate((valid_diff_h, valid_diff_v), axis=1)
+    N = all_diffs.shape[1]
+    
+    if N == 0:
+        return np.zeros((bands, bands), dtype=np.float32)
+        
+    # SSD noise covariance = 0.5 * Cov(diffs)
+    sigma_n = 0.5 * (all_diffs @ all_diffs.T) / N
     return sigma_n.astype(np.float32)
 
-def estimate_noise_mnf(image_cube):
+def estimate_noise_mnf(image_cube, valid_mask=None):
     """
-    Estimates noise covariance natively using Spectral Python's MNF.
+    Estimates noise covariance natively using Spectral Python's MNF, respecting valid_mask.
     Args:
         image_cube (np.ndarray): Shape (Bands, Height, Width)
+        valid_mask (np.ndarray): Shape (Height, Width) boolean mask
     """
-    img_hwc = np.transpose(image_cube, (1, 2, 0))
-    signal_stats = spectral.calc_stats(img_hwc)
-    noise_stats = spectral.noise_from_diffs(img_hwc)
-    
-    mnf_result = spectral.mnf(signal_stats, noise_stats)
-    return mnf_result.noise.cov.astype(np.float32)
+    # For noise_stats, we'll use our masked SSD implementation
+    noise_cov = estimate_noise_ssd(image_cube, valid_mask)
+    return noise_cov
 
-def estimate_noise_mlr(image_cube):
+def estimate_noise_mlr(image_cube, valid_mask=None):
     """
     Estimates the full noise covariance matrix using Multiple Linear Regression (MLR).
     This implements the exact HySime noise estimation algorithm from pysptools. https://pysptools.sourceforge.io/_modules/pysptools/material_count/vd.html#hysime
     """
     bands, height, width = image_cube.shape
-    # MUST be float64! 360-band covariance is highly ill-conditioned.
-    Y = image_cube.reshape(bands, -1).astype(np.float64)
+    
+    if valid_mask is not None:
+        Y = image_cube[:, valid_mask].astype(np.float64)
+    else:
+        Y = image_cube.reshape(bands, -1).astype(np.float64)
     
     L, N = Y.shape
     if N == 0:
@@ -48,7 +68,7 @@ def estimate_noise_mlr(image_cube):
     w = np.zeros((L, N), dtype=np.float64)
     
     # Calculate the uncentered correlation matrix
-    RR = np.dot(Y, Y.T)
+    RR = np.dot(Y, Y.T) / N
     RRi = np.linalg.pinv(RR + small * np.eye(L))
     
     # Iterate over each band to regress it against all other bands
