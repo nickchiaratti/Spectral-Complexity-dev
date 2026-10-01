@@ -17,6 +17,14 @@ from tkinter import filedialog
 from scipy.interpolate import interp1d
 from scipy.signal import savgol_filter
 
+HDR_PATH = r"F:\GlobusData\hyspex\20250918_GE18\dual\GE18_55m_02_Mjolnir_float32_geo_VS620.hdr"
+OUTPUT_DIR = r"C:\satelliteImagery\hyspex\20250918_GE18\dual"
+RUN_ID = "20250918_ge18_55m_02"
+
+WAVELENGTH_CUTOFF= 2440
+NOISE_ESTIMATIONS = ['ssd', 'nfd']
+    
+
 # Assuming you have an estimate_noise module in the parent or SpecTIR directory
 # If it's in SpecTIR, you might need to adjust the import or path.
 try:
@@ -28,6 +36,32 @@ except ImportError:
         sys.path.insert(0, str(spectir_dir))
     import estimate_noise
 
+def get_max_valid_rectangle(mask):
+    """
+    Finds the maximum area rectangle of True values in a 2D boolean array.
+    Returns (y, x, height, width) of the largest fully-valid sub-region.
+    """
+    rows, cols = mask.shape
+    max_area = 0
+    best_rect = (0, 0, 0, 0)
+    
+    heights = np.zeros(cols, dtype=int)
+    for r in range(rows):
+        heights = np.where(mask[r], heights + 1, 0)
+        stack = []
+        for c in range(cols + 1):
+            h = heights[c] if c < cols else 0
+            start = c
+            while stack and stack[-1][1] > h:
+                idx, val = stack.pop()
+                area = val * (c - idx)
+                if area > max_area:
+                    max_area = area
+                    best_rect = (r - val + 1, idx, val, c - idx)
+                start = idx
+            stack.append((start, h))
+            
+    return best_rect
 
 def plot_snr_spectrum(X, noise_covariances, wavelengths, run_id, output_dir):
     N, p = X.shape
@@ -119,6 +153,14 @@ def process_hyspex_to_h5(input_hdr, output_dir, run_id):
     if 'wavelength' in img.metadata:
         wavelengths = np.array([float(w) for w in img.metadata['wavelength']], dtype='float32')
         
+    valid_bands_idx = np.arange(bands)
+    if WAVELENGTH_CUTOFF is not None:
+        valid_bands_mask = wavelengths < WAVELENGTH_CUTOFF
+        valid_bands_idx = np.where(valid_bands_mask)[0]
+        bands = len(valid_bands_idx)
+        wavelengths = wavelengths[valid_bands_idx]
+        print(f"Applying WAVELENGTH_CUTOFF of {WAVELENGTH_CUTOFF} nm. Retaining {bands} bands.")
+        
     # Fill value
     fill_value = -1.0
     if 'data ignore value' in img.metadata:
@@ -136,8 +178,7 @@ def process_hyspex_to_h5(input_hdr, output_dir, run_id):
     
     # Auto-crop the bounding box of valid data to remove large nodata regions
     print("Determining valid data bounds for auto-cropping...")
-    mid_band_idx = bands // 2
-    band_data = img_mm[:, :, mid_band_idx]
+    band_data = img_mm[:, :, valid_bands_idx[bands // 2]]
     
     # Create mask where pixel is NOT fill_value (check on raw data to avoid scaling precision errors)
     valid_mask_2d = (band_data != fill_value)
@@ -176,37 +217,45 @@ def process_hyspex_to_h5(input_hdr, output_dir, run_id):
         cal_data = np.load(elm_files[0])
         elm_gain = cal_data['gain']
         elm_offset = cal_data['offset']
+        if WAVELENGTH_CUTOFF is not None:
+            elm_gain = elm_gain[valid_bands_idx]
+            elm_offset = elm_offset[valid_bands_idx]
     else:
         print("\n--- No ELM Calibration provided. Proceeding without reflectance conversion ---")
     # --- End ELM ---
     
-    # Estimate Noise on a spatial subset to avoid OOM
-    print("Estimating Noise Matrices on a central spatial subset...")
-    # Use a central 1024x1024 block relative to the cropped area
-    sub_h = min(1024, cropped_lines)
-    sub_w = min(1024, cropped_samples)
-    y0 = min_y + (cropped_lines - sub_h) // 2
-    x0 = min_x + (cropped_samples - sub_w) // 2
-    
-    subset = img_mm[y0:y0+sub_h, x0:x0+sub_w, :]
+    # Estimate Noise on the entire valid pixel area
+    print("Estimating Noise Matrices on the entire valid spatial area...")
+    subset = img_mm[min_y:max_y+1, min_x:max_x+1, valid_bands_idx]
     subset_float = np.transpose(subset.astype(np.float32) / scale_val, (2, 0, 1))
     
     # Check for fill_value on raw data before transpose/scaling
     valid_mask_subset = np.all(subset != fill_value, axis=2)
     
-    ssd_cov = estimate_noise.estimate_noise_ssd(subset_float, valid_mask_subset)
-    #mlr_cov = estimate_noise.estimate_noise_mlr(subset_float, valid_mask_subset)
-    dct_cov = estimate_noise.estimate_noise_dct(subset_float, valid_mask_subset)
-    mnf_cov = estimate_noise.estimate_noise_mnf(subset_float, valid_mask_subset)
+    noise_covs = {}
+    if 'ssd' in NOISE_ESTIMATIONS:
+        noise_covs['SSD'] = estimate_noise.estimate_noise_ssd(subset_float, valid_mask_subset)
+    if 'mlr' in NOISE_ESTIMATIONS:
+        noise_covs['MLR'] = estimate_noise.estimate_noise_mlr(subset_float, valid_mask_subset)
+    if 'dct' in NOISE_ESTIMATIONS:
+        noise_covs['DCT'] = estimate_noise.estimate_noise_dct(subset_float, valid_mask_subset)
+    if 'mnf' in NOISE_ESTIMATIONS:
+        noise_covs['MNF'] = estimate_noise.estimate_noise_mnf(subset_float, valid_mask_subset)
+    if 'nfd' in NOISE_ESTIMATIONS:
+        # spectral.noise_from_diffs requires a contiguous unmasked HSI cube (rows, cols, bands)
+        # Find the max rectangle that contains NO fill_values to prevent edge-gradient artifacts
+        ry, rx, rh, rw = get_max_valid_rectangle(valid_mask_subset)
+        if rh > 10 and rw > 10:
+            print(f"Executing spectral.noise_from_diffs on inscribed contiguous {rh}x{rw} region...")
+            # Extract inscribed rectangle and transpose to SPy format (H, W, B)
+            nfd_subset = np.transpose(subset_float[:, ry:ry+rh, rx:rx+rw], (1, 2, 0))
+            nfd_stats = spectral.noise_from_diffs(nfd_subset)
+            noise_covs['NFD'] = nfd_stats.cov
+        else:
+            print("Warning: Could not find a large enough contiguous valid area for NFD. Skipping.")
     
     print("Generating SNR Spectrum Plot...")
     X_valid = np.transpose(subset_float, (1, 2, 0))[valid_mask_subset]
-    noise_covs = {
-        'SSD': ssd_cov,
-        #'MLR': mlr_cov,
-        'DCT': dct_cov,
-        'MNF': mnf_cov
-    }
     plot_snr_spectrum(X_valid, noise_covs, wavelengths, run_id, output_dir)
     
     del subset_float
@@ -272,10 +321,8 @@ def process_hyspex_to_h5(input_hdr, output_dir, run_id):
                 ds.attrs.create('spatial_ref', data=np.array([crs_wkt], dtype=dt_str))
             ds.attrs['GeoTransform'] = np.array(gdal_transform, dtype='float64')
             
-        save_cov("ssd_noise_cov", ssd_cov, "Estimated full noise covariance matrix (Bands x Bands) using SSD method")
-        save_cov("mnf_noise_cov", mnf_cov, "Estimated full noise covariance matrix (Bands x Bands) using MNF method")
-        #save_cov("mlr_noise_cov", mlr_cov, "Estimated full noise covariance matrix (Bands x Bands) using MLR method")
-        save_cov("dct_noise_cov", dct_cov, "Estimated full noise covariance matrix (Bands x Bands) using DCT method")
+        for key, cov in noise_covs.items():
+            save_cov(f"{key.lower()}_noise_cov", cov, f"Estimated full noise covariance matrix (Bands x Bands) using {key} method")
         
         # Initialize RGB Preview Dataset
         ds_vis = grp.create_dataset(
@@ -310,8 +357,8 @@ def process_hyspex_to_h5(input_hdr, output_dir, run_id):
                 x_out = x - min_x
                 x_out_end = x_end - min_x
                 
-                # Load spatial chunk via memmap
-                chunk = img_mm[y:y_end, x:x_end, :]
+                # Load spatial chunk via memmap and subset wavelengths
+                chunk = img_mm[y:y_end, x:x_end, valid_bands_idx]
                 chunk_float = chunk.astype(np.float32) / scale_val
                 
                 # Check for fill_value on raw data to avoid scaling precision errors
@@ -367,8 +414,5 @@ def process_hyspex_to_h5(input_hdr, output_dir, run_id):
     print(f"Synthesis Complete. Stack Stored at: {output_h5}")
 
 if __name__ == "__main__":
-    HDR_PATH = r"F:\GlobusData\hyspex\20250918_GE18\dual\GE18_55m_02_Mjolnir_float32_geo_VS620.hdr"
-    OUTPUT_DIR = r"C:\satelliteImagery\hyspex\20250918_GE18\dual"
-    RUN_ID = "GE18_55m_02"
     
     process_hyspex_to_h5(HDR_PATH, OUTPUT_DIR, RUN_ID)

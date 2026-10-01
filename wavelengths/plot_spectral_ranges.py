@@ -12,6 +12,15 @@ plt.style.use(['science', 'ieee'])
 
 SENSORS_TO_PLOT = ['Landsat', 'Sentinel-2', 'EnMAP', 'Tanager']#, 'Dragonette']
 
+# Define Colors using Okabe-Ito Palette
+tanager_color = '#D55E00' # Green for Tanager hyperspectral lines
+oli_1_7_color = '#E69F00'  # Blue for Bands 1-7
+oli_other_color = '#E69F00' # Gray for Bands 8-9
+tirs_color = '#E69F00'      # Red for TIRS Bands 10-11
+enmap_color = '#9467bd' # Purple for EnMAP hyperspectral lines
+sentinel_color = '#009E73' # Orange
+dragonette_color = '#e377c2' # Pink for Dragonette
+
 def plot_spectral_ranges():
     """
     Generates side-by-side plots for Landsat 8/9 and Tanager spectral ranges.
@@ -41,9 +50,7 @@ def plot_spectral_ranges():
         ax_idx += 1
         # ==========================================
     
-        oli_1_7_color = '#1f77b4'  # Blue for Bands 1-7
-        oli_other_color = '#7f7f7f' # Gray for Bands 8-9
-        tirs_color = '#d62728'      # Red for TIRS Bands 10-11
+        
 
         # 1. Plot Real OLI Bands from Attached Excel (Bands 1-9)
         oli_plotted = False
@@ -135,7 +142,7 @@ def plot_spectral_ranges():
                 if not bands:
                     print("No band data found in Tanager JSON.")
                 else:
-                    tanager_color = '#2ca02c' # Green for Tanager hyperspectral lines
+                    
                 
                     # Plot each Tanager band as a Gaussian distribution
                     # FWHM = 2.355 * sigma  => sigma = FWHM / 2.355
@@ -194,7 +201,7 @@ def plot_spectral_ranges():
                     df_swir = pd.read_excel(enmap_excel_path, sheet_name='SWIR')
                     df_enmap = pd.concat([df_vnir, df_swir], ignore_index=True)
             
-                enmap_color = '#9467bd' # Purple for EnMAP hyperspectral lines
+                
                 bands_found = False
             
                 for idx, row in df_enmap.iterrows():
@@ -248,7 +255,7 @@ def plot_spectral_ranges():
             
                 # Wavelength in the file is in nm, we need um
                 wl = df_s2a['SR_WL'].values / 1000.0
-                sentinel_color = '#ff7f0e' # Orange
+                
             
                 # Find all band columns
                 band_cols = [c for c in df_s2a.columns if c.startswith('S2A_SR_AV_B')]
@@ -299,7 +306,7 @@ def plot_spectral_ranges():
                     warnings.simplefilter("ignore", category=UserWarning)
                     df_dragonette = pd.read_excel(dragonette_excel_path)
             
-                dragonette_color = '#e377c2' # Pink for Dragonette
+                
                 bands_found = False
             
                 cwl_col = 'Extended VNIR (Dragonette-2/3/4) Band Centre Wavelength (CWL)* (nm)'
@@ -349,7 +356,7 @@ def plot_spectral_ranges():
 
     # Final Adjustments and Show/Save
     plt.tight_layout(rect=[0.04, 0, 1, 1], h_pad=0.2)
-    plt.savefig(os.path.join(script_dir,'spectral_ranges_comparison.png'), dpi=600, bbox_inches='tight')
+    plt.savefig(os.path.join(script_dir,'spectral_ranges_comparison.png'), dpi=600,pad_inches=0, bbox_inches='tight')
     #plt.show()
 
 if __name__ == '__main__':

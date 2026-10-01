@@ -4,12 +4,21 @@ import matplotlib.patches as patches
 import tkinter as tk
 from tkinter import filedialog
 import numpy as np
+#import scipy.ndimage as ndimage
+import cupy as cp
+from cupyx.scipy import ndimage
 
 # Configuration for False Color Complexity Composite
-FALSE_COLOR_R_TILE = 3
-FALSE_COLOR_G_TILE = 5
-FALSE_COLOR_B_TILE = 7 # Adjusted for HySpex default tiles (3, 5, 7, 9)
-TILE_SIZES = [3,7, 11,15,19]
+
+TILE_SIZES = [5,15,35]# 19,31,41,61,81,101]
+NOISE_SOURCES = ['ssd', 'mlr', 'dct', 'mnf']
+
+FALSE_COLOR_R_TILE = TILE_SIZES[0]
+FALSE_COLOR_G_TILE = TILE_SIZES[len(TILE_SIZES)//2]
+FALSE_COLOR_B_TILE = TILE_SIZES[-1] # Adjusted for HySpex default tiles (3, 5, 7, 9)
+
+SPATIAL_AVERAGE=True
+COMMON_HEATMAP_RANGE=False
 COLOR_PALETTE = ['#E69F00', '#56B4E9', '#009E73', '#F0E442', '#0072B2', '#D55E00', '#CC79A7', '#000000']
 
 def main():
@@ -52,7 +61,8 @@ def main():
                 ortho_vis = np.transpose(ortho_vis, (1, 2, 0))
             
             tile_sizes = TILE_SIZES
-            noise_sources = ['ssd', 'mlr', 'dct', 'mnf']
+            # Use globally configured NOISE_SOURCES
+            noise_sources = NOISE_SOURCES
             
             ortho_nms = {}
             ortho_heights = {}
@@ -66,6 +76,19 @@ def main():
                 if nm_name in grp and h_name in grp:
                     nm_data = np.squeeze(grp[nm_name][:])
                     h_data = np.squeeze(grp[h_name][:])
+                    
+                    if SPATIAL_AVERAGE:
+                        
+                        valid_mask = np.isfinite(nm_data)
+                        
+                        # Use uniform filtering ignoring invalid pixels
+                        sum_vals = ndimage.uniform_filter(np.where(valid_mask, nm_data, 0.0), size=t, mode='constant', cval=0.0)
+                        sum_weights = ndimage.uniform_filter(valid_mask.astype(float), size=t, mode='constant', cval=0.0)
+                        
+                        with np.errstate(invalid='ignore', divide='ignore'):
+                            # Only calculate average for originally valid pixels to prevent 
+                            # the spatial filter from dilating the edges into the no-data background!
+                            nm_data = np.where(valid_mask & (sum_weights > 0), sum_vals / sum_weights, np.nan)
                     
                     nm_data = np.ma.masked_invalid(nm_data)
                     
@@ -103,25 +126,37 @@ def main():
             axes_ortho[0].set_title("Ortho Visual")
             axes_ortho[0].axis('off')
             
-            # Calculate global vmin, vmax for orthorectified complexity maps
+            # Calculate global vmin, vmax for orthorectified complexity maps if requested
             global_vmin_ortho, global_vmax_ortho = np.inf, -np.inf
-            for t in loaded_tile_sizes:
-                nm = ortho_nms[t]
-                valid_nm = nm.compressed() if np.ma.is_masked(nm) else nm[~np.isnan(nm)]
-                if valid_nm.size > 0:
-                    vmin_val, vmax_val = np.percentile(valid_nm, [1, 99])
-                    global_vmin_ortho = min(global_vmin_ortho, vmin_val)
-                    global_vmax_ortho = max(global_vmax_ortho, vmax_val)
-            if np.isinf(global_vmin_ortho): global_vmin_ortho = None
-            if np.isinf(global_vmax_ortho): global_vmax_ortho = None
+            if COMMON_HEATMAP_RANGE:
+                for t in loaded_tile_sizes:
+                    nm = ortho_nms[t]
+                    valid_nm = nm.compressed() if np.ma.is_masked(nm) else nm[~np.isnan(nm)]
+                    if valid_nm.size > 0:
+                        vmin_val, vmax_val = np.percentile(valid_nm, [1, 99])
+                        global_vmin_ortho = min(global_vmin_ortho, vmin_val)
+                        global_vmax_ortho = max(global_vmax_ortho, vmax_val)
+                if np.isinf(global_vmin_ortho): global_vmin_ortho = None
+                if np.isinf(global_vmax_ortho): global_vmax_ortho = None
 
             ax_tile_map_ortho = {}
             for idx, t in enumerate(loaded_tile_sizes):
                 ax = axes_ortho[idx + 1]
                 nm = ortho_nms[t]
-                im = ax.imshow(nm, cmap='cividis', vmin=global_vmin_ortho, vmax=global_vmax_ortho)
+                
+                if COMMON_HEATMAP_RANGE:
+                    plot_vmin = global_vmin_ortho
+                    plot_vmax = global_vmax_ortho
+                else:
+                    valid_nm = nm.compressed() if np.ma.is_masked(nm) else nm[~np.isnan(nm)]
+                    if valid_nm.size > 0:
+                        plot_vmin, plot_vmax = np.percentile(valid_nm, [1, 99])
+                    else:
+                        plot_vmin, plot_vmax = None, None
+                
+                im = ax.imshow(nm, cmap='gist_rainbow', vmin=plot_vmin, vmax=plot_vmax)
                 ax.set_title(f"Ortho Comp ({t}x{t})")
-                plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04).set_label("Complexity Volume")
+                plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04).set_label("ln(Complexity Volume)")
                 ax_tile_map_ortho[ax] = t
                 ax.axis('off')
             
@@ -162,8 +197,9 @@ def main():
                 
                 # Draw Orthorectified Markers
                 if 0 <= map_x < ortho_vis.shape[1] and 0 <= map_y < ortho_vis.shape[0]:
-                    crosshair = axes_ortho[0].plot(map_x, map_y, marker='+', color='red', markersize=12, markeredgewidth=2)[0]
-                    state['patches_all'].append(crosshair)
+                    main_rect = patches.Rectangle((map_x - 7.5, map_y - 7.5), 15, 15, linewidth=1.5, edgecolor='red', facecolor='none')
+                    axes_ortho[0].add_patch(main_rect)
+                    state['patches_all'].append(main_rect)
                     for ax in axes_ortho[1:]:
                         if ax in ax_tile_map_ortho:
                             t = ax_tile_map_ortho[ax]
@@ -268,7 +304,15 @@ def main():
                         
                         ax_h.plot(endmembers, heights, marker='o', linestyle='-', color='blue', label='Heights')
                         ax_h.plot(endmembers, -deriv, marker='^', linestyle=':', color='green', label='Derivative')
-                        ax_h_twin.plot(endmembers, volumes, marker='s', linestyle='--', color='purple', label='Volume')
+                        
+                        # Plot Noise Heights based on the configured sources
+                        colors = ['purple', 'orange', 'brown', 'cyan']
+                        for idx_src, src in enumerate(NOISE_SOURCES):
+                            if src in ortho_noise_heights[t] and ortho_noise_heights[t][src] is not None:
+                                n_heights = ortho_noise_heights[t][src][map_y, map_x, :]
+                                ax_h.plot(endmembers, n_heights, marker='s', linestyle='--', color=colors[idx_src % len(colors)], label=f'Noise ({src.upper()})')
+                                
+                        ax_h_twin.plot(endmembers, volumes, marker='s', linestyle='--', color='red', label='Volume')
                         
                         adj_volumes = (volumes ** (1.0 / endmembers)) / np.sqrt(endmembers)
                         ax_h_twin2.plot(endmembers, adj_volumes, marker='d', linestyle='-.', color='magenta', label='Adj Volume')
@@ -305,7 +349,13 @@ def main():
                         # Plot Spectra for the txt neighborhood
                         spectra_block = surface_reflectance_ds[0, :, y_start:y_end, x_start:x_end]
                         spectra_pixels = spectra_block.reshape(spectra_block.shape[0], -1)
-                        spectra_pixels = spectra_pixels.astype(np.float32) / scale_factor
+                        spectra_pixels = spectra_pixels.astype(np.float32)
+                        
+                        fill_val = surface_reflectance_ds.fillvalue
+                        if fill_val is not None:
+                            spectra_pixels[spectra_pixels == fill_val] = np.nan
+                            
+                        spectra_pixels = spectra_pixels / scale_factor
                         
                         center_y_local = map_y - y_start
                         center_x_local = map_x - x_start
@@ -330,11 +380,13 @@ def main():
                                 lw = 2
                                 alpha = 1.0
                                 label = 'Center Pixel'
+                            elif (2*d + 1) <= tile_sizes[0]:
+                                color, lw, alpha, label = 'blue', 1, 0.7, f'{tile_sizes[0]}x{tile_sizes[0]} Neighborhood'
+                            elif len(tile_sizes) > 1 and (2*d + 1) <= tile_sizes[1]:
+                                color, lw, alpha, label = 'green', 1, 0.7, f'{tile_sizes[1]}x{tile_sizes[1]} Neighborhood'
                             else:
-                                color = COLOR_PALETTE[d] if d < len(COLOR_PALETTE) else 'gray'
-                                lw = 1
-                                alpha = 0.7
-                                label = f'{2*d+1}x{2*d+1} Ring'
+                                last_t = tile_sizes[-1] if len(tile_sizes) > 0 else 35
+                                color, lw, alpha, label = 'orange', 1, 0.7, f'{last_t}x{last_t} Neighborhood'
                                 
                             lines = ax_s.plot(wavelengths, spectra_pixels[:, pixels_in_ring], color=color, alpha=alpha, linewidth=lw)
                             lines[0].set_label(label)
@@ -344,7 +396,9 @@ def main():
                         ax_s.set_xlabel("Wavelength (nm)")
                         ax_s.set_ylim(-0.05, 1.05)
                         ax_s.grid(True)
-                        ax_s.legend(loc='upper right', fontsize='small')
+                        handles, labels = ax_s.get_legend_handles_labels()
+                        by_label = dict(zip(labels, handles))
+                        ax_s.legend(by_label.values(), by_label.keys(), loc='upper right', fontsize='small')
                 
                 state['fig_hist'].tight_layout()
                 state['fig_hist'].canvas.draw_idle()

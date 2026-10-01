@@ -463,212 +463,6 @@ def maximumDistance_volumes_test(pixels, num_endmembers):
 
 maximumDistance_volumes_heights = maximumDistance_volumes_test
 
-def estimate_effective_dimensionality(pixels, k_max, sigma_n, kappa=3.0):
-    """
-    Estimate the effective spectral dimensionality (ESD) of a tile by
-    monitoring the orthogonal height sequence h_k from MaxD extraction.
-
-    Noise-calibrated stopping criterion:
-        k* = max{k : h_k > kappa * sigma_n * sqrt(B - k + 1)}
-
-    Additionally computes the Spectral Innovation Integral (SII):
-        SII = sum_{k} max(0, log(h_k) - log(tau_k))
-
-    NOTE FOR FUTURE RESEARCH:
-    If the raw k* counts are found to lack true cross-sensor band invariance in practice,
-    consider applying band-normalization to the heights prior to thresholding:
-        h_tilde_k = h_k / sqrt(B)
-    This normalizes the expected Euclidean norm growth that occurs when adding more spectral bands.
-
-    References:
-        - Ren & Chang, IEEE TAES 2003 (ATGP-NPD)
-        - Chang 2006 (MaxD threshold)
-
-    Args:
-        pixels: ndarray of shape (bands, num_pixels) or (H, W, bands).
-        k_max: int, maximum number of endmembers to extract.
-        sigma_n: float, global scene-level noise standard deviation.
-        kappa: float, confidence multiplier. 2.0 = ~95%, 3.0 = ~99.7%.
-
-    Returns:
-        esd: int — effective spectral dimensionality count.
-        sii: float — Spectral Innovation Integral.
-        heights: ndarray of shape (k_max,) — full orthogonal height profile.
-    """
-    # Reshape if 3D patch input
-    if pixels.ndim == 3:
-        h, w, num_bands = pixels.shape
-        pixels_2d = np.reshape(pixels, (h * w, num_bands), order="F").astype(np.float32).T
-    else:
-        pixels_2d = pixels.astype(np.float32)
-
-    num_bands, num_pixels = pixels_2d.shape
-    k_max = min(k_max, num_bands, num_pixels)
-
-    # --- Extract heights via MaxD ---
-    _, _, heights = maximumDistance_volumes(pixels, k_max, return_heights=True)
-
-    # --- Adaptive noise threshold at each step ---
-    thresholds = np.zeros(k_max, dtype=np.float64)
-    for j in range(k_max):
-        remaining_dims = max(num_bands - j, 1)
-        thresholds[j] = kappa * sigma_n * np.sqrt(remaining_dims)
-
-    # --- Count contiguous significant heights and calculate SII ---
-    esd = 1  # origin itself
-    sii = 0.0
-    for j in range(1, k_max):
-        if heights[j] > thresholds[j]:
-            esd += 1
-            # Add to Spectral Innovation Integral (log excess)
-            log_h = math.log(max(heights[j], 1e-12))
-            log_tau = math.log(max(thresholds[j], 1e-12))
-            sii += max(0.0, log_h - log_tau)
-        else:
-            break  # contiguity enforced: stop at first failure
-
-    return esd, sii, heights
-
-def SMACC_volumes(pixels, num_endmembers):
-    """
-    Sequential Maximum Angle Convex Cone (SMACC) endmember extraction with
-    localized parallelotope volume estimation at each step.
-
-    The algorithm first localizes the data by translating all pixels by the
-    minimum-norm pixel value (setting it as the origin). This eliminates volume
-    inflation from nonexistent spectral ranges. It then proceeds with standard
-    SMACC endmember extraction on this translated data.
-
-    Unlike maximumDistance_volumes, this function does NOT return the
-    minimum-norm pixel as an extracted endmember. All `num_endmembers` are
-    actively selected by SMACC. The volume at step `j` is the volume of the
-    parallelotope formed by the first `j+1` localized SMACC endmembers.
-
-    Rejects inputs containing any NaN values.
-
-    Args:
-        pixels:  ndarray of shape (bands, num_pixels) or 3D patch (H, W, bands).
-                 If 2D, each column is one pixel's spectral signature.
-        num_endmembers:  int, total number of endmembers to extract (k).
-                         Must be <= num_pixels.
-
-    Returns:
-        endmembers:  ndarray of shape (bands, num_endmembers).
-                     Raw (non-localized) endmember spectra.
-                     Column 0 = first SMACC endmember (max-norm of translated data).
-        volumes:     ndarray of shape (num_endmembers,).
-                     Localized parallelotope volume curve.
-                     volumes[0] = ||e_0 - origin||,
-                     volumes[j] = prod |R_ii| from QR of origin-centered
-                                  endmember vectors up to j.
-    """
-    # ── Input validation and reshaping ────────────────────────────────
-    if pixels.ndim == 3:
-        h, w, num_bands = pixels.shape
-        if np.isnan(pixels).any():
-            return np.full((num_bands, num_endmembers), np.nan), np.full(num_endmembers, np.nan)
-        pixels = np.reshape(pixels, (h * w, num_bands), order="F").astype(np.float32).T
-    elif pixels.ndim == 2:
-        if np.isnan(pixels).any():
-            return np.full((pixels.shape[0], num_endmembers), np.nan), np.full(num_endmembers, np.nan)
-
-    num_bands, num_pixels = pixels.shape
-
-    if num_pixels < num_endmembers or num_endmembers < 1:
-        return np.full((num_bands, num_endmembers), np.nan), np.full(num_endmembers, np.nan)
-
-    # ── Localization: Translate by minimum-norm pixel ─────────────────
-    magnitudes = np.linalg.norm(pixels, axis=0)
-    idx_minnorm = np.argmin(magnitudes)
-    idx_maxnorm = np.argmax(magnitudes)                                # computed prior to translation
-    origin = pixels[:, idx_minnorm].reshape(-1, 1)                     # (bands, 1)
-    
-    # residuals will track h_j^n in the localized space
-    residuals = (pixels - origin).copy()                               # (bands, num_pixels)
-
-    # ── Output arrays and state ───────────────────────────────────────
-    endmembers = np.zeros((num_bands, num_endmembers), dtype=pixels.dtype)
-    volumes = np.zeros(num_endmembers, dtype=np.float64)
-    loc_vecs = np.zeros((num_bands, num_endmembers), dtype=np.float64)
-    
-    # SMACC abundance matrix: F[k, j] = abundance of endmember k in pixel j
-    F = np.zeros((num_endmembers, num_pixels), dtype=np.float64)
-
-    # ── Iterative SMACC extraction on localized data ──────────────────
-    for n in range(num_endmembers):
-        if n == 0:
-            # First endmember uses standard SMACC initialization (raw max-norm)
-            idx_new = idx_maxnorm
-        else:
-            # Subsequent endmembers select pixel with maximum unexplained residual norm
-            res_norms_sq = np.sum(residuals ** 2, axis=0)              # (num_pixels,)
-            idx_new = np.argmax(res_norms_sq)
-
-        endmembers[:, n] = pixels[:, idx_new]                          # raw spectrum
-        loc_vecs[:, n] = (pixels[:, idx_new] - origin.ravel()).astype(np.float64) # localized vector
-
-        # ── Volume via QR on origin-centered localized vectors ────────
-        if n == 0:
-            volumes[0] = np.linalg.norm(loc_vecs[:, 0])
-        else:
-            _, R = np.linalg.qr(loc_vecs[:, :n+1])                     # (bands, n+1) → R (n+1, n+1)
-            volumes[n] = np.prod(np.abs(np.diag(R)))
-
-        # Skip projection update after the last endmember
-        if n == num_endmembers - 1:
-            break
-
-        # ── SMACC oblique projection ──────────────────────────────────
-        w = residuals[:, idx_new].copy()                               # (bands,)
-        w_dot_w = np.dot(w, w)
-
-        if w_dot_w < 1e-24:
-            continue
-
-        # Unconstrained projection: O_{n,j} = (w^T h_j^{n-1}) / (w^T w)
-        O = np.dot(w, residuals) / w_dot_w                            # (num_pixels,)
-
-        # Oblique scaling factor alpha_{n,j}: ensures F_{k,j}^n >= 0
-        if n == 0:
-            # First endmember: no previous constraints
-            alpha = np.where(O > 0, 1.0, 0.0)
-        else:
-            f_ref = F[:n, idx_new].copy()                              # (n,)
-            active_k = f_ref > 0
-
-            alpha = np.zeros(num_pixels, dtype=np.float64)
-            pos_mask = O > 0
-
-            if np.any(pos_mask):
-                if not np.any(active_k):
-                    alpha[pos_mask] = 1.0
-                else:
-                    f_ref_active = f_ref[active_k]                         # (n_active,)
-                    F_prev_active = F[:n, :][active_k]                     # (n_active, num_pixels)
-                    F_pos = F_prev_active[:, pos_mask]                     # (n_active, P_pos)
-                    O_pos = O[pos_mask]                                    # (P_pos,)
-
-                    denominators = f_ref_active[:, None] * O_pos[None, :]  # (n_active, P_pos)
-                    ratios = F_pos / denominators                          # (n_active, P_pos)
-                    v_min = ratios.min(axis=0)                             # (P_pos,)
-
-                    alpha[pos_mask] = np.clip(v_min, 0.0, 1.0)
-
-        # New abundance: F_{n,j}^n = alpha * O
-        F_new = alpha * O                                              # (num_pixels,)
-
-        # Update previous abundances: F_{k,j}^n = F_{k,j}^{n-1} - f_ref[k] * F_{n,j}^n
-        if n > 0:
-            F[:n, :] -= f_ref[:, None] * F_new[None, :]
-
-        # Assign new endmember abundance row
-        F[n, :] = F_new
-
-        # Update residuals: h_j^n = h_j^{n-1} - w_n * F_{n,j}^n
-        residuals -= np.outer(w, F_new)
-
-    return endmembers, volumes
-
 def load_scaled_reflectance(dataset, slice_obj=np.s_[...]):
     """
     Helper to safely load a hyperspectral surface reflectance dataset from HDF5,
@@ -819,7 +613,7 @@ def read_scaled_int16(dataset, slice_obj=np.s_[...]):
     return data
 
 
-def generate_rgba_from_hsi(frame_data, wavelengths, low=0.5, high=99.5, gamma=1.1, nodata=None, scale=None):
+def generate_rgba_from_hsi(frame_data, wavelengths, low=0.5, high=99.5, gamma=1.1, nodata=None):
     """
     Extracts, stretches, and gamma-corrects a full hyperspectral 
     frame (using CIE 1931 CMFs) to create a true color image with an alpha channel.
@@ -828,6 +622,14 @@ def generate_rgba_from_hsi(frame_data, wavelengths, low=0.5, high=99.5, gamma=1.
     255 (Opaque) where pixels are valid, and 0 (Transparent) where 
     pixels are invalid (all 0s or all NaNs).
     
+    Parameters:
+        frame_data (np.ndarray): Hyperspectral image data in float format of shape (bands, height, width).
+        wavelengths (array-like): Band center wavelengths in nanometers (nm).
+        low (float): Lower percentile for contrast stretching.
+        high (float): Higher percentile for contrast stretching.
+        gamma (float): Gamma correction value.
+        nodata (float, optional): Value to treat as no-data/NaN.
+        
     Returns:
         rgba_8bit (np.ndarray): Shape (height, width, 4), dtype uint8.
     """
@@ -839,26 +641,16 @@ def generate_rgba_from_hsi(frame_data, wavelengths, low=0.5, high=99.5, gamma=1.
     wavelengths = np.asarray(wavelengths, dtype=np.float32)
     if not np.any(wavelengths > 0):
         raise ValueError("Invalid wavelengths provided to generate_rgba_from_hsi: all wavelengths are <= 0.")
-        
-    # Automatically convert micrometers to nanometers if needed
     if np.nanmax(wavelengths) < 50.0:
-        wavelengths = wavelengths * 1000.0
+        raise ValueError(f"Wavelengths must be provided in nanometers (nm), but got max wavelength {np.nanmax(wavelengths):.2f} < 50 nm.")
         
-    # Cast to float internally for color math if it's an integer array
-    if frame_data.dtype.kind in 'iu':
-        frame_data = frame_data.astype(np.float32)
-        if nodata is not None:
-            frame_data[frame_data == nodata] = np.nan
-        # If integer data with scale factor (e.g. int16 scaled by 10000 or custom scale)
-        if scale is not None:
-            frame_data = frame_data * scale
-        elif np.nanmax(frame_data) > 100.0:
-            frame_data = frame_data * 0.0001
-    elif nodata is not None:
+    # Ensure input frame_data is in float format
+    if not np.issubdtype(frame_data.dtype, np.floating):
+        raise TypeError(f"frame_data must be floating point dtype, got {frame_data.dtype}")
+
+    if nodata is not None:
         frame_data = frame_data.copy()
         frame_data[frame_data == nodata] = np.nan
-        if scale is not None:
-            frame_data = frame_data * scale
             
     # 1. Determine Invalid Pixel Mask
     # A pixel is invalid only if all bands are NaN or all bands are 0
@@ -871,61 +663,56 @@ def generate_rgba_from_hsi(frame_data, wavelengths, low=0.5, high=99.5, gamma=1.
     if not np.any(valid_mask):
         return np.zeros((height, width, 4), dtype=np.uint8)
         
-    # 2. Get standard CMFs and illuminant
-    cmfs = colour.MSDS_CMFS['CIE 1931 2 Degree Standard Observer']
-    illuminant = colour.SDS_ILLUMINANTS['D65']
+    # 2. Extract processes from truecolorhsi.visualization
+    from truecolorhsi.visualization import get_illuminant_spd_and_xyz, get_band_index
     
-    # Create interpolation functions
-    interp_x = interp1d(cmfs.wavelengths, cmfs.values[:, 0], bounds_error=False, fill_value=0)
-    interp_y = interp1d(cmfs.wavelengths, cmfs.values[:, 1], bounds_error=False, fill_value=0)
-    interp_z = interp1d(cmfs.wavelengths, cmfs.values[:, 2], bounds_error=False, fill_value=0)
-    interp_ill = interp1d(illuminant.wavelengths, illuminant.values, bounds_error=False, fill_value=0)
-    
-    # Evaluate at sensor wavelengths
-    x_bar = interp_x(wavelengths)
-    y_bar = interp_y(wavelengths)
-    z_bar = interp_z(wavelengths)
-    ill_weights = interp_ill(wavelengths)
-    
-    # Compute relative weights for each band (Integration over wavelength)
-    weights = np.column_stack((x_bar, y_bar, z_bar)) * ill_weights[:, np.newaxis]
-    
-    # Apply a Von Kries white balance adaptation to the sensor's theoretical white point.
-    # This mathematically compensates for both the sensor's truncated spectral range 
-    # (e.g., missing deep blue bands) and irregular wavelength spacing (e.g., more red bands),
-    # forcing an equal-energy white object to exactly match the sRGB D65 reference white.
-    white_spectrum = np.ones_like(wavelengths)
-    XYZ_white = weights.T @ white_spectrum
-    if XYZ_white[1] == 0:
-        return np.zeros((height, width, 4), dtype=np.uint8)
-        
-    target_D65_white = np.array([0.95047, 1.00000, 1.08883], dtype=np.float32)
-    weights = weights * (target_D65_white / XYZ_white)
-    
-    # Apply CMFs to hyperspectral data (Matrix multiplication)
-    spectra = frame_data.reshape(bands, -1)
-    valid_spectra = spectra[:, valid_mask_flat]
     # Replace individual missing band values with 0.0 for CMF integration and clip negative noise
-    valid_spectra = np.nan_to_num(valid_spectra, nan=0.0)
-    valid_spectra = np.clip(valid_spectra, 0.0, None)
+    frame_data_clean = np.nan_to_num(frame_data, nan=0.0)
+    frame_data_clean = np.clip(frame_data_clean, 0.0, None)
     
-    XYZ_valid = weights.T @ valid_spectra
+    i_cutoff = get_band_index(wavelengths, 830.0)
+    hyperspec_wavelengths = wavelengths[:i_cutoff]
     
-    # Convert XYZ to sRGB
-    RGB_valid = colour.XYZ_to_sRGB(XYZ_valid.T).T
+    std_wavelengths, illuminant_values, xyz = get_illuminant_spd_and_xyz(illuminant='D65', plot_flag=False, run_example=False)
     
-    # Place back into image
-    rgb_img = np.zeros((3, height * width), dtype=np.float32)
-    rgb_img[:, valid_mask_flat] = RGB_valid
-    rgb_img = rgb_img.reshape(3, height, width)
+    interp_function = interp1d(std_wavelengths, illuminant_values, kind='linear', fill_value="extrapolate")
+    illuminant_interp = interp_function(hyperspec_wavelengths)
     
-    rgb = np.transpose(rgb_img, (1, 2, 0)) # (height, width, 3)
+    interp_func_0 = interp1d(std_wavelengths, xyz[:, 0], kind='linear', fill_value='extrapolate')
+    interp_func_1 = interp1d(std_wavelengths, xyz[:, 1], kind='linear', fill_value='extrapolate')
+    interp_func_2 = interp1d(std_wavelengths, xyz[:, 2], kind='linear', fill_value='extrapolate')
     
-    # Scale to 8-bit for highly efficient HDF5 storage without contrast stretching
-    # Assume the max XYZ reflection is 1.0 (after scaling), so max RGB is roughly 1.0
-    # Values > 1.0 are clipped.
-    rgb = np.clip(rgb, 0.0, 1.0)
-    rgb_8bit = (rgb * 255).astype(np.uint8)
+    cie_x_interp = interp_func_0(hyperspec_wavelengths)
+    cie_y_interp = interp_func_1(hyperspec_wavelengths)
+    cie_z_interp = interp_func_2(hyperspec_wavelengths)
+    xyz_interp = np.column_stack((cie_x_interp, cie_y_interp, cie_z_interp))
+    
+    # Get the reflectance data in the visible range
+    visible_range_data = frame_data_clean[:i_cutoff, :, :].reshape((i_cutoff, -1))
+    
+    # Calculate the XYZ of a perfect white diffuser under the same illuminant
+    visible_range_data_white = np.ones((i_cutoff, 1), dtype=np.float32)
+    XYZ_white = xyz_interp.T @ np.diag(illuminant_interp) @ visible_range_data_white
+    
+    # Convert Reflectance to CIEXYZ tristimulus values
+    XYZ = xyz_interp.T @ np.diag(illuminant_interp) @ visible_range_data
+    
+    # Normalize the XYZ values using the Y component of the perfect white diffuser.
+    # This preserves the physical chromaticity and scales the luminance to [0, 1] range
+    # without dynamic scene-dependent stretching that ruins uniform simulations.
+    XYZ_normalized = XYZ / XYZ_white[1]
+    
+    # XYZ to sRGB
+    XYZ_image = XYZ_normalized.T.reshape(height, width, 3)
+    SRGB_image = colour.XYZ_to_sRGB(XYZ_image)
+    
+    SRGB_image = np.clip(SRGB_image, 0, 1)
+    
+    if gamma != 1.0 and gamma > 0:
+        SRGB_image = SRGB_image ** (1 / gamma)
+        
+    # Scale to 8-bit
+    rgb_8bit = (SRGB_image * 255).astype(np.uint8)
     
     # 3. Construct the Alpha Channel
     alpha = np.full((height, width), 255, dtype=np.uint8)
@@ -936,7 +723,7 @@ def generate_rgba_from_hsi(frame_data, wavelengths, low=0.5, high=99.5, gamma=1.
     
     return rgba_8bit
 
-def generate_rgba_image(r_band, g_band, b_band, low=0.5, high=99.5, gamma=1.2, nodata=None):
+def generate_rgba_image(r_band, g_band, b_band, low=0.5, high=99.5, gamma=1.1, nodata=None):
     """
     Extracts, stretches, and gamma-corrects the RGB bands from a surface 
     reflectance frame to create a true color image with an alpha channel.

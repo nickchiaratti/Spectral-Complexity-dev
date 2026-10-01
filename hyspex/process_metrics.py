@@ -6,8 +6,9 @@ from tkinter import filedialog
 import torch
 
 TILE_SIZE=3
-TILE_SIZES = [3, 5, 7, 9,11,13,15,17,19]
+TILE_SIZES = [35,55,65,81,101]#[3,5,7,9,11,15,19,35,55,65,81,101]
 NUM_ENDMEMBERS = 40
+CALCULATE_NOISE_STATS = True  # Set to False to skip calculating noise equivalent heights
 
 def maximumDistance_volumes_torch(img_cube, num_endmembers, Sigma_n=None):
     """
@@ -17,6 +18,11 @@ def maximumDistance_volumes_torch(img_cube, num_endmembers, Sigma_n=None):
     selects endmembers by maximum orthogonal projection distance while 
     simultaneously recording the heights needed for the Gram volume curve.
 
+    Uses a lazy projection strategy: the localized data tensor is kept immutable
+    and residual squared norms are updated incrementally, reducing per-iteration
+    cost from 3x to 1x full-tensor passes. The orthogonal residual for each
+    selected pixel is computed on-demand via the accumulated orthonormal basis.
+
     Args:
         img_cube: Tensor of shape (B, C, N) [Batch, Bands, Pixels]
         num_endmembers: int, total number of endmembers to extract (k).
@@ -24,18 +30,21 @@ def maximumDistance_volumes_torch(img_cube, num_endmembers, Sigma_n=None):
                         so (k-1) orthogonal heights are produced.
     Returns:
         endmembers: Tensor of shape (B, C, num_endmembers) — raw (non-localized)
-                    endmember spectra, ordered identically to maximumDistance_torch.
-                    Index 0 is max-norm, index 1 is min-norm (the local origin).
+                    endmember spectra. Index 0 is max-norm, index 1 is min-norm
+                    (the local origin).
         volumes: Tensor of shape (B, num_endmembers) — the localized Gram volume
-                 curve. volumes[:, 0] = 0 (the origin has zero volume),
-                 volumes[:, 1] = h_1, volumes[:, 2] = h_1*h_2, etc.
+                 curve. volumes[:, 0] = -inf (the origin has zero volume),
+                 volumes[:, 1] = log(h_1), volumes[:, 2] = log(h_1)+log(h_2), etc.
         heights: Tensor of shape (B, num_endmembers) —
                  the orthogonal projection heights (h_n). heights[:, 0] = 0 (origin),
                  heights[:, 1] = h_1, heights[:, j] = h_j for j >= 1.
+        noise_heights: Tensor or None.
     """
     B, C, N = img_cube.shape
+    orig_dtype = img_cube.dtype
+    img_cube = img_cube.to(torch.float64)
     device = img_cube.device
-    dtype = img_cube.dtype
+    dtype = torch.float64
 
     # --- Identify the two seed endmembers (max-norm and min-norm) ---
     magnitude_sq = torch.sum(img_cube ** 2, dim=1)  # (B, N)
@@ -51,8 +60,9 @@ def maximumDistance_volumes_torch(img_cube, num_endmembers, Sigma_n=None):
     endmembers[:, :, 1] = img_cube[b_idx, :, idx_minnorm]
 
     # --- Localize: translate entire neighborhood so min-norm pixel is at origin ---
+    # local_data is kept IMMUTABLE for the rest of the function (lazy projection)
     origin = img_cube[b_idx, :, idx_minnorm].unsqueeze(2)  # (B, C, 1)
-    local_img_cube = img_cube - origin  # (B, C, N)
+    local_data = img_cube - origin  # (B, C, N)
 
     # --- Prepare volume and height output ---
     # volumes[:, 0] = -inf (origin contributes no volume)
@@ -60,10 +70,18 @@ def maximumDistance_volumes_torch(img_cube, num_endmembers, Sigma_n=None):
     volumes = torch.full((B, num_endmembers), -float('inf'), dtype=dtype, device=device)
     heights = torch.zeros(B, num_endmembers, dtype=dtype, device=device)
 
+    # Orthonormal basis accumulated across iterations (always needed for lazy projection)
+    U_basis = torch.zeros((B, C, num_endmembers - 1), dtype=dtype, device=device)
+
+    # Incremental residual squared norms — avoids recomputing from the full (B,C,N) tensor
+    residual_sq = torch.sum(local_data ** 2, dim=1)  # (B, N)
+    # Mark seed pixels so they are never re-selected (-inf survives subsequent subtractions)
+    residual_sq[b_idx, idx_minnorm] = -float('inf')
+    residual_sq[b_idx, idx_maxnorm] = -float('inf')
+
     if Sigma_n is not None:
         N_cov = Sigma_n.shape[0]
         noise_heights = torch.zeros((N_cov, B, num_endmembers), dtype=dtype, device=device)
-        U_basis = torch.zeros((B, C, num_endmembers), dtype=dtype, device=device)
         Sigma_n_tensor = torch.tensor(Sigma_n, dtype=dtype, device=device)
         
         # Precompute initial traces for P_perp = I
@@ -74,102 +92,87 @@ def maximumDistance_volumes_torch(img_cube, num_endmembers, Sigma_n=None):
         noise_heights = None
 
     # --- First endmember (max-norm pixel, already identified) ---
-    v_first = local_img_cube[b_idx, :, idx_maxnorm]  # (B, C)
+    v_first = local_data[b_idx, :, idx_maxnorm]  # (B, C)
     h1 = torch.norm(v_first, dim=1)  # (B,)
-    volumes[:, 1] = torch.log(torch.clamp(h1, min=1e-12))
+    volumes[:, 1] = torch.log(h1)
     heights[:, 1] = h1
+
+    u1 = v_first / h1.unsqueeze(1)  # (B, C)
+    U_basis[:, :, 0] = u1
+
+    # Incremental residual_sq update: since u1 is orthogonal to the (empty) prior basis,
+    # u1^T @ residual_j = u1^T @ x_j for all pixels j
+    proj_coeffs = torch.bmm(u1.unsqueeze(1), local_data).squeeze(1)  # (B, N)
+    residual_sq -= proj_coeffs ** 2
 
     if Sigma_n is not None:
         noise_heights[:, :, 1] = calculate_noise_threshold_from_traces_torch(trace_1, trace_2, N)
-        u1 = v_first / torch.clamp(h1.unsqueeze(1), min=1e-12)
         
-        for k in range(N_cov):
-            w = torch.matmul(u1, Sigma_n_tensor[k])
-            u_Sigma_u = (u1 * w).sum(dim=1)
-            
-            # P_perp is I at step 0, so P_w = w
-            P_w = w
-            w_P_w = (w * P_w).sum(dim=1)
-            
-            trace_1[k] = trace_1[k] - u_Sigma_u
-            trace_2[k] = trace_2[k] - 2.0 * w_P_w + u_Sigma_u ** 2
-            
-        U_basis[:, :, 0] = u1
-
-
-    # Project all pixels into the subspace orthogonal to v_first
-    h1_sq = h1 ** 2
-    pseudo = torch.where(
-        (h1_sq > 1e-12).unsqueeze(1),
-        v_first / h1_sq.unsqueeze(1),
-        torch.zeros_like(v_first)
-    )
-    # OSP projection component: d(d^T d)^-1 d^T X
-    proj_coef = torch.bmm(pseudo.unsqueeze(1), local_img_cube)  # (B, 1, N)
-    local_img_cube -= torch.bmm(v_first.unsqueeze(2), proj_coef)  # (B, C, N)
-
-    # Track which pixels have already been selected as endmembers
-    selected_mask = torch.zeros(B, N, dtype=torch.bool, device=device)
-    selected_mask[b_idx, idx_minnorm] = True
-    selected_mask[b_idx, idx_maxnorm] = True
+        # Vectorized across N_cov (Sigma_n matrices)
+        w = torch.einsum('bi,nij->nbj', u1, Sigma_n_tensor)
+        u_Sigma_u = (u1.unsqueeze(0) * w).sum(dim=2)
+        
+        # P_perp is I at step 0, so P_w = w
+        P_w = w
+        w_P_w = (w * P_w).sum(dim=2)
+        
+        trace_1 = trace_1 - u_Sigma_u
+        trace_2 = trace_2 - 2.0 * w_P_w + u_Sigma_u ** 2
 
     # --- Iterative extraction of remaining endmembers ---
     for i in range(2, num_endmembers):
-        # Find the unselected valid pixel with maximum projection distance
-        residual_sq = torch.sum(local_img_cube ** 2, dim=1)  # (B, N)
-        residual_sq[selected_mask] = -float('inf')
-
+        # Find pixel with maximum residual squared norm (selected pixels are already -inf)
         idx_new = torch.argmax(residual_sq, dim=1)
+        residual_sq[b_idx, idx_new] = -float('inf')  # mark as selected
 
         # Record the raw (non-localized) endmember
         endmembers[:, :, i] = img_cube[b_idx, :, idx_new]
-        selected_mask[b_idx, idx_new] = True
 
-        # The current vector is already projected into the orthogonal subspace
-        v_new = local_img_cube[b_idx, :, idx_new]  # (B, C)
+        # Extract original localized vector and project into orthogonal complement
+        # of the accumulated basis: v_new = x_new - U_k @ (U_k^T @ x_new)
+        x_new = local_data[b_idx, :, idx_new]  # (B, C)
+        k = i - 1  # number of basis vectors so far
+        U_k = U_basis[:, :, :k]  # (B, C, k)
+        coeffs = torch.bmm(U_k.transpose(1, 2), x_new.unsqueeze(2))  # (B, k, 1)
+        v_new = x_new - torch.bmm(U_k, coeffs).squeeze(2)  # (B, C)
+
         h_j = torch.norm(v_new, dim=1)  # (B,)
 
         # Cumulative addition in log space: log_volume at step i = log_volume at step (i-1) + log(h_j)
-        volumes[:, i] = volumes[:, i - 1] + torch.log(torch.clamp(h_j, min=1e-12))
+        volumes[:, i] = volumes[:, i - 1] + torch.log(h_j)
         heights[:, i] = h_j
+
+        uj = v_new / h_j.unsqueeze(1)  # (B, C)
+        U_basis[:, :, k] = uj
+
+        # Incremental residual_sq update: since uj is orthogonal to U_k by construction,
+        # uj^T @ residual_j = uj^T @ x_j (project against immutable local_data)
+        proj_coeffs = torch.bmm(uj.unsqueeze(1), local_data).squeeze(1)  # (B, N)
+        residual_sq -= proj_coeffs ** 2
 
         if Sigma_n is not None:
             noise_heights[:, :, i] = calculate_noise_threshold_from_traces_torch(trace_1, trace_2, N)
-            uj = v_new / torch.clamp(h_j.unsqueeze(1), min=1e-12)
             
-            k_idx = i - 1
-            U_k = U_basis[:, :, :k_idx]
+            # Vectorized across N_cov (Sigma_n matrices)
+            w = torch.einsum('bi,nij->nbj', uj, Sigma_n_tensor)
+            u_Sigma_u = (uj.unsqueeze(0) * w).sum(dim=2)
             
-            for k in range(N_cov):
-                w = torch.matmul(uj, Sigma_n_tensor[k])
-                u_Sigma_u = (uj * w).sum(dim=1)
-                
-                # P_w = w - U_k @ (U_k^T @ w)
-                w_unsq = w.unsqueeze(2)
-                U_T_w = torch.bmm(U_k.transpose(1, 2), w_unsq)
-                P_w = w_unsq - torch.bmm(U_k, U_T_w)
-                P_w = P_w.squeeze(2)
-                
-                w_P_w = (w * P_w).sum(dim=1)
-                
-                trace_1[k] = trace_1[k] - u_Sigma_u
-                trace_2[k] = trace_2[k] - 2.0 * w_P_w + u_Sigma_u ** 2
-                
-            U_basis[:, :, k_idx] = uj
-
-
-        # Project all pixels into the subspace orthogonal to the new endmember
-        h_j_sq = h_j ** 2
-        pseudo = torch.where(
-            (h_j_sq > 1e-12).unsqueeze(1),
-            v_new / h_j_sq.unsqueeze(1),
-            torch.zeros_like(v_new)
-        )
-        # OSP projection component: d(d^T d)^-1 d^T X
-        proj_coef = torch.bmm(pseudo.unsqueeze(1), local_img_cube)  # (B, 1, N)
-        local_img_cube -= torch.bmm(v_new.unsqueeze(2), proj_coef)  # (B, C, N)
-
-    return endmembers, volumes, heights, noise_heights
+            # U_k has shape (B, C, k) where C is bands, k is number of basis vectors so far
+            # w has shape (N_cov, B, C)
+            # U_k^T @ w -> (N_cov, B, k)
+            U_T_w = torch.einsum('bik,nbi->nbk', U_k, w)
+            
+            # U_k @ (U_k^T @ w) -> (N_cov, B, C)
+            proj_w = torch.einsum('bik,nbk->nbi', U_k, U_T_w)
+            
+            P_w = w - proj_w
+            w_P_w = (w * P_w).sum(dim=2)
+            
+            trace_1 = trace_1 - u_Sigma_u
+            trace_2 = trace_2 - 2.0 * w_P_w + u_Sigma_u ** 2
+    if noise_heights is not None:
+        noise_heights = noise_heights.to(orig_dtype)
+    return endmembers.to(orig_dtype), volumes.to(orig_dtype), heights.to(orig_dtype), noise_heights
 
 
 def maximumDistance_volumes(pixels, num_endmembers, Sigma_n=None):
@@ -181,30 +184,22 @@ def maximumDistance_volumes(pixels, num_endmembers, Sigma_n=None):
     (the local origin), then iteratively selects endmembers by largest
     orthogonal projection distance while recording the heights needed for 
     the volume curve.
-
-    Rejects inputs containing any NaN values. Always returns heights.
     """
-    nan_return = (
-        np.full((pixels.shape[-1] if pixels.ndim == 3 else pixels.shape[0], num_endmembers), np.nan),
-        np.full(num_endmembers, np.nan),
-        np.full(num_endmembers, np.nan),
-        None
-    )
-
     if pixels.ndim == 3:
         h, w, num_bands = pixels.shape
-        if np.isnan(pixels).any():
-            return nan_return
-        pixels = np.reshape(pixels, (h * w, num_bands), order="F").astype(np.float32).T
+        pixels = np.reshape(pixels, (h * w, num_bands), order="F").astype(np.float64).T
     elif pixels.ndim == 2:
-        pixels = pixels.astype(np.float32)
-        if np.isnan(pixels).any():
-            return nan_return
+        pixels = pixels.astype(np.float64)
 
     num_bands, num_pixels = pixels.shape
 
     if num_pixels < num_endmembers:
-        return nan_return
+        return (
+            np.full((num_bands, num_endmembers), np.nan),
+            np.full(num_endmembers, np.nan),
+            np.full(num_endmembers, np.nan),
+            None
+        )
 
     # --- Identify the two seed pixels by spectral magnitude ---
     magnitudes = np.linalg.norm(pixels, axis=0)
@@ -231,56 +226,51 @@ def maximumDistance_volumes(pixels, num_endmembers, Sigma_n=None):
     else:
         noise_heights = None
 
-    selected = np.zeros(num_pixels, dtype=bool)
-    selected[idx_minnorm] = True
-    selected[idx_maxnorm] = True
+    selected_indices = [idx_minnorm, idx_maxnorm]
 
     # --- First endmember: the localized max-norm pixel ---
     v = residuals[:, idx_maxnorm].copy()
     h_dist = np.linalg.norm(v)
-    volumes[1] = np.log(max(h_dist, 1e-12))
+    volumes[1] = np.log(h_dist)
     heights[1] = h_dist
+
+    u1 = v / h_dist
 
     if Sigma_n is not None:
         noise_heights[:, 1] = calculate_noise_threshold_closed_form(Sigma_n, P_perp, num_pixels)
-        u1 = v / max(h_dist, 1e-12)
         P_perp -= np.outer(u1, u1)
 
-
     # Project all pixels into the subspace orthogonal to v
-    if h_dist > 1e-12:
-        # OSP projection component: d(d^T d)^-1 d^T X
-        proj_component = np.outer(v, np.dot(v, residuals) / (h_dist ** 2))
-        residuals -= proj_component
+    proj_component = np.outer(u1, np.dot(u1, residuals))
+    residuals -= proj_component
 
     # --- Iteratively extract remaining endmembers ---
     for j in range(2, num_endmembers):
         # Magnitudes of unselected pixels in the current orthogonal subspace
         residual_mag = np.sum(residuals ** 2, axis=0)  # (num_pixels,)
-        residual_mag[selected] = -np.inf
+        residual_mag[selected_indices] = -np.inf
 
         idx_new = np.argmax(residual_mag)
         endmembers[:, j] = pixels[:, idx_new]
-        selected[idx_new] = True
+        selected_indices.append(idx_new)
 
         # The orthogonal distance is the magnitude of the projected vector
         v = residuals[:, idx_new].copy()
         h_dist = np.linalg.norm(v)
 
         # Log volume is the cumulative sum of log orthogonal heights
-        volumes[j] = volumes[j - 1] + np.log(max(h_dist, 1e-12))
+        volumes[j] = volumes[j - 1] + np.log(h_dist)
         heights[j] = h_dist
+
+        uj = v / h_dist
 
         if Sigma_n is not None:
             noise_heights[:, j] = calculate_noise_threshold_closed_form(Sigma_n, P_perp, num_pixels)
-            uj = v / max(h_dist, 1e-12)
             P_perp -= np.outer(uj, uj)
 
-
         # Project all pixels into the subspace orthogonal to the new endmember
-        if h_dist > 1e-12:
-            proj_component = np.outer(v, np.dot(v, residuals) / (h_dist ** 2))
-            residuals -= proj_component
+        proj_component = np.outer(uj, np.dot(uj, residuals))
+        residuals -= proj_component
 
     return endmembers, volumes, heights, noise_heights
 
@@ -323,16 +313,7 @@ def process_volume_sliding_tile(frame_data, valid_mask=None, tile_size=TILE_SIZE
                 
             tile_flat = np.reshape(tile, (tile_size * tile_size, bands), order="F").T
             
-            tile_flat_torch = torch.from_numpy(tile_flat).unsqueeze(0)  # Add batch dimension: (1, C, N)
-            if torch.cuda.is_available():
-                tile_flat_torch = tile_flat_torch.cuda()
-                
-            endmembers, volumes, heights, noise_heights = maximumDistance_volumes_torch(tile_flat_torch, num_endmembers, Sigma_n)
-            
-            volumes = volumes[0].cpu().numpy()
-            heights = heights[0].cpu().numpy()
-            if Sigma_n is not None:
-                noise_heights = noise_heights[:, 0, :].cpu().numpy()
+            endmembers, volumes, heights, noise_heights = maximumDistance_volumes(tile_flat, num_endmembers, Sigma_n)
             
             if len(volumes) > 2:
                 vol_val = np.max(volumes[2:])
@@ -358,6 +339,7 @@ def process_volume_sliding_tile(frame_data, valid_mask=None, tile_size=TILE_SIZE
         
     return datasets
 
+@torch.no_grad()
 def process_volume_sliding_tile_torch(frame_data, valid_mask=None, tile_size=TILE_SIZE, num_endmembers=NUM_ENDMEMBERS, Sigma_n=None, valid_sources=None, scale_factor=1.0):
     """
     GPU-accelerated sliding window processing with CPU-host memory spooling.
@@ -387,22 +369,31 @@ def process_volume_sliding_tile_torch(frame_data, valid_mask=None, tile_size=TIL
     total_vram = torch.cuda.get_device_properties(device).total_memory
     target_vram = total_vram * 0.50
     overhead_multiplier = 5
-    bytes_per_window = overhead_multiplier * bands * N_pixels * BYTES_PER_ELEMENT
-    batch_size = max(1, int(target_vram // max(1, bytes_per_window)))
+    bytes_per_window_compute = overhead_multiplier * bands * N_pixels * BYTES_PER_ELEMENT
+    batch_size = max(1, int(target_vram // max(1, bytes_per_window_compute)))
     batch_size = min(batch_size, 20000)
     
-    # Restrict chunk_rows explicitly based on system RAM limits
-    # HySpex lines can be extremely wide (e.g. 3700+ pixels), so unfolding multiple rows of 400 bands * N_pixels can use 10GB+ per row!
-    max_unfold_bytes = 1024 * 1024 * 1024  # Limit unfold memory strictly to 1 GB max
-    bytes_per_row_unfold = bands * N_pixels * out_w * BYTES_PER_ELEMENT
-    chunk_rows = max(1, int(max_unfold_bytes // max(1, bytes_per_row_unfold)))
+    # 3. Dynamic Chunking: We want to unfold on the GPU to leverage massive GPU memory bandwidth.
+    # We restrict chunk size to ~30% of VRAM so unfold output comfortably fits.
+    unfold_vram_budget = total_vram * 0.30
+    bytes_per_window_unfold = bands * N_pixels * BYTES_PER_ELEMENT
+    windows_per_chunk = max(1, int(unfold_vram_budget // max(1, bytes_per_window_unfold)))
     
-    # 3. Accumulators live on CPU to prevent VRAM growth across iterations
-    vol_vals = torch.zeros(L, dtype=COMPUTE_DTYPE, device='cpu')
-    heights_vals = torch.zeros((L, num_endmembers), dtype=COMPUTE_DTYPE, device='cpu')
-    window_valid_mask = torch.zeros(L, dtype=torch.bool, device='cpu')
+    if windows_per_chunk >= out_w:
+        chunk_cols = out_w
+        chunk_rows = max(1, windows_per_chunk // out_w)
+        chunk_rows = min(chunk_rows, 50) # Cap rows to keep progress bar moving smoothly
+    else:
+        chunk_rows = 1
+        chunk_cols = windows_per_chunk
+    
+    # 4. Accumulators live on CPU to prevent VRAM growth across iterations. 
+    # Shape as 2D directly to avoid 1D indexing bugs across chunks.
+    vol_vals = torch.zeros((out_h, out_w), dtype=COMPUTE_DTYPE, device='cpu')
+    heights_vals = torch.zeros((out_h, out_w, num_endmembers), dtype=COMPUTE_DTYPE, device='cpu')
+    window_valid_mask = torch.zeros((out_h, out_w), dtype=torch.bool, device='cpu')
     if Sigma_n is not None and valid_sources is not None:
-        noise_heights_vals = torch.zeros((len(valid_sources), L, num_endmembers), dtype=COMPUTE_DTYPE, device='cpu')
+        noise_heights_vals = torch.zeros((len(valid_sources), out_h, out_w, num_endmembers), dtype=COMPUTE_DTYPE, device='cpu')
     
     if valid_mask is not None:
         valid_mask_tensor = torch.from_numpy(valid_mask).to('cpu')
@@ -412,68 +403,88 @@ def process_volume_sliding_tile_torch(frame_data, valid_mask=None, tile_size=TIL
     with torch.no_grad():
         for y_start in tqdm(range(0, out_h, chunk_rows), desc=f"Sliding chunk {tile_size}x{tile_size}", leave=False):
             y_end = min(y_start + chunk_rows, out_h)
+            chunk_h = y_end - y_start
             
             row_start = y_start * stride
             row_end = (y_end - 1) * stride + tile_size
             
-            # Cast chunk to float32 on the CPU just before unfolding to avoid entire array allocation
-            chunk_data = tensor_data[:, row_start:row_end, :].to(dtype=COMPUTE_DTYPE).unsqueeze(0)
-            if scale_factor != 1.0:
-                chunk_data.div_(scale_factor)
+            for x_start in range(0, out_w, chunk_cols):
+                x_end_out = min(x_start + chunk_cols, out_w)
+                chunk_w = x_end_out - x_start
+                
+                col_start = x_start * stride
+                col_end = (x_end_out - 1) * stride + tile_size
             
-            chunk_unfold = torch.nn.functional.unfold(chunk_data, kernel_size=tile_size, stride=stride)
-            chunk_windows = chunk_unfold.view(bands, N_pixels, -1).permute(2, 0, 1) # (L_chunk, C, N_pixels)
-            L_chunk = chunk_windows.shape[0]
-            
-            if valid_mask_tensor is not None:
-                chunk_valid = valid_mask_tensor[row_start:row_end, :].unsqueeze(0).unsqueeze(0).float()
-                chunk_valid_unfold = torch.nn.functional.unfold(chunk_valid, kernel_size=tile_size, stride=stride)
-                chunk_valid_windows = chunk_valid_unfold.view(1, N_pixels, -1).permute(2, 0, 1) # (L_chunk, 1, N_pixels)
-                chunk_is_valid = (chunk_valid_windows.sum(dim=2).squeeze(1) == N_pixels)
-            else:
-                chunk_is_valid = torch.ones(L_chunk, dtype=torch.bool)
-            
-            global_start_idx = y_start * out_w
-            
-            for i in range(0, L_chunk, batch_size):
-                batch_valid_mask = chunk_is_valid[i:i+batch_size]
-                batch_windows = chunk_windows[i:i+batch_size]
+                # Push small, raw chunk to GPU FIRST, avoiding CPU memory bandwidth bottleneck
+                chunk_data = tensor_data[:, row_start:row_end, col_start:col_end].to(dtype=COMPUTE_DTYPE, device=device).unsqueeze(0)
+                if scale_factor != 1.0:
+                    chunk_data.div_(scale_factor)
                 
-                pixel_validity = ~torch.isnan(batch_windows).any(dim=1)  # (B, N)
-                valid_pixels_per_window = pixel_validity.sum(dim=1)  # (B)
-                batch_valid = batch_valid_mask & (valid_pixels_per_window == N_pixels)
+                # Unfold directly on GPU VRAM
+                chunk_unfold = torch.nn.functional.unfold(chunk_data, kernel_size=tile_size, stride=stride)
+                chunk_windows = chunk_unfold.view(bands, N_pixels, -1).permute(2, 0, 1) # (L_chunk, C, N_pixels)
+                L_chunk = chunk_windows.shape[0]
                 
-                window_valid_mask[global_start_idx + i : global_start_idx + i + batch_windows.shape[0]] = batch_valid
-                
-                if not batch_valid.any():
-                    continue
-                
-                valid_data = batch_windows[batch_valid].to(device)
-                
-                valid_data[torch.isnan(valid_data)] = 0.0
-            
-                endmembers, volume, heights, noise_heights = maximumDistance_volumes_torch(valid_data, num_endmembers, Sigma_n)
-                
-                if volume.shape[1] > 2:
-                    vol_val = torch.max(volume[:, 2:], dim=1)[0]
+                # Fix #4: Unfold valid mask on CPU as int8, avoiding float promotion and GPU transfer
+                if valid_mask_tensor is not None:
+                    chunk_valid_cpu = valid_mask_tensor[row_start:row_end, col_start:col_end].to(torch.int8).unsqueeze(0).unsqueeze(0)
+                    chunk_valid_unfold = torch.nn.functional.unfold(chunk_valid_cpu.float(), kernel_size=tile_size, stride=stride)
+                    chunk_valid_windows = chunk_valid_unfold.view(1, N_pixels, -1).permute(2, 0, 1) # (L_chunk, 1, N_pixels)
+                    chunk_is_valid = (chunk_valid_windows.sum(dim=2).squeeze(1) == N_pixels)  # bool on CPU
                 else:
-                    vol_val = torch.full((volume.shape[0],), -float('inf'), dtype=COMPUTE_DTYPE, device=device)
+                    chunk_is_valid = torch.ones(L_chunk, dtype=torch.bool)
                 
-                vol_vals[global_start_idx + i : global_start_idx + i + batch_windows.shape[0]][batch_valid] = vol_val.cpu()
-                heights_vals[global_start_idx + i : global_start_idx + i + batch_windows.shape[0]][batch_valid] = heights.cpu()
+                # Fix #3: Accumulate results on GPU, copy once per spatial chunk
+                chunk_vol_vals = torch.full((L_chunk,), -float('inf'), dtype=COMPUTE_DTYPE, device=device)
+                chunk_heights_vals = torch.zeros((L_chunk, num_endmembers), dtype=COMPUTE_DTYPE, device=device)
+                chunk_window_valid_mask = chunk_is_valid.clone()  # already computed from valid_mask
                 if Sigma_n is not None and valid_sources is not None:
-                    noise_heights_vals[:, global_start_idx + i : global_start_idx + i + batch_windows.shape[0], :][:, batch_valid, :] = noise_heights.cpu()
+                    chunk_noise_heights_vals = torch.zeros((len(valid_sources), L_chunk, num_endmembers), dtype=COMPUTE_DTYPE, device=device)
                 
-                torch.cuda.synchronize()
-            
-            # Explicitly delete massive tensors to assist garbage collection
-            del chunk_data
-            del chunk_unfold
-            del chunk_windows
-            if valid_mask_tensor is not None:
-                del chunk_valid_unfold
-                del chunk_valid_windows
-                del chunk_is_valid
+                for i in range(0, L_chunk, batch_size):
+                    batch_valid = chunk_is_valid[i:i+batch_size].to(device)
+                    batch_len = batch_valid.shape[0]
+                    
+                    if not batch_valid.any():
+                        continue
+                    
+                    # Fix #1: Skip redundant NaN scan — valid_mask from process_h5_file already
+                    # guarantees all pixels in valid windows contain real data.
+                    valid_data = chunk_windows[i:i+batch_size][batch_valid]
+                
+                    endmembers, volume, heights, noise_heights = maximumDistance_volumes_torch(valid_data, num_endmembers, Sigma_n)
+                    
+                    if volume.shape[1] > 2:
+                        vol_val = torch.max(volume[:, 2:], dim=1)[0]
+                    else:
+                        vol_val = torch.full((volume.shape[0],), -float('inf'), dtype=COMPUTE_DTYPE, device=device)
+                    
+                    # Accumulate directly on GPU — no per-batch .cpu() transfers
+                    chunk_vol_vals[i:i+batch_len][batch_valid] = vol_val
+                    chunk_heights_vals[i:i+batch_len][batch_valid] = heights
+                    if Sigma_n is not None and valid_sources is not None:
+                        chunk_noise_heights_vals[:, i:i+batch_len, :][:, batch_valid, :] = noise_heights
+                    
+                    # Fix #2: torch.cuda.synchronize() removed — .cpu() at chunk boundary
+                    # provides implicit sync; per-batch sync killed CPU/GPU overlap.
+                
+                # Single bulk D2H copy per spatial chunk (replaces 3-5 tiny PCIe transfers per batch)
+                chunk_vol_2d = chunk_vol_vals.view(chunk_h, chunk_w).cpu()
+                chunk_heights_2d = chunk_heights_vals.view(chunk_h, chunk_w, num_endmembers).cpu()
+                chunk_valid_2d = chunk_window_valid_mask.view(chunk_h, chunk_w)
+                
+                vol_vals[y_start:y_end, x_start:x_end_out] = chunk_vol_2d
+                heights_vals[y_start:y_end, x_start:x_end_out] = chunk_heights_2d
+                window_valid_mask[y_start:y_end, x_start:x_end_out] = chunk_valid_2d
+                if Sigma_n is not None and valid_sources is not None:
+                    chunk_noise_2d = chunk_noise_heights_vals.view(len(valid_sources), chunk_h, chunk_w, num_endmembers).cpu()
+                    noise_heights_vals[:, y_start:y_end, x_start:x_end_out, :] = chunk_noise_2d
+                
+                # Explicitly delete GPU tensors to assist garbage collection
+                del chunk_data, chunk_unfold, chunk_windows
+                del chunk_vol_vals, chunk_heights_vals
+                if Sigma_n is not None and valid_sources is not None:
+                    del chunk_noise_heights_vals
         
     center_offset = tile_size // 2
     
@@ -483,9 +494,9 @@ def process_volume_sliding_tile_torch(frame_data, valid_mask=None, tile_size=TIL
         noise_heights_map = np.full((len(valid_sources), height, width, num_endmembers), np.nan, dtype=np.float32)
 
     
-    vol_grid = vol_vals.numpy().reshape(out_h, out_w)
-    heights_grid = heights_vals.numpy().reshape(out_h, out_w, num_endmembers)
-    valid_grid = window_valid_mask.numpy().reshape(out_h, out_w)
+    vol_grid = vol_vals.numpy()
+    heights_grid = heights_vals.numpy()
+    valid_grid = window_valid_mask.numpy()
     
     neighborhood_map[center_offset:center_offset + out_h,
                      center_offset:center_offset + out_w] = vol_grid
@@ -498,7 +509,7 @@ def process_volume_sliding_tile_torch(frame_data, valid_mask=None, tile_size=TIL
                 center_offset:center_offset + out_w, :][~valid_grid] = np.nan
 
     if Sigma_n is not None and valid_sources is not None:
-        noise_heights_grid = noise_heights_vals.numpy().reshape(len(valid_sources), out_h, out_w, num_endmembers)
+        noise_heights_grid = noise_heights_vals.numpy()
         noise_heights_map = np.full((len(valid_sources), height, width, num_endmembers), np.nan, dtype=np.float32)
         noise_heights_map[:, center_offset:center_offset + out_h, center_offset:center_offset + out_w, :] = noise_heights_grid
         noise_heights_map[:, center_offset:center_offset + out_h, center_offset:center_offset + out_w, :][:, ~valid_grid] = np.nan
@@ -514,53 +525,6 @@ def process_volume_sliding_tile_torch(frame_data, valid_mask=None, tile_size=TIL
 
         
     return datasets
-
-def calculate_noise_threshold_mc(Sigma_n, P_perp, num_pixels, M=5000, alpha=0.01):
-    """
-    Calculates the noise-equivalent orthogonal height threshold using a 
-    Monte Carlo simulation (as described in maxD-Volumes slides 15-18).
-    
-    Args:
-        Sigma_n (np.ndarray): Full B x B noise covariance matrix.
-        P_perp (np.ndarray): B x B orthogonal projection matrix from current MaxD iteration.
-        num_pixels (int): Total number of pixels in the search window (N).
-        M (int): Number of Monte Carlo realizations.
-        alpha (float): False alarm probability (upper-tail quantile).
-        
-    Returns:
-        float: The noise-equivalent height threshold h_noise(alpha).
-    """
-    bands = Sigma_n.shape[0]
-    
-    # 1. Generate M realizations of N noise pixels
-    # Using SVD factorization is mathematically robust even if Sigma_n is numerically singular
-    U, S, _ = np.linalg.svd(Sigma_n)
-    S_sqrt = np.sqrt(np.maximum(S, 0))
-    
-    # Z ~ N(0, I)
-    Z = np.random.standard_normal((M, num_pixels, bands))
-    # Transform to N(0, Sigma_n)
-    noise_draws = Z @ (U * S_sqrt).T
-    
-    # 2. Localize by differencing candidates from the reference noise vector (n_0)
-    n_0 = noise_draws[:, 0:1, :]
-    n_i = noise_draws[:, 1:, :]
-    eta = n_i - n_0  # Shape: (M, num_pixels - 1, bands)
-    
-    # 3. Project the localized noise through the observed MaxD projector
-    # Since P_perp is symmetric, eta @ P_perp mathematically applies the projection
-    projected_eta = eta @ P_perp
-    
-    # Calculate magnitudes of projected noise vectors
-    magnitudes = np.linalg.norm(projected_eta, axis=-1)  # Shape: (M, num_pixels - 1)
-    
-    # 4. Retain the maximum projected-noise magnitude from the simulated population
-    H_noise = np.max(magnitudes, axis=1)  # Shape: (M,)
-    
-    # 5. Define the noise-equivalent height as the selected upper-tail quantile
-    h_noise_threshold = np.quantile(H_noise, 1.0 - alpha)
-    
-    return float(h_noise_threshold)
 
 
 def calculate_noise_threshold_from_traces_torch(trace_1, trace_2, num_pixels, alpha=0.01):
@@ -604,6 +568,8 @@ def calculate_noise_threshold_closed_form(Sigma_n, P_perp, num_pixels, alpha=0.0
     return h_noise_threshold
 
 def process_h5_file(file_path, tile_size=TILE_SIZE, num_endmembers=NUM_ENDMEMBERS):
+    import time
+    start_time = time.time()
     print(f"Opening {file_path}...")
     try:
         with h5py.File(file_path, 'r+') as f:
@@ -627,16 +593,17 @@ def process_h5_file(file_path, tile_size=TILE_SIZE, num_endmembers=NUM_ENDMEMBER
             else:
                 scale_factor = 1.0
             
-            cov_sources = ['ssd', 'mlr', 'dct', 'mnf']
             covariances = []
             valid_sources = []
-            for src in cov_sources:
-                cov_name = f"{src}_noise_cov"
-                if cov_name in grp:
-                    covariances.append(grp[cov_name][:])
-                    valid_sources.append(src)
-                else:
-                    print(f"Warning: {cov_name} not found.")
+            if CALCULATE_NOISE_STATS:
+                cov_sources = ['ssd', 'mlr', 'dct', 'mnf','nfd']
+                for src in cov_sources:
+                    cov_name = f"{src}_noise_cov"
+                    if cov_name in grp:
+                        covariances.append(grp[cov_name][:])
+                        valid_sources.append(src)
+                    else:
+                        print(f"Warning: {cov_name} not found.")
             
             if len(covariances) > 0:
                 Sigma_n = np.stack(covariances, axis=0) # shape (n, B, B)
@@ -669,7 +636,9 @@ def process_h5_file(file_path, tile_size=TILE_SIZE, num_endmembers=NUM_ENDMEMBER
                 
                 if torch.cuda.is_available():
                     results = process_volume_sliding_tile_torch(raw_frame, valid_mask=v_mask, tile_size=tile_size, num_endmembers=num_endmembers, Sigma_n=Sigma_n, valid_sources=valid_sources, scale_factor=scale_factor)
+                    torch.cuda.empty_cache()
                 else:
+                    print("CUDA NOT AVAILABLE, CPU PROCESSING ONLY...")
                     frame_data = raw_frame.astype(np.float32) / scale_factor
                     results = process_volume_sliding_tile(frame_data, valid_mask=v_mask, tile_size=tile_size, num_endmembers=num_endmembers, Sigma_n=Sigma_n, valid_sources=valid_sources)
                     
@@ -695,6 +664,15 @@ def process_h5_file(file_path, tile_size=TILE_SIZE, num_endmembers=NUM_ENDMEMBER
                 del results
                 gc.collect()
                         
+            end_time = time.time()
+            duration = end_time - start_time
+            print(f"Processing complete for TILE_SIZE={tile_size} in {duration:.2f} seconds.")
+            
+            # Save the calculation duration as an attribute
+            nm_name = f'neighborhood_map_{tile_size}x{tile_size}'
+            if nm_name in grp:
+                grp[nm_name].attrs['processing_duration_seconds'] = duration
+                
             print("Processing complete and saved to file.")
     except Exception as e:
         import traceback
