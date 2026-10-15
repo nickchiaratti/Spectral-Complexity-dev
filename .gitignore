@@ -197,4 +197,4 @@ data_format_docs/implementation_plan.md
 data_format_docs/README.md
 
 .env
-agents/*
+agents/

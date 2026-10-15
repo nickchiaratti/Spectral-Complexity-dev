@@ -6,11 +6,11 @@ from tkinter import filedialog
 import torch
 
 TILE_SIZE=3
-TILE_SIZES = [35,55,65,81,101]#[3,5,7,9,11,15,19,35,55,65,81,101]
+TILE_SIZES = [101]#3,5,7,9,11,15,19,35,55,65,81,101]#[3,5,7,9,11,15,19,35,55,65,81,101]
 NUM_ENDMEMBERS = 40
 CALCULATE_NOISE_STATS = True  # Set to False to skip calculating noise equivalent heights
 
-def maximumDistance_volumes_torch(img_cube, num_endmembers, Sigma_n=None):
+def maximumDistance_volumes_torch(img_cube, num_endmembers, Sigma_n=None, Sigma_n_tensor=None):
     """
     Combined MaxD endmember extraction and localized Gram volume calculation
     in a single iterative Orthogonal Subspace Projection (OSP) pass. 
@@ -28,6 +28,10 @@ def maximumDistance_volumes_torch(img_cube, num_endmembers, Sigma_n=None):
         num_endmembers: int, total number of endmembers to extract (k).
                         The min-norm pixel consumes one slot as the local origin,
                         so (k-1) orthogonal heights are produced.
+        Sigma_n: numpy array of noise covariance matrices (optional).
+        Sigma_n_tensor: Pre-created GPU tensor of Sigma_n (optional). If provided,
+                        avoids repeated numpy->GPU copies. Created once per tile size
+                        in the caller to reduce CUDA allocator fragmentation.
     Returns:
         endmembers: Tensor of shape (B, C, num_endmembers) — raw (non-localized)
                     endmember spectra. Index 0 is max-norm, index 1 is min-norm
@@ -82,7 +86,11 @@ def maximumDistance_volumes_torch(img_cube, num_endmembers, Sigma_n=None):
     if Sigma_n is not None:
         N_cov = Sigma_n.shape[0]
         noise_heights = torch.zeros((N_cov, B, num_endmembers), dtype=dtype, device=device)
-        Sigma_n_tensor = torch.tensor(Sigma_n, dtype=dtype, device=device)
+        # Use pre-created tensor if provided (avoids repeated numpy->GPU copy per batch)
+        if Sigma_n_tensor is None:
+            Sigma_n_tensor = torch.tensor(Sigma_n, dtype=dtype, device=device)
+        else:
+            Sigma_n_tensor = Sigma_n_tensor.to(dtype=dtype)
         
         # Precompute initial traces for P_perp = I
         trace_1 = torch.diagonal(Sigma_n_tensor, dim1=-2, dim2=-1).sum(-1).unsqueeze(1).repeat(1, B) # (N_cov, B)
@@ -395,6 +403,13 @@ def process_volume_sliding_tile_torch(frame_data, valid_mask=None, tile_size=TIL
     if Sigma_n is not None and valid_sources is not None:
         noise_heights_vals = torch.zeros((len(valid_sources), out_h, out_w, num_endmembers), dtype=COMPUTE_DTYPE, device='cpu')
     
+    # Pre-create Sigma_n_tensor ONCE on GPU to avoid repeated numpy->GPU copies
+    # in every batch call to maximumDistance_volumes_torch (~5000x fewer allocations)
+    if Sigma_n is not None:
+        Sigma_n_tensor_gpu = torch.tensor(Sigma_n, dtype=torch.float64, device=device)
+    else:
+        Sigma_n_tensor_gpu = None
+    
     if valid_mask is not None:
         valid_mask_tensor = torch.from_numpy(valid_mask).to('cpu')
     else:
@@ -452,7 +467,8 @@ def process_volume_sliding_tile_torch(frame_data, valid_mask=None, tile_size=TIL
                     # guarantees all pixels in valid windows contain real data.
                     valid_data = chunk_windows[i:i+batch_size][batch_valid]
                 
-                    endmembers, volume, heights, noise_heights = maximumDistance_volumes_torch(valid_data, num_endmembers, Sigma_n)
+                    endmembers, volume, heights, noise_heights = maximumDistance_volumes_torch(
+                        valid_data, num_endmembers, Sigma_n, Sigma_n_tensor=Sigma_n_tensor_gpu)
                     
                     if volume.shape[1] > 2:
                         vol_val = torch.max(volume[:, 2:], dim=1)[0]
@@ -465,8 +481,10 @@ def process_volume_sliding_tile_torch(frame_data, valid_mask=None, tile_size=TIL
                     if Sigma_n is not None and valid_sources is not None:
                         chunk_noise_heights_vals[:, i:i+batch_len, :][:, batch_valid, :] = noise_heights
                     
-                    # Fix #2: torch.cuda.synchronize() removed — .cpu() at chunk boundary
-                    # provides implicit sync; per-batch sync killed CPU/GPU overlap.
+                    # Explicitly free per-batch GPU tensors to reduce CUDA allocator fragmentation
+                    del endmembers, volume, heights, vol_val, valid_data, batch_valid
+                    if noise_heights is not None:
+                        del noise_heights
                 
                 # Single bulk D2H copy per spatial chunk (replaces 3-5 tiny PCIe transfers per batch)
                 chunk_vol_2d = chunk_vol_vals.view(chunk_h, chunk_w).cpu()
@@ -480,12 +498,21 @@ def process_volume_sliding_tile_torch(frame_data, valid_mask=None, tile_size=TIL
                     chunk_noise_2d = chunk_noise_heights_vals.view(len(valid_sources), chunk_h, chunk_w, num_endmembers).cpu()
                     noise_heights_vals[:, y_start:y_end, x_start:x_end_out, :] = chunk_noise_2d
                 
-                # Explicitly delete GPU tensors to assist garbage collection
+                # Explicitly delete all GPU tensors to reduce CUDA allocator fragmentation
                 del chunk_data, chunk_unfold, chunk_windows
-                del chunk_vol_vals, chunk_heights_vals
+                del chunk_vol_vals, chunk_heights_vals, chunk_window_valid_mask
+                del chunk_vol_2d, chunk_heights_2d, chunk_valid_2d
+                if valid_mask_tensor is not None:
+                    del chunk_valid_cpu, chunk_valid_unfold, chunk_valid_windows, chunk_is_valid
+                else:
+                    del chunk_is_valid
                 if Sigma_n is not None and valid_sources is not None:
-                    del chunk_noise_heights_vals
+                    del chunk_noise_heights_vals, chunk_noise_2d
         
+    # Free the pre-created Sigma_n GPU tensor now that processing is done
+    if Sigma_n_tensor_gpu is not None:
+        del Sigma_n_tensor_gpu
+    
     center_offset = tile_size // 2
     
     neighborhood_map = np.full((height, width), np.nan, dtype=np.float32)
@@ -704,3 +731,10 @@ if __name__ == '__main__':
         for i, TILE_SIZE in enumerate(TILE_SIZES):
             print(f"Processing for TILE_SIZE={TILE_SIZE}...")
             process_h5_file(h5_file, TILE_SIZE, NUM_ENDMEMBERS)
+            
+            # Full memory cleanup between tile sizes to prevent CUDA allocator
+            # fragmentation and CPU memory accumulation that causes progressive slowdown
+            import gc
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()

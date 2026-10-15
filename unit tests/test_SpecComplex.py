@@ -10,6 +10,7 @@ import math
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 import SpecComplex
 import SpecComplexTorch
+from maximumDistance_Volumes import maximumDistance_parallelotopeVolumes
 
 FILE_PATH = r"C:/satelliteImagery/MGRS30mConstellation/Harmonized_MGRS_Stack_Rochesterv2.h5"
 
@@ -260,6 +261,144 @@ def test_maximumDistance_volumes_torch_heights(real_data):
                                err_msg="Volumes mismatch between Numpy and Torch")
     np.testing.assert_allclose(em_np, em_torch_np, rtol=1e-8, atol=1e-5,
                                err_msg="Endmembers mismatch between Numpy and Torch")
+
+def test_maximumDistance_parallelotopeVolumes(real_data):
+    """
+    Validates equivalence of maximumDistance_parallelotopeVolumes (3D input)
+    against original separate maximumDistance and calcGramLocalVolumes implementations.
+    Both endmember values and linear scale volume results must be within 1e-5.
+    """
+    num_endmembers = 7
+    img = real_data
+    
+    # 1. Run separate original methods
+    em_sep, _ = SpecComplex.maximumDistance(img, num_endmembers)
+    
+    localizationVec = em_sep[:, 1]
+    remainingEndmembers = np.delete(em_sep, 1, axis=1)
+    vol_sep = SpecComplex.calcGramLocalVolumes(remainingEndmembers, localizationVec)
+    vol_sep = np.insert(vol_sep, 0, 0.0)
+    
+    # 2. Run maximumDistance_parallelotopeVolumes with 3D input
+    em_par, vol_log_par, heights_par, idx_par = maximumDistance_parallelotopeVolumes(
+        img, num_endmembers
+    )
+    vol_linear_par = np.exp(vol_log_par)
+    
+    # 3. Compare Results: Endmembers within 1e-5
+    em_diff = (em_sep - em_par).flatten()
+    print(f"Mean EM: {np.mean(em_sep):.10e}, Mean Diff: {np.mean(em_diff):.10e}, Max Abs Diff: {np.max(np.abs(em_diff)):.10e}, Var Diff: {np.var(em_diff):.10e}")
+    np.testing.assert_allclose(
+        em_sep, em_par, rtol=1e-8, atol=1e-5,
+        err_msg="Endmembers mismatch between maximumDistance and maximumDistance_parallelotopeVolumes"
+    )
+    
+    # 4. Compare Results: Linear scale volumes within 1e-5
+    vol_diff = (vol_sep - vol_linear_par).flatten()
+    print(f"Mean Vol: {np.mean(vol_sep):.10e}, Mean Diff: {np.mean(vol_diff):.10e}, Max Abs Diff: {np.max(np.abs(vol_diff)):.10e}, Var Diff: {np.var(vol_diff):.10e}")
+    np.testing.assert_allclose(
+        vol_sep, vol_linear_par, rtol=1e-8, atol=1e-5,
+        err_msg="Linear scale volumes mismatch between calcGramLocalVolumes and maximumDistance_parallelotopeVolumes"
+    )
+    
+    # 5. Verify internal consistency: cumulative product of heights matches linear volume
+    expected_vol = np.cumprod(heights_par[1:])
+    np.testing.assert_allclose(
+        vol_linear_par[1:], expected_vol, rtol=1e-8, atol=1e-5,
+        err_msg="Cumulative product of heights does not match linear volume in maximumDistance_parallelotopeVolumes"
+    )
+
+
+def test_maximumDistance_parallelotopeVolumes_2d(real_data):
+    """
+    Validates equivalence of maximumDistance_parallelotopeVolumes (2D (bands, pixels) input)
+    against original separate maximumDistance and calcGramLocalVolumes implementations.
+    Both endmember values and linear scale volume results must be within 1e-5.
+    """
+    num_endmembers = 7
+    img = real_data
+    rows, cols, bands = img.shape
+    
+    # 1. Run separate original methods
+    em_sep, _ = SpecComplex.maximumDistance(img, num_endmembers)
+    
+    localizationVec = em_sep[:, 1]
+    remainingEndmembers = np.delete(em_sep, 1, axis=1)
+    vol_sep = SpecComplex.calcGramLocalVolumes(remainingEndmembers, localizationVec)
+    vol_sep = np.insert(vol_sep, 0, 0.0)
+    
+    # 2. Run maximumDistance_parallelotopeVolumes with 2D input
+    img_flat = np.reshape(img, (rows * cols, bands), order="F")
+    valid_mask = ~np.isnan(img_flat).any(axis=1)
+    valid_pixels = img_flat[valid_mask]
+    pixels_t = valid_pixels.T  # (bands, num_pixels)
+    
+    em_par, vol_log_par, heights_par, idx_par = maximumDistance_parallelotopeVolumes(
+        pixels_t, num_endmembers
+    )
+    vol_linear_par = np.exp(vol_log_par)
+    
+    # 3. Compare Results
+    em_diff = (em_sep - em_par).flatten()
+    print(f"Mean EM 2D: {np.mean(em_sep):.10e}, Mean Diff: {np.mean(em_diff):.10e}, Max Abs Diff: {np.max(np.abs(em_diff)):.10e}, Var Diff: {np.var(em_diff):.10e}")
+    np.testing.assert_allclose(
+        em_sep, em_par, rtol=1e-8, atol=1e-5,
+        err_msg="Endmembers mismatch between maximumDistance and 2D maximumDistance_parallelotopeVolumes"
+    )
+    
+    vol_diff = (vol_sep - vol_linear_par).flatten()
+    print(f"Mean Vol 2D: {np.mean(vol_sep):.10e}, Mean Diff: {np.mean(vol_diff):.10e}, Max Abs Diff: {np.max(np.abs(vol_diff)):.10e}, Var Diff: {np.var(vol_diff):.10e}")
+    np.testing.assert_allclose(
+        vol_sep, vol_linear_par, rtol=1e-8, atol=1e-5,
+        err_msg="Linear scale volumes mismatch between calcGramLocalVolumes and 2D maximumDistance_parallelotopeVolumes"
+    )
+
+
+def test_maximumDistance_parallelotopeVolumes_synthetic():
+    """
+    Standalone validation on synthetic spectral cube (independent of external HDF5 files).
+    Validates both 3D and 2D inputs against maximumDistance and calcGramLocalVolumes within 1e-5.
+    """
+    np.random.seed(42)
+    num_endmembers = 5
+    img = np.random.uniform(0.05, 0.95, (10, 10, 15)).astype(np.float32)
+    rows, cols, bands = img.shape
+    
+    # 1. Run separate original methods
+    em_sep, _ = SpecComplex.maximumDistance(img, num_endmembers)
+    localizationVec = em_sep[:, 1]
+    remainingEndmembers = np.delete(em_sep, 1, axis=1)
+    vol_sep = SpecComplex.calcGramLocalVolumes(remainingEndmembers, localizationVec)
+    vol_sep = np.insert(vol_sep, 0, 0.0)
+    
+    # 2. Run 3D input
+    em_par_3d, vol_log_3d, heights_3d, _ = maximumDistance_parallelotopeVolumes(img, num_endmembers)
+    vol_linear_3d = np.exp(vol_log_3d)
+    
+    np.testing.assert_allclose(
+        em_sep, em_par_3d, rtol=1e-8, atol=1e-5,
+        err_msg="Synthetic: Endmembers mismatch on 3D input"
+    )
+    np.testing.assert_allclose(
+        vol_sep, vol_linear_3d, rtol=1e-8, atol=1e-5,
+        err_msg="Synthetic: Linear scale volumes mismatch on 3D input"
+    )
+    
+    # 3. Run 2D input
+    img_flat = np.reshape(img, (rows * cols, bands), order="F")
+    pixels_t = img_flat.T
+    em_par_2d, vol_log_2d, heights_2d, _ = maximumDistance_parallelotopeVolumes(pixels_t, num_endmembers)
+    vol_linear_2d = np.exp(vol_log_2d)
+    
+    np.testing.assert_allclose(
+        em_sep, em_par_2d, rtol=1e-8, atol=1e-5,
+        err_msg="Synthetic: Endmembers mismatch on 2D input"
+    )
+    np.testing.assert_allclose(
+        vol_sep, vol_linear_2d, rtol=1e-8, atol=1e-5,
+        err_msg="Synthetic: Linear scale volumes mismatch on 2D input"
+    )
+
 
 if __name__ == "__main__":
     import datetime

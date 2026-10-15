@@ -7,16 +7,19 @@ import numpy as np
 #import scipy.ndimage as ndimage
 import cupy as cp
 from cupyx.scipy import ndimage
+import pandas as pd
 
 # Configuration for False Color Complexity Composite
 
-TILE_SIZES = [5,15,35]# 19,31,41,61,81,101]
+TILE_SIZES = [5,35,101]# 19,31,41,61,81,101]
 NOISE_SOURCES = ['ssd', 'mlr', 'dct', 'mnf']
 
 FALSE_COLOR_R_TILE = TILE_SIZES[0]
 FALSE_COLOR_G_TILE = TILE_SIZES[len(TILE_SIZES)//2]
 FALSE_COLOR_B_TILE = TILE_SIZES[-1] # Adjusted for HySpex default tiles (3, 5, 7, 9)
 
+OVERLAY_GROUND_TRUTH=True
+GROUND_TRUTH_FILE=r"C:\satelliteImagery\ground_truth\GPS_GE18_Landmine_UXO_locations.xlsx"
 SPATIAL_AVERAGE=True
 COMMON_HEATMAP_RANGE=False
 COLOR_PALETTE = ['#E69F00', '#56B4E9', '#009E73', '#F0E442', '#0072B2', '#D55E00', '#CC79A7', '#000000']
@@ -82,8 +85,10 @@ def main():
                         valid_mask = np.isfinite(nm_data)
                         
                         # Use uniform filtering ignoring invalid pixels
-                        sum_vals = ndimage.uniform_filter(np.where(valid_mask, nm_data, 0.0), size=t, mode='constant', cval=0.0)
-                        sum_weights = ndimage.uniform_filter(valid_mask.astype(float), size=t, mode='constant', cval=0.0)
+                        d_data = cp.array(np.where(valid_mask, nm_data, 0.0))
+                        d_weights = cp.array(valid_mask.astype(float))
+                        sum_vals = ndimage.uniform_filter(d_data, size=t, mode='constant', cval=0.0).get()
+                        sum_weights = ndimage.uniform_filter(d_weights, size=t, mode='constant', cval=0.0).get()
                         
                         with np.errstate(invalid='ignore', divide='ignore'):
                             # Only calculate average for originally valid pixels to prevent 
@@ -183,8 +188,10 @@ def main():
                 is_ortho_main = event.inaxes in axes_ortho
                 has_fc = 'axes_fc' in locals()
                 is_fc_ortho = has_fc and event.inaxes == axes_fc
+                has_gt = 'axes_gt' in locals()
+                is_gt_ortho = has_gt and event.inaxes == axes_gt
                 
-                if not (is_ortho_main or is_fc_ortho):
+                if not (is_ortho_main or is_fc_ortho or is_gt_ortho):
                     return
                     
                 ix, iy = int(round(event.xdata)), int(round(event.ydata))
@@ -211,10 +218,15 @@ def main():
                     if has_fc:
                         crosshair_fc = axes_fc.plot(map_x, map_y, marker='+', color='white', markersize=12, markeredgewidth=2)[0]
                         state['patches_all'].append(crosshair_fc)
+                    if has_gt:
+                        crosshair_gt = axes_gt.plot(map_x, map_y, marker='+', color='white', markersize=12, markeredgewidth=2)[0]
+                        state['patches_all'].append(crosshair_gt)
                 
                 fig_ortho.canvas.draw_idle()
                 if has_fc:
                     fig_fc.canvas.draw_idle()
+                if has_gt:
+                    fig_gt.canvas.draw_idle()
                 
                 # Update Histograms
                 if state['fig_hist'] is None or not plt.fignum_exists(state['fig_hist'].number):
@@ -432,6 +444,42 @@ def main():
                 axes_fc.axis('off')
                 
                 fig_fc.tight_layout()
+                
+                # --- Figure 3: Ground Truth Overlay ---
+                if OVERLAY_GROUND_TRUTH:
+                    geo_transform = surface_reflectance_ds.attrs.get('GeoTransform', None)
+                    if geo_transform is not None:
+                        try:
+                            df = pd.read_excel(GROUND_TRUTH_FILE, header=None)
+                            easting = pd.to_numeric(df.iloc[:, 2], errors='coerce').values
+                            northing = pd.to_numeric(df.iloc[:, 1], errors='coerce').values
+                            
+                            valid_coords = ~np.isnan(easting) & ~np.isnan(northing)
+                            easting = easting[valid_coords]
+                            northing = northing[valid_coords]
+                            
+                            x_pixels = (easting - geo_transform[0]) / geo_transform[1]
+                            y_pixels = (northing - geo_transform[3]) / geo_transform[5]
+                            
+                            valid = (x_pixels >= 0) & (x_pixels < rgb_ortho.shape[1]) & (y_pixels >= 0) & (y_pixels < rgb_ortho.shape[0])
+                            x_pixels_valid = x_pixels[valid]
+                            y_pixels_valid = y_pixels[valid]
+                            
+                            fig_gt, axes_gt = plt.subplots(1, 1, figsize=(10, 8))
+                            fig_gt.canvas.manager.set_window_title('Ground Truth Overlay')
+                            fig_gt.tight_layout(pad=0.1)
+                            
+                            axes_gt.imshow(rgb_ortho)
+                            axes_gt.scatter(x_pixels_valid, y_pixels_valid, color='red', marker='x', s=50, label='Ground Truth')
+                            axes_gt.set_title(f"Ground Truth Overlay (Found {np.sum(valid)} targets)")
+                            axes_gt.axis('off')
+                            axes_gt.legend()
+                            fig_gt.tight_layout()
+                            
+                        except Exception as e:
+                            print(f"Failed to overlay ground truth: {e}")
+                    else:
+                        print("GeoTransform not found in surface_reflectance, cannot overlay ground truth.")
             
             fig_ortho.canvas.mpl_connect('button_press_event', onclick)
             
@@ -439,6 +487,10 @@ def main():
                 fig_fc.canvas.mpl_connect('button_press_event', onclick)
             else:
                 print(f"False color composite skipped: Could not find all of tiles {FALSE_COLOR_R_TILE}, {FALSE_COLOR_G_TILE}, {FALSE_COLOR_B_TILE}")
+            
+            if 'fig_gt' in locals():
+                fig_gt.canvas.mpl_connect('button_press_event', onclick)
+                
             plt.show()
             
     except Exception as e:
