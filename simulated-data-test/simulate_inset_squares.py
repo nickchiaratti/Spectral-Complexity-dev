@@ -25,20 +25,24 @@ cvAVIRISc2014_WV_FILE = r"C:\satelliteImagery\ground_truth\splib07\ASCIIdata\ASC
 
 # Self collected Leaf spectral data using an ASD Field Spectrometer. Leaf1 type is a norway maple, Leaf2 is a silver maple. The disease is tar spot.
 NICKS_LEAVES_DIR  ="C:/satelliteImagery/ground_truth/NickLeaves_20261001"
+CALIBRATION_TARGETS_DIR = r"C:\satelliteImagery\ground_truth\calibration_targets"
 
 # Provide materials (outermost to innermost square)
 MATERIALS_TO_USE = {
     #"121": {"materials": ["Oak Oak-Leaf-1"],                                                                             "SNR": 500, "Variance": 0.45},
     #"100": {"materials": ["Oak Oak-Leaf-1", "Lodgepole-Pine", "Aspen Aspen-1","Douglas-Fir","Aspen Aspen-4","Goethite0.02+Quartz","Conifer-Meadow"],               "SNR": 500,  "Variance": 0.45},
     #"81":  {"materials": ["Oak Oak-Leaf-1", "Maple_Leaves","Goethite0.02+Quartz","Aspen Aspen-1","Douglas-Fir","Aspen Aspen-4","Conifer-Meadow"],               "SNR": 500,  "Variance": 0.45},
-    "49":  {"materials": ["Lodgepole-Pine", "Maple_Leaves","Aspen Aspen-1","Douglas-Fir","Aspen Aspen-4","Conifer-Meadow"],               "SNR": np.inf,  "Variance": 1},
+    #"49":  {"materials": ["Lodgepole-Pine", "Maple_Leaves","Aspen Aspen-1","Douglas-Fir","Aspen Aspen-4","Conifer-Meadow"],               "SNR": np.inf,  "Variance": 1},
     #"25":  {"materials": ["Sheet_Metal GDS352", "Ultramarine GDS791", "Cuprite HS127.3B","Maple_Leaves",],               "SNR": None,  "Variance": 0.1}
     #"25":  {"materials": ["Oak Oak-Leaf-1", "Lodgepole-Pine", "Maple_Leaves","Aspen Aspen-1","Douglas-Fir","Aspen Aspen-4","Conifer-Meadow","Goethite0.02+Quartz"],               "SNR": np.inf,  "Variance": 1}
     #"49":  {"materials": ["NICKLEAVES:DiseaseLeaf1", "NICKLEAVES:DiseaseLeaf2","NICKLEAVES:HealthyLeaf1", "NICKLEAVES:HealthyLeaf2"],   "SNR": np.inf,  "Variance": 1}
     #"49":  {"materials": ["NICKLEAVES:HealthyLeaf1", "NICKLEAVES:HealthyLeaf2"],   "SNR": np.inf,  "Variance": 1}
+    #"51":  {"materials": ["CALTARGET:big_white_panel", "CALTARGET:big_gray_panel", "CALTARGET:50_percent_cal_panel", "CALTARGET:10_percent_gray_panel"], "SNR": np.inf, "Variance": 1}
+    "5":  {"materials": ["CALTARGET:big_white_panel"], "SNR": 100, "Variance": 1}
+
 }
 NUM_ADDITIONAL_EM = 8
-ENABLE_MODEL_PREDICTIONS = True
+ENABLE_MODEL_PREDICTIONS = False
 
 def maximumDistance_parallelotopeVolumes(pixels, num_endmembers):
     """
@@ -153,26 +157,26 @@ def maximumDistance_parallelotopeVolumes_noise(pixels, num_endmembers, noise_pix
     """
     if pixels.ndim == 3:
         h, w, num_bands = pixels.shape
-        pixels = np.reshape(pixels, (h * w, num_bands), order="F").astype(np.float64).T
+        pixels = np.reshape(pixels, (h * w, num_bands), order="F").astype(np.float32).T
     elif pixels.ndim == 2:
-        pixels = pixels.astype(np.float64)
+        pixels = pixels.astype(np.float32)
 
     if noise_pixels.ndim == 3:
         hn, wn, num_bands_n = noise_pixels.shape
-        noise_pixels = np.reshape(noise_pixels, (hn * wn, num_bands_n), order="F").astype(np.float64).T
+        noise_pixels = np.reshape(noise_pixels, (hn * wn, num_bands_n), order="F").astype(np.float32).T
     elif noise_pixels.ndim == 2:
-        noise_pixels = noise_pixels.astype(np.float64)
+        noise_pixels = noise_pixels.astype(np.float32)
     
     noise_residuals = noise_pixels.copy()
-    noise_norms_mean = np.zeros(num_endmembers, dtype=np.float64)
-    noise_heights = np.zeros(num_endmembers, dtype=np.float64)
+    noise_norms_mean = np.zeros(num_endmembers, dtype=np.float32)
+    noise_heights = np.zeros(num_endmembers, dtype=np.float32)
 
     num_bands, num_pixels = pixels.shape
 
     # Initialize Variables
     endmembers = np.zeros((num_bands, num_endmembers), dtype=pixels.dtype)
-    volumes = np.full(num_endmembers, -np.inf, dtype=np.float64)
-    heights = np.zeros(num_endmembers, dtype=np.float64)
+    volumes = np.full(num_endmembers, -np.inf, dtype=np.float32)
+    heights = np.zeros(num_endmembers, dtype=np.float32)
     indices = np.zeros(num_endmembers, dtype=int)
 
     # Initialization
@@ -503,6 +507,12 @@ def main(sensor_name):
         if mat_name.startswith("NICKLEAVES:"):
             filename_str = mat_name.split(":", 1)[1]
             csv_path = os.path.join(NICKS_LEAVES_DIR, f"{sensor_name}_{filename_str}.csv")
+            print(f"Found {mat_name}: {os.path.basename(csv_path)}")
+            df = pd.read_csv(csv_path)
+            loaded_materials[mat_name] = df['DHR_mean'].values.astype(np.float32)
+        elif mat_name.startswith("CALTARGET:") or mat_name.startswith("CALIBRATION:"):
+            filename_str = mat_name.split(":", 1)[1]
+            csv_path = os.path.join(CALIBRATION_TARGETS_DIR, f"{sensor_name}_{filename_str}.csv")
             print(f"Found {mat_name}: {os.path.basename(csv_path)}")
             df = pd.read_csv(csv_path)
             loaded_materials[mat_name] = df['DHR_mean'].values.astype(np.float32)
