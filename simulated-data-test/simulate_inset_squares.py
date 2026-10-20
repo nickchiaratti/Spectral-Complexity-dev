@@ -31,10 +31,11 @@ MATERIALS_TO_USE = {
     #"121": {"materials": ["Oak Oak-Leaf-1"],                                                                             "SNR": 500, "Variance": 0.45},
     #"100": {"materials": ["Oak Oak-Leaf-1", "Lodgepole-Pine", "Aspen Aspen-1","Douglas-Fir","Aspen Aspen-4","Goethite0.02+Quartz","Conifer-Meadow"],               "SNR": 500,  "Variance": 0.45},
     #"81":  {"materials": ["Oak Oak-Leaf-1", "Maple_Leaves","Goethite0.02+Quartz","Aspen Aspen-1","Douglas-Fir","Aspen Aspen-4","Conifer-Meadow"],               "SNR": 500,  "Variance": 0.45},
-    #"49":  {"materials": ["Lodgepole-Pine", "Maple_Leaves","Aspen Aspen-1","Douglas-Fir","Aspen Aspen-4","Conifer-Meadow"],               "SNR": 500,  "Variance": 0.45},
+    "49":  {"materials": ["Lodgepole-Pine", "Maple_Leaves","Aspen Aspen-1","Douglas-Fir","Aspen Aspen-4","Conifer-Meadow"],               "SNR": np.inf,  "Variance": 1},
     #"25":  {"materials": ["Sheet_Metal GDS352", "Ultramarine GDS791", "Cuprite HS127.3B","Maple_Leaves",],               "SNR": None,  "Variance": 0.1}
-    "25":  {"materials": ["Oak Oak-Leaf-1", "Lodgepole-Pine", "Maple_Leaves","Aspen Aspen-1","Douglas-Fir","Aspen Aspen-4","Conifer-Meadow","Goethite0.02+Quartz"],               "SNR": np.inf,  "Variance": 1}
-    #"49":  {"materials": ["NICKLEAVES:DiseaseLeaf1", "NICKLEAVES:DiseaseLeaf2","NICKLEAVES:HealthyLeaf1", "NICKLEAVES:HealthyLeaf2"],   "SNR": 50,  "Variance": 0.1}
+    #"25":  {"materials": ["Oak Oak-Leaf-1", "Lodgepole-Pine", "Maple_Leaves","Aspen Aspen-1","Douglas-Fir","Aspen Aspen-4","Conifer-Meadow","Goethite0.02+Quartz"],               "SNR": np.inf,  "Variance": 1}
+    #"49":  {"materials": ["NICKLEAVES:DiseaseLeaf1", "NICKLEAVES:DiseaseLeaf2","NICKLEAVES:HealthyLeaf1", "NICKLEAVES:HealthyLeaf2"],   "SNR": np.inf,  "Variance": 1}
+    #"49":  {"materials": ["NICKLEAVES:HealthyLeaf1", "NICKLEAVES:HealthyLeaf2"],   "SNR": np.inf,  "Variance": 1}
 }
 NUM_ADDITIONAL_EM = 8
 ENABLE_MODEL_PREDICTIONS = True
@@ -92,14 +93,12 @@ def maximumDistance_parallelotopeVolumes(pixels, num_endmembers):
     # 𝒒_1=𝒅_1/ℎ_1  
     d1 = residuals[:, idx_maxnorm].copy()              # (bands, 1)
     h1 = np.linalg.norm(d1)
-    volumes[1] = np.log(h1)
+    volumes[1] = np.log(h1) if h1 > 1e-15 else -np.inf
     heights[1] = h1
-    q1 = d1 / h1  # (bands,1)
-
-    # Remove the component along the latest orthonormal direction 𝒒_(𝑗−1) from all pixel residuals
-    # 𝒓_𝑗 (𝒙)=𝒓_(𝑗−1)−(𝒒_(𝑗−1)^𝑇 𝒓_(𝑗−1)) 𝒒_(𝑗−1)
-    proj_component = np.outer(q1, np.dot(q1, residuals))  # equivalent to q1*q1.T*residuals in vector operations
-    residuals -= proj_component
+    if h1 > 1e-15:
+        q1 = d1 / h1  # (bands,1)
+        proj_component = np.outer(q1, np.dot(q1, residuals))  # equivalent to q1*q1.T*residuals in vector operations
+        residuals -= proj_component
 
     # The residual vectors are deflated across subsequent iterations 𝑗=2,…,𝑟 to select 𝑟 endmembers
     for j in range(2, num_endmembers):
@@ -107,29 +106,30 @@ def maximumDistance_parallelotopeVolumes(pixels, num_endmembers):
         # excluding the indices for 𝒗_0,𝒗_1,𝒗_2,…𝒗_(𝑗−1)
         # 𝒗_𝑗=arg𝑚𝑎𝑥‖𝒓_𝑗 (𝒙)‖
         residual_norm = np.linalg.norm(residuals, axis=0)  # (num_pixels,)
-        residual_norm[selected_indices] = -np.inf
-        idx_new = np.argmax(residual_norm)
+        if len(selected_indices) < num_pixels:
+            residual_norm[selected_indices] = -np.inf
+            idx_new = np.argmax(residual_norm)
+            selected_indices.append(idx_new)
+        else:
+            idx_new = 0
+
         v_j = residuals[:, idx_new].copy()
         endmembers[:, j] = pixels[:, idx_new]
         indices[j] = idx_new
-        selected_indices.append(idx_new)
 
         # Calculate the subsequent height ℎ_𝑗 and orthonormal basis 𝒒_𝑗
         # ℎ_𝑗=‖𝒓_𝑗 (𝒗_𝑗 )‖
         # 𝒒_𝒋=(𝒓_𝑗 (𝒗_𝑗 ))/ℎ_𝑗 
         h_j = np.linalg.norm(v_j)
-        q_j = v_j / h_j
         heights[j] = h_j
 
-        # Log volume is the cumulative sum of log orthogonal heights
-        # 〖𝑽𝒐𝒍〗_𝑟=∏ ℎ_𝑗 
-        # Implemented as a sum of logs because of floating point errors
-        volumes[j] = volumes[j - 1] + np.log(h_j)
-
-        # Remove the component along the latest orthonormal direction 𝒒_(𝑗−1) from all pixel residuals
-        # 𝒓_𝑗 (𝒙)=𝒓_(𝑗−1)−(𝒒_(𝑗−1)^𝑇 𝒓_(𝑗−1)) 𝒒_(𝑗−1)
-        proj_component = np.outer(q_j, np.dot(q_j, residuals)) # equivalent to q_j*q_j.T*residuals in vector operations
-        residuals -= proj_component
+        if h_j > 1e-15:
+            q_j = v_j / h_j
+            volumes[j] = volumes[j - 1] + np.log(h_j)
+            proj_component = np.outer(q_j, np.dot(q_j, residuals)) # equivalent to q_j*q_j.T*residuals in vector operations
+            residuals -= proj_component
+        else:
+            volumes[j] = -np.inf
 
     return endmembers, volumes, heights, indices
 
@@ -198,18 +198,16 @@ def maximumDistance_parallelotopeVolumes_noise(pixels, num_endmembers, noise_pix
     # 𝒒_1=𝒅_1/ℎ_1  
     d1 = residuals[:, idx_maxnorm].copy()              # (bands, 1)
     h1 = np.linalg.norm(d1)
-    volumes[1] = np.log(h1)
+    volumes[1] = np.log(h1) if h1 > 1e-15 else -np.inf
     heights[1] = h1
     noise_heights[1] = np.linalg.norm(noise_residuals[:, idx_maxnorm].copy())
     noise_norms_mean[1] = np.mean(np.linalg.norm(noise_residuals, axis=0))
-    q1 = d1 / h1  # (bands,1)
-
-    # Remove the component along the latest orthonormal direction 𝑒_(𝑗−1) from all pixel residuals
-    # 𝒓_𝑗 (𝒙)=𝒓_(𝑗−1)−(𝒒_(𝑗−1)^𝑇 𝒓_(𝑗−1)) 𝒒_(𝑗−1)
-    proj_component = np.outer(q1, np.dot(q1, residuals))  # equivalent to q1*q1.T*residuals in vector operations
-    residuals -= proj_component
-    noise_proj = np.outer(q1, np.dot(q1, noise_residuals))
-    noise_residuals -= noise_proj
+    if h1 > 1e-15:
+        q1 = d1 / h1  # (bands,1)
+        proj_component = np.outer(q1, np.dot(q1, residuals))  # equivalent to q1*q1.T*residuals in vector operations
+        residuals -= proj_component
+        noise_proj = np.outer(q1, np.dot(q1, noise_residuals))
+        noise_residuals -= noise_proj
 
     # The residual vectors are deflated across subsequent iterations 𝑗=2,…,𝑟 to select 𝑟 endmembers
     for j in range(2, num_endmembers):
@@ -217,33 +215,34 @@ def maximumDistance_parallelotopeVolumes_noise(pixels, num_endmembers, noise_pix
         # excluding the indices for 𝒗_0,𝒗_1,𝒗_2,…𝒗_(𝑗−1)
         # 𝒗_𝑗=arg𝑚𝑎𝑥‖𝒓_𝑗 (𝒙)‖
         residual_norm = np.linalg.norm(residuals, axis=0)  # (num_pixels,)
-        residual_norm[selected_indices] = -np.inf
-        idx_new = np.argmax(residual_norm)
+        if len(selected_indices) < num_pixels:
+            residual_norm[selected_indices] = -np.inf
+            idx_new = np.argmax(residual_norm)
+            selected_indices.append(idx_new)
+        else:
+            idx_new = 0
+
         v_j = residuals[:, idx_new].copy()
         endmembers[:, j] = pixels[:, idx_new]
         indices[j] = idx_new
-        selected_indices.append(idx_new)
 
         # Calculate the subsequent height ℎ_𝑗 and orthonormal basis 𝒒_𝑗
         # ℎ_𝑗=‖𝒓_𝑗 (𝒗_𝑗 )‖
         # 𝒒_𝒋=(𝒓_𝑗 (𝒗_𝑗 ))/ℎ_𝑗 
         h_j = np.linalg.norm(v_j)
-        q_j = v_j / h_j
         heights[j] = h_j
         noise_heights[j] = np.linalg.norm(noise_residuals[:, idx_new].copy())
         noise_norms_mean[j] = np.mean(np.linalg.norm(noise_residuals, axis=0))
 
-        # Log volume is the cumulative sum of log orthogonal heights
-        # 〖𝑽𝒐𝒍〗_𝑟=∏ ℎ_𝑗 
-        # Implemented as a sum of logs because of floating point errors
-        volumes[j] = volumes[j - 1] + np.log(h_j)
-
-        # Remove the component along the latest orthonormal direction 𝒒_(𝑗−1) from all pixel residuals
-        # 𝒓_𝑗 (𝒙)=𝒓_(𝑗−1)−(𝒒_(𝑗−1)^𝑇 𝒓_(𝑗−1)) 𝒒_(𝑗−1)
-        proj_component = np.outer(q_j, np.dot(q_j, residuals)) # equivalent to q_j*q_j.T*residuals in vector operations
-        residuals -= proj_component
-        noise_proj = np.outer(q_j, np.dot(q_j, noise_residuals))
-        noise_residuals -= noise_proj
+        if h_j > 1e-15:
+            q_j = v_j / h_j
+            volumes[j] = volumes[j - 1] + np.log(h_j)
+            proj_component = np.outer(q_j, np.dot(q_j, residuals)) # equivalent to q_j*q_j.T*residuals in vector operations
+            residuals -= proj_component
+            noise_proj = np.outer(q_j, np.dot(q_j, noise_residuals))
+            noise_residuals -= noise_proj
+        else:
+            volumes[j] = -np.inf
 
     return endmembers, volumes, heights, indices, noise_heights, noise_norms_mean
 
@@ -393,7 +392,7 @@ def add_gaussian_noise(img, snr=None, seed=42, return_noise=False):
     Injects Additive White Gaussian Noise (AWGN) based on a target linear SNR.
     SNR = mu_signal / sigma_noise, where mu_signal is the mean reflectance.
     """
-    if snr is None:
+    if snr in [None, np.inf]:
         if return_noise:
             return img, np.zeros_like(img)
         return img
@@ -401,14 +400,14 @@ def add_gaussian_noise(img, snr=None, seed=42, return_noise=False):
     np.random.seed(seed)
     mu_signal = np.mean(img)
     # Prevent division by zero if layer is completely dark
-    sigma = mu_signal / snr if mu_signal > 0 else 0.005
+    sigma = mu_signal / snr
     
     noise = np.random.normal(0, sigma, img.shape).astype(np.float32)
     if return_noise:
         return img + noise, noise
     return img + noise
 
-def create_mixture_layer(materials, size, variance=0.45, seed=42):
+def create_mixture_layer(materials, size, variance=1, seed=256):
     """
     Creates a square layer of the given size containing a linear mixture 
     of the provided materials. If one material is provided, it returns a pure layer.
