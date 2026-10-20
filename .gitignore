@@ -198,3 +198,4 @@ data_format_docs/README.md
 
 .env
 agents/
+simulated-data-test/spectral_complexity_vs_pca_plan.md
