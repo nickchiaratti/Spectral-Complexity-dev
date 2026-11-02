@@ -9,14 +9,19 @@ import cupy as cp
 from cupyx.scipy import ndimage
 import pandas as pd
 
-# Configuration for False Color Complexity Composite
+# Complexity Volume calculation method:
+# '3D': Cumulative 3D-Normalized Volume V_cum^(3D)(k) = V_3 + sum_{j=4}^k (prod_{m=1}^j h_m)^(3/j)
+# '3EM': Volume produced by 3 endmembers V_3 = P[2] = h_1 * h_2 * h_3
+# 'maxVol': Original method choosing maximum value of the running products P
+VOLUME_METHOD = '3D'  # Options: '3D', '3EM', 'maxVol'
 
-TILE_SIZES = [5,35,101]# 19,31,41,61,81,101]
+TILE_SIZES = [3,7,15]# 19,31,41,61,81,101]
 NOISE_SOURCES = ['ssd', 'mlr', 'dct', 'mnf']
 
 FALSE_COLOR_R_TILE = TILE_SIZES[0]
 FALSE_COLOR_G_TILE = TILE_SIZES[len(TILE_SIZES)//2]
 FALSE_COLOR_B_TILE = TILE_SIZES[-1] # Adjusted for HySpex default tiles (3, 5, 7, 9)
+FALSE_COLOR_POWER = 2.0  # Nonlinear scaling exponent to amplify high values and make white pixels distinct (>1 enhances contrast of high values)
 
 OVERLAY_GROUND_TRUTH=True
 GROUND_TRUTH_FILE=r"C:\satelliteImagery\ground_truth\GPS_GE18_Landmine_UXO_locations.xlsx"
@@ -29,6 +34,7 @@ def main():
     root.withdraw()
     
     file_path = filedialog.askopenfilename(
+
         title="Select HySpex HDF5 File",
         filetypes=[("HDF5 files", "*.h5"), ("All files", "*.*")]
     )
@@ -58,6 +64,9 @@ def main():
             surface_reflectance_ds = grp['surface_reflectance']
             wavelengths = surface_reflectance_ds.attrs['wavelengths']
             scale_factor = surface_reflectance_ds.attrs.get('Scale_Factor', [10000.0])[0]
+            B = len(wavelengths)
+            h_crit = 0.010 * np.sqrt(B)
+            print(f"Spectral Bands B = {B}, 1% Critical Threshold h_crit = {h_crit:.4f}")
             
             # ortho_vis from HySpex translator is (1, 4, L, S) or (4, L, S)
             if ortho_vis.ndim == 3 and ortho_vis.shape[0] in [3, 4]:
@@ -79,6 +88,21 @@ def main():
                 if nm_name in grp and h_name in grp:
                     nm_data = np.squeeze(grp[nm_name][:])
                     h_data = np.squeeze(grp[h_name][:])
+                    
+                    if VOLUME_METHOD == '3D':
+                        h_nz = np.maximum(h_data[..., 1:], 1e-12)
+                        P_map = np.cumprod(h_nz, axis=-1)
+                        k_steps = np.arange(1, h_nz.shape[-1] + 1, dtype=np.float32)
+                        v_terms = P_map ** (3.0 / k_steps)
+                        v_3d = P_map[..., 2] + np.sum(v_terms[..., 3:], axis=-1)
+                        nm_data = np.log(np.maximum(v_3d, 1e-12))
+                    elif VOLUME_METHOD == '3EM':
+                        h_nz = np.maximum(h_data[..., 1:], 1e-12)
+                        v_3em = h_nz[..., 0] * h_nz[..., 1] * h_nz[..., 2]
+                        nm_data = np.log(np.maximum(v_3em, 1e-12))
+                    elif VOLUME_METHOD == 'maxVol':
+                        # Use stored neighborhood_map (precomputed maxVol from process_metrics.py)
+                        pass
                     
                     if SPATIAL_AVERAGE:
                         
@@ -123,7 +147,7 @@ def main():
             fig_ortho, axes_ortho = plt.subplots(1, num_plots, figsize=(18, 10))
             if num_plots == 1:
                 axes_ortho = [axes_ortho]
-            fig_ortho.canvas.manager.set_window_title('Map Geometry (Orthorectified)')
+            fig_ortho.canvas.manager.set_window_title(f'Map Geometry (Orthorectified - {VOLUME_METHOD})')
             fig_ortho.tight_layout(pad=0.1)
             axes_ortho = np.array(axes_ortho).flatten()
             
@@ -161,7 +185,7 @@ def main():
                 
                 im = ax.imshow(nm, cmap='gist_rainbow', vmin=plot_vmin, vmax=plot_vmax)
                 ax.set_title(f"Ortho Comp ({t}x{t})")
-                plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04).set_label("ln(Complexity Volume)")
+                plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04).set_label(f"ln(Complexity Volume - {VOLUME_METHOD})")
                 ax_tile_map_ortho[ax] = t
                 ax.axis('off')
             
@@ -245,7 +269,6 @@ def main():
                 
                 global_min_h, global_max_h = np.inf, -np.inf
                 global_min_v, global_max_v = np.inf, -np.inf
-                global_min_v2, global_max_v2 = np.inf, -np.inf
                 for t in loaded_tile_sizes:
                     if t in ortho_heights:
                         h_vals = ortho_heights[t][map_y, map_x, :]
@@ -254,32 +277,47 @@ def main():
                             global_min_h = min(global_min_h, np.min(rel_h))
                             global_max_h = max(global_max_h, np.max(rel_h))
                             
-                        if len(h_vals) > 0:
-                            safe_h = np.where(h_vals <= 0, 1.0, h_vals)
-                            v_vals = np.cumprod(safe_h)
-                            global_min_v = min(global_min_v, np.min(v_vals))
-                            global_max_v = max(global_max_v, np.max(v_vals))
+                        if len(h_vals) > 3:
+                            h_nz = h_vals[1:]
+                            safe_hnz = np.maximum(h_nz, 1e-12)
+                            P = np.cumprod(safe_hnz)
                             
-                            e_vals = np.arange(1, len(v_vals) + 1)
-                            v_vals_adj = (v_vals ** (1.0 / e_vals)) / np.sqrt(e_vals)
-                            global_min_v2 = min(global_min_v2, np.min(v_vals_adj))
-                            global_max_v2 = max(global_max_v2, np.max(v_vals_adj))
+                            if VOLUME_METHOD == '3D':
+                                k_steps = np.arange(1, len(h_nz) + 1)
+                                v_3d_terms = P ** (3.0 / k_steps)
+                                v_cum_3d = np.full(len(h_vals), np.nan)
+                                v_cum_3d[3] = P[2]
+                                for idx_k in range(3, len(h_nz)):
+                                    v_cum_3d[idx_k + 1] = v_cum_3d[idx_k] + v_3d_terms[idx_k]
+                                valid_v = v_cum_3d[~np.isnan(v_cum_3d)]
+                                if len(valid_v) > 0:
+                                    global_min_v = min(global_min_v, np.min(valid_v))
+                                    global_max_v = max(global_max_v, np.max(valid_v))
+                            elif VOLUME_METHOD == '3EM':
+                                v3 = P[2]
+                                global_min_v = min(global_min_v, v3 * 0.8)
+                                global_max_v = max(global_max_v, v3 * 1.2)
+                            elif VOLUME_METHOD == 'maxVol':
+                                global_min_v = min(global_min_v, np.min(P[2:]))
+                                global_max_v = max(global_max_v, np.max(P[2:]))
                                     
                 if not np.isinf(global_min_h) and not np.isinf(global_max_h):
+                    global_min_h = min(global_min_h, 0.0, h_crit * 0.8)
+                    global_max_h = max(global_max_h, h_crit * 1.5)
                     pad_h = (global_max_h - global_min_h) * 0.05
                     if pad_h == 0: pad_h = 0.1
                     global_min_h -= pad_h
                     global_max_h += pad_h
                     
-                if not np.isinf(global_min_v):
-                    global_min_v = max(1e-50, global_min_v) * 0.5
-                    global_max_v = max(1e-50, global_max_v) * 2.0
-                    
-                if not np.isinf(global_min_v2):
-                    pad_v2 = (global_max_v2 - global_min_v2) * 0.05
-                    if pad_v2 == 0: pad_v2 = 0.1
-                    global_min_v2 -= pad_v2
-                    global_max_v2 += pad_v2
+                if not np.isinf(global_min_v) and not np.isinf(global_max_v):
+                    if VOLUME_METHOD in ['3D', '3EM']:
+                        pad_v = (global_max_v - global_min_v) * 0.05
+                        if pad_v == 0: pad_v = 0.1
+                        global_min_v = max(0.0, global_min_v - pad_v)
+                        global_max_v += pad_v
+                    else:  # maxVol (log scale)
+                        global_min_v = max(1e-50, global_min_v) * 0.5
+                        global_max_v = max(1e-50, global_max_v) * 2.0
                 
                 for idx, t in enumerate(loaded_tile_sizes):
                     ax_img = ax_img_row[idx]
@@ -310,12 +348,69 @@ def main():
                         heights = ortho_heights[t][map_y, map_x, :]
                         endmembers = np.arange(1, len(heights) + 1)
                         
-                        safe_heights = np.where(heights <= 0, 1.0, heights)
-                        volumes = np.cumprod(safe_heights)
+                        # 1% Critical Threshold stopping rule: h_crit = 0.010 * sqrt(B)
+                        # Non-zero orthogonal heights are at indices 1..len(heights)-1
+                        h_nz = heights[1:]
+                        below_thresh = np.where(h_nz < h_crit)[0]
+                        if len(below_thresh) > 0:
+                            m_stop = int(below_thresh[0])  # number of signal dimensions above threshold
+                        else:
+                            m_stop = len(h_nz)
+                        stop_k = max(1, m_stop + 1)  # endmember index (material count)
+                        
+                        K = len(heights)
+                        volumes = np.full(K, np.nan)
+                        safe_hnz = np.maximum(h_nz, 1e-12)
+                        P = np.cumprod(safe_hnz)
+                        max_p_k = None
+                        max_p_val = None
+
+                        if VOLUME_METHOD == '3D':
+                            # Cumulative 3D-Normalized Volume:
+                            # V_cum^(3D)(k) = V_3 + sum_{j=4}^k (prod_{m=1}^j h_m)^(3/j) for k >= 4
+                            # with base V_cum^(3D)(3) = V_3 = h_1 * h_2 * h_3 at k=4 (index 3 in heights)
+                            if K > 3:
+                                k_steps = np.arange(1, len(h_nz) + 1)
+                                v_3d_terms = P ** (3.0 / k_steps)
+                                volumes[3] = P[2]  # V_3 = h1 * h2 * h3
+                                for idx_k in range(3, len(h_nz)):
+                                    volumes[idx_k + 1] = volumes[idx_k] + v_3d_terms[idx_k]
+                            y_scale = 'linear'
+                            vol_label = r'Cumul 3D Vol $V_{\mathrm{cum}}^{(3\mathrm{D})}$'
+                            vol_ylabel = r"Cumulative 3D Volume $V_{\mathrm{cum}}^{(3\mathrm{D})}$"
+                            val_stop = volumes[stop_k - 1] if (stop_k <= len(volumes) and not np.isnan(volumes[stop_k - 1])) else volumes[-1]
+                            metric_str = f"V_3D={val_stop:.3f}" if not np.isnan(val_stop) else "V_3D=N/A"
+
+                        elif VOLUME_METHOD == '3EM':
+                            # Volume produced by 3 endmembers: V_3 = P[2] = h1 * h2 * h3
+                            if K > 3:
+                                volumes[3:] = P[2]
+                            y_scale = 'linear'
+                            v3_val = P[2] if len(P) > 2 else np.nan
+                            vol_label = rf'3EM Vol ($V_3 = {v3_val:.3f}$)' if not np.isnan(v3_val) else '3EM Vol'
+                            vol_ylabel = r"3-Endmember Volume $V_3$"
+                            metric_str = f"V_3EM={v3_val:.3f}" if not np.isnan(v3_val) else "V_3EM=N/A"
+
+                        elif VOLUME_METHOD == 'maxVol':
+                            # Original method choosing the maximum value of the products P
+                            volumes[1:] = P
+                            if len(P) > 2:
+                                max_p_val = np.max(P[2:])
+                                max_p_k = int(np.argmax(P[2:]) + 4)
+                                vol_label = rf'Product $P$ (max={max_p_val:.2e})'
+                                metric_str = f"maxVol={max_p_val:.3f} (k={max_p_k})"
+                            else:
+                                vol_label = 'Product P'
+                                metric_str = "maxVol=N/A"
+                            y_scale = 'log'
+                            vol_ylabel = "Volume (Products P)"
+                        
                         deriv = np.gradient(heights)
                         
                         ax_h.plot(endmembers, heights, marker='o', linestyle='-', color='blue', label='Heights')
                         ax_h.plot(endmembers, -deriv, marker='^', linestyle=':', color='green', label='Derivative')
+                        ax_h.axhline(h_crit, color='black', linestyle='--', linewidth=1.5, label=f'1% Threshold ({h_crit:.3f})')
+                        ax_h.axvline(stop_k, color='dimgray', linestyle=':', linewidth=1.5, label=f'Stop (k={stop_k})')
                         
                         # Plot Noise Heights based on the configured sources
                         colors = ['purple', 'orange', 'brown', 'cyan']
@@ -324,23 +419,21 @@ def main():
                                 n_heights = ortho_noise_heights[t][src][map_y, map_x, :]
                                 ax_h.plot(endmembers, n_heights, marker='s', linestyle='--', color=colors[idx_src % len(colors)], label=f'Noise ({src.upper()})')
                                 
-                        ax_h_twin.plot(endmembers, volumes, marker='s', linestyle='--', color='red', label='Volume')
+                        ax_h_twin.plot(endmembers, volumes, marker='s', linestyle='--', color='red', label=vol_label)
+                        if VOLUME_METHOD == 'maxVol' and max_p_val is not None:
+                            ax_h_twin.plot(max_p_k, max_p_val, marker='*', markersize=12, color='darkred', label=f'maxVol ({max_p_val:.2e})')
+                        elif VOLUME_METHOD == '3EM' and len(P) > 2:
+                            ax_h_twin.plot(4, P[2], marker='*', markersize=12, color='darkred', label=f'3EM ($V_3={P[2]:.3f}$)')
                         
-                        adj_volumes = (volumes ** (1.0 / endmembers)) / np.sqrt(endmembers)
-                        ax_h_twin2.plot(endmembers, adj_volumes, marker='d', linestyle='-.', color='magenta', label='Adj Volume')
-                        
-                        ax_h_twin.set_ylabel("Volume")
+                        ax_h_twin.set_ylabel(vol_ylabel, color='red')
+                        ax_h_twin.tick_params(axis='y', labelcolor='red')
                         ax_h_twin.yaxis.set_label_position("right")
                         ax_h_twin.yaxis.tick_right()
-                        ax_h_twin.set_yscale('log')
+                        ax_h_twin.set_yscale(y_scale)
                         
-                        ax_h_twin2.set_ylabel("Adj Volume")
-                        ax_h_twin2.yaxis.set_label_position("right")
-                        ax_h_twin2.spines["right"].set_position(("axes", 1.15))
-                        ax_h_twin2.yaxis.tick_right()
-                        ax_h_twin2.set_yscale('linear')
+                        ax_h_twin2.set_visible(False)
                         
-                        title_str = f"Tile {t}x{t} at Map ({map_x}, {map_y})"
+                        title_str = f"Tile {t}x{t} at Map ({map_x}, {map_y}) [Stop k={stop_k}, {metric_str}]"
                         ax_h.set_title(title_str)
                         ax_h.set_ylabel("Orthogonal Height")
                         ax_h.grid(True)
@@ -348,13 +441,10 @@ def main():
                             ax_h.set_ylim(global_min_h, global_max_h)
                         if not np.isinf(global_min_v):
                             ax_h_twin.set_ylim(global_min_v, global_max_v)
-                        if not np.isinf(global_min_v2):
-                            ax_h_twin2.set_ylim(global_min_v2, global_max_v2)
                         if idx == 0:
                             h1, l1 = ax_h.get_legend_handles_labels()
                             h2, l2 = ax_h_twin.get_legend_handles_labels()
-                            h3, l3 = ax_h_twin2.get_legend_handles_labels()
-                            ax_h.legend(h1+h2+h3, l1+l2+l3, loc='upper right', fontsize='small')
+                            ax_h.legend(h1+h2, l1+l2, loc='upper right', fontsize='small')
                         if idx == len(loaded_tile_sizes) - 1:
                             ax_h.set_xlabel("Endmember Index")
                             
@@ -417,12 +507,14 @@ def main():
             
             # --- Figure 2: False Color Composite ---
             if FALSE_COLOR_R_TILE in ortho_nms and FALSE_COLOR_G_TILE in ortho_nms and FALSE_COLOR_B_TILE in ortho_nms:
-                def normalize_map(m):
+                def normalize_map(m, power=FALSE_COLOR_POWER):
                     m_valid = m.compressed() if np.ma.is_masked(m) else m[~np.isnan(m)]
                     vmin, vmax = np.percentile(m_valid, [2, 98]) if m_valid.size > 0 else (0, 1)
                     if vmax == vmin:
                         vmax = vmin + 1e-5
                     norm_m = np.clip((m - vmin) / (vmax - vmin), 0, 1)
+                    if power != 1.0:
+                        norm_m = np.power(norm_m, power)
                     if np.ma.is_masked(norm_m):
                         norm_m = norm_m.filled(0)
                     else:
@@ -440,7 +532,7 @@ def main():
                 fig_fc.tight_layout(pad=0.1)
                 
                 axes_fc.imshow(rgb_ortho)
-                axes_fc.set_title(f"Orthorectified False Color (R={FALSE_COLOR_R_TILE}, G={FALSE_COLOR_G_TILE}, B={FALSE_COLOR_B_TILE})")
+                axes_fc.set_title(f"Orthorectified False Color ({VOLUME_METHOD}, p={FALSE_COLOR_POWER}) (R={FALSE_COLOR_R_TILE}, G={FALSE_COLOR_G_TILE}, B={FALSE_COLOR_B_TILE})")
                 axes_fc.axis('off')
                 
                 fig_fc.tight_layout()

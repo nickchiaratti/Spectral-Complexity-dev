@@ -12,17 +12,19 @@ if str(script_dir.parent) not in sys.path:
 import SpecComplex as sc
 import spectral
 import matplotlib.pyplot as plt
-import tkinter as tk
-from tkinter import filedialog
 from scipy.interpolate import interp1d
 from scipy.signal import savgol_filter
 
-HDR_PATH = r"F:\GlobusData\hyspex\20250918_GE18\dual\GE18_55m_02_Mjolnir_float32_geo_VS620.hdr"
-OUTPUT_DIR = r"C:\satelliteImagery\hyspex\20250918_GE18\dual"
-RUN_ID = "20250918_ge18_55m_02"
+HDR_PATH = [
+    "F:/GlobusData/hyspex/20250918_GE18/dual/GE18_55m_01_Mjolnir_float32_geo_VS620.hdr",
+    "F:/GlobusData/hyspex/20250918_GE18/dual/GE18_55m_02_Mjolnir_float32_geo_VS620.hdr",
+]
+OUTPUT_DIR = "C:/satelliteImagery/hyspex/20250918_GE18/dual"
+CALIBRATION_FILE = "C:/satelliteImagery/hyspex/calibration_targets/elm_calibration_GE18_55m_01.npz"
+
 
 WAVELENGTH_CUTOFF= 2440
-NOISE_ESTIMATIONS = ['ssd', 'nfd']
+NOISE_ESTIMATIONS = ['ssd']#, 'nfd']
     
 
 # Assuming you have an estimate_noise module in the parent or SpecTIR directory
@@ -36,34 +38,10 @@ except ImportError:
         sys.path.insert(0, str(spectir_dir))
     import estimate_noise
 
-def get_max_valid_rectangle(mask):
-    """
-    Finds the maximum area rectangle of True values in a 2D boolean array.
-    Returns (y, x, height, width) of the largest fully-valid sub-region.
-    """
-    rows, cols = mask.shape
-    max_area = 0
-    best_rect = (0, 0, 0, 0)
-    
-    heights = np.zeros(cols, dtype=int)
-    for r in range(rows):
-        heights = np.where(mask[r], heights + 1, 0)
-        stack = []
-        for c in range(cols + 1):
-            h = heights[c] if c < cols else 0
-            start = c
-            while stack and stack[-1][1] > h:
-                idx, val = stack.pop()
-                area = val * (c - idx)
-                if area > max_area:
-                    max_area = area
-                    best_rect = (r - val + 1, idx, val, c - idx)
-                start = idx
-            stack.append((start, h))
-            
-    return best_rect
+# Backward-compatibility alias
+get_max_valid_rectangle = estimate_noise.get_max_valid_rectangle
 
-def plot_snr_spectrum(X, noise_covariances, wavelengths, run_id, output_dir):
+def plot_snr_spectrum(X, noise_covariances, wavelengths, run_id, output_dir, method_signal_variances=None):
     N, p = X.shape
     if wavelengths is None:
         wavelengths = np.arange(1, p + 1)
@@ -72,38 +50,67 @@ def plot_snr_spectrum(X, noise_covariances, wavelengths, run_id, output_dir):
         x_label = "Wavelength (nm)"
         
     data_variances = np.var(X, axis=0, ddof=1)
-    plt.figure(figsize=(10, 6))
-    
-    for method_name, cov_matrix in noise_covariances.items():
+    num_methods = len(noise_covariances)
+    if num_methods == 0:
+        return
+
+    # Palette for distinct estimation methods
+    colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd']
+
+    # Use separate subplots (axes) for each noise estimation method to handle disparate scales cleanly
+    fig, axes = plt.subplots(num_methods, 1, figsize=(11, 4 * num_methods), sharex=True)
+    if num_methods == 1:
+        axes = [axes]
+
+    for i, (method_name, cov_matrix) in enumerate(noise_covariances.items()):
+        ax = axes[i]
+        c = colors[i % len(colors)]
+        
         noise_variances = np.diag(cov_matrix)
-        signal_variances = data_variances - noise_variances
+        if method_signal_variances and method_name in method_signal_variances:
+            base_data_var = method_signal_variances[method_name]
+        else:
+            base_data_var = data_variances
+            
+        signal_variances = base_data_var - noise_variances
         
         epsilon = 1e-10
         signal_variances = np.clip(signal_variances, a_min=epsilon, a_max=None)
         noise_variances = np.clip(noise_variances, a_min=epsilon, a_max=None)
         
         snr_linear = signal_variances / noise_variances
-        plt.plot(wavelengths, snr_linear, label=f"{method_name}", linewidth=1.5)
+        ax.plot(wavelengths, snr_linear, label=f"{method_name}", color=c, linewidth=1.5)
         
-    plt.title(f"Band-by-Band SNR Comparison - {run_id}")
-    plt.xlabel(x_label)
-    plt.ylabel("SNR (Linear)")
-    plt.legend(loc='upper right')
-    plt.grid(True, linestyle='--', alpha=0.7)
-    plt.axhline(1, color='black', linewidth=1, linestyle='-')
+        # Atmospheric water absorption shading
+        ax.axvspan(1350, 1450, color='#e0e0e0', alpha=0.45)
+        ax.axvspan(1800, 2050, color='#e0e0e0', alpha=0.45)
+        ax.axhline(1, color='black', linewidth=1, linestyle='--', alpha=0.5, label='SNR = 1')
+        
+        ax.set_ylabel(f"{method_name} SNR (Linear)", color=c, fontweight='bold', fontsize=11)
+        ax.tick_params(axis='y', labelcolor=c)
+        ax.grid(True, linestyle='--', alpha=0.7)
+        ax.legend(loc='upper right', fontsize=10)
+        ax.set_title(f"{method_name} Noise Estimation - Linear SNR", fontsize=12, fontweight='bold')
+
+    axes[-1].set_xlabel(x_label, fontsize=11)
+    fig.suptitle(f"Band-by-Band SNR Comparison - {run_id}", fontsize=14, fontweight='bold', y=0.995)
     
-    plt.tight_layout(pad=0.1)
+    plt.tight_layout(pad=1.2)
     plt.savefig(os.path.join(output_dir, f"snr_spectrum_{run_id}.png"), dpi=400)
     plt.close()
 
 
-def process_hyspex_to_h5(input_hdr, output_dir, run_id):
+def process_hyspex_to_h5(input_hdr, output_dir, calibration_file=CALIBRATION_FILE):
     if not os.path.exists(input_hdr):
         print(f"File not found: {input_hdr}")
         return
 
-    output_h5 = os.path.join(output_dir, f"HySpex_Ortho_Stack_{run_id}.h5")
+    os.makedirs(output_dir, exist_ok=True)
+    hdr_path = Path(input_hdr)
+    run_id = hdr_path.stem
+    output_h5 = os.path.join(output_dir, hdr_path.with_suffix('.h5').name)
     print(f"\n--- Processing HySpex Orthorectified Data: {run_id} ---")
+    print(f"Output HDF5: {output_h5}")
     
     # Determine expected image file based on header file name
     base_name = os.path.splitext(input_hdr)[0]
@@ -201,25 +208,19 @@ def process_hyspex_to_h5(input_hdr, output_dir, run_id):
     gdal_transform[3] = gdal_transform[3] + min_y * gdal_transform[5]
     
     # --- Empirical Line Calibration (ELM) ---
-    root = tk.Tk()
-    root.withdraw()
-    root.attributes('-topmost', True)
-    elm_files = filedialog.askopenfilenames(
-        title="Select ELM Calibration .npz file (Cancel to skip)",
-        filetypes=[("NPZ files", "*.npz"), ("All files", "*.*")]
-    )
-    
     elm_gain = None
     elm_offset = None
     
-    if elm_files and elm_files[0].endswith('.npz'):
-        print(f"\n--- Loading existing ELM Calibration from {elm_files[0]} ---")
-        cal_data = np.load(elm_files[0])
+    if calibration_file and os.path.exists(calibration_file):
+        print(f"\n--- Loading existing ELM Calibration from {calibration_file} ---")
+        cal_data = np.load(calibration_file)
         elm_gain = cal_data['gain']
         elm_offset = cal_data['offset']
         if WAVELENGTH_CUTOFF is not None:
             elm_gain = elm_gain[valid_bands_idx]
             elm_offset = elm_offset[valid_bands_idx]
+    elif calibration_file:
+        raise FileNotFoundError(f"Specified CALIBRATION_FILE not found: {calibration_file}")
     else:
         print("\n--- No ELM Calibration provided. Proceeding without reflectance conversion ---")
     # --- End ELM ---
@@ -233,8 +234,16 @@ def process_hyspex_to_h5(input_hdr, output_dir, run_id):
     valid_mask_subset = np.all(subset != fill_value, axis=2)
     
     noise_covs = {}
+    method_signal_vars = {}
     if 'ssd' in NOISE_ESTIMATIONS:
-        noise_covs['SSD'] = estimate_noise.estimate_noise_ssd(subset_float, valid_mask_subset)
+        print("Executing estimate_noise.estimate_noise_ssd with local homogeneity filtering...")
+        ssd_cov, ssd_sig_var = estimate_noise.estimate_noise_ssd(
+            subset_float, 
+            valid_mask_subset, 
+            return_signal_variance=True
+        )
+        noise_covs['SSD'] = ssd_cov
+        method_signal_vars['SSD'] = ssd_sig_var
     if 'mlr' in NOISE_ESTIMATIONS:
         noise_covs['MLR'] = estimate_noise.estimate_noise_mlr(subset_float, valid_mask_subset)
     if 'dct' in NOISE_ESTIMATIONS:
@@ -242,21 +251,19 @@ def process_hyspex_to_h5(input_hdr, output_dir, run_id):
     if 'mnf' in NOISE_ESTIMATIONS:
         noise_covs['MNF'] = estimate_noise.estimate_noise_mnf(subset_float, valid_mask_subset)
     if 'nfd' in NOISE_ESTIMATIONS:
-        # spectral.noise_from_diffs requires a contiguous unmasked HSI cube (rows, cols, bands)
-        # Find the max rectangle that contains NO fill_values to prevent edge-gradient artifacts
-        ry, rx, rh, rw = get_max_valid_rectangle(valid_mask_subset)
-        if rh > 10 and rw > 10:
-            print(f"Executing spectral.noise_from_diffs on inscribed contiguous {rh}x{rw} region...")
-            # Extract inscribed rectangle and transpose to SPy format (H, W, B)
-            nfd_subset = np.transpose(subset_float[:, ry:ry+rh, rx:rx+rw], (1, 2, 0))
-            nfd_stats = spectral.noise_from_diffs(nfd_subset)
-            noise_covs['NFD'] = nfd_stats.cov
-        else:
-            print("Warning: Could not find a large enough contiguous valid area for NFD. Skipping.")
+        print("Executing estimate_noise.estimate_noise_nfd with edge artifact scrubbing...")
+        nfd_cov, nfd_sig_var = estimate_noise.estimate_noise_nfd(
+            subset_float,
+            valid_mask_subset,
+            scrub_edge_artifacts=True,
+            return_signal_variance=True
+        )
+        noise_covs['NFD'] = nfd_cov
+        method_signal_vars['NFD'] = nfd_sig_var
     
     print("Generating SNR Spectrum Plot...")
     X_valid = np.transpose(subset_float, (1, 2, 0))[valid_mask_subset]
-    plot_snr_spectrum(X_valid, noise_covs, wavelengths, run_id, output_dir)
+    plot_snr_spectrum(X_valid, noise_covs, wavelengths, run_id, output_dir, method_signal_variances=method_signal_vars)
     
     del subset_float
     del X_valid
@@ -339,7 +346,7 @@ def process_hyspex_to_h5(input_hdr, output_dir, run_id):
         ds_vis.attrs['GeoTransform'] = np.array(gdal_transform, dtype='float64')
         
         # Identify Water Absorption Bands
-        is_water_band = ((wavelengths > 1350) & (wavelengths < 1450)) | ((wavelengths > 1800) & (wavelengths < 1950))
+        is_water_band = ((wavelengths >= 1350.0) & (wavelengths <= 1450.0)) | ((wavelengths >= 1800.0) & (wavelengths <= 2050.0))
         
         # Chunked Processing to populate HDF5 datasets
         print("Processing surface reflectance and RGBA chunks...")
@@ -398,7 +405,7 @@ def process_hyspex_to_h5(input_hdr, output_dir, run_id):
                 
                 # Generate RGBA on <1000nm subset
                 chunk_vis = chunk_float_t[vis_bands, :, :]
-                rgba_chunk = sc.generate_rgba_from_hsi(frame_data=chunk_vis, wavelengths=vis_wavelengths, nodata=scaled_fill_val, scale=1.0)
+                rgba_chunk = sc.generate_rgba_from_hsi(frame_data=chunk_vis, wavelengths=vis_wavelengths, nodata=scaled_fill_val)
                 rgba_chunk_t = np.transpose(rgba_chunk, (2, 0, 1))
                 ds_vis[0, :, y_out:y_out_end, x_out:x_out_end] = rgba_chunk_t
 
@@ -406,7 +413,7 @@ def process_hyspex_to_h5(input_hdr, output_dir, run_id):
         # Load the assembled RGBA dataset back for PNG export (it is lightweight 8-bit)
         rgba_img_raw_t = ds_vis[0, :, :, :]
         rgba_img_raw = np.transpose(rgba_img_raw_t, (1, 2, 0))
-        png_path = os.path.join(output_dir, f"HySpex_{run_id}_ortho_vis_preview.png")
+        png_path = os.path.join(output_dir, f"{run_id}_ortho_vis_preview.png")
         img_pil = Image.fromarray(rgba_img_raw, 'RGBA')
         img_pil.save(png_path, dpi=(600, 600))
         print(f"Saved: {png_path}")
@@ -414,5 +421,6 @@ def process_hyspex_to_h5(input_hdr, output_dir, run_id):
     print(f"Synthesis Complete. Stack Stored at: {output_h5}")
 
 if __name__ == "__main__":
-    
-    process_hyspex_to_h5(HDR_PATH, OUTPUT_DIR, RUN_ID)
+    hdr_inputs = [HDR_PATH] if isinstance(HDR_PATH, (str, Path)) else HDR_PATH
+    for hdr in hdr_inputs:
+        process_hyspex_to_h5(hdr, OUTPUT_DIR, calibration_file=CALIBRATION_FILE)

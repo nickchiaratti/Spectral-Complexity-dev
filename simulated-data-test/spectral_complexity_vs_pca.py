@@ -36,6 +36,9 @@ plt.rcParams['axes.prop_cycle'] = plt.cycler(color=plt.colormaps['okabe_ito'].co
 DEFAULT_OUTPUT_DIR = r"C:\satelliteImagery\simulated\spectral_complexity_vs_pca"
 SNR=np.inf
 TILE_SIZE = 3
+SHOT_NOISE_FRACTION=0.7
+SNR_set = [10,30,50,75,100,200,500,np.inf]
+TILE_SIZE_set = [3,15,35,55,101]
 
 # Add current directory to path if needed
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -49,11 +52,13 @@ from simulate_inset_squares import (
     rsWorldView3_HTML_INDEX_PATH, rsWorldView3_WV_FILE,
     cvHYMAP2014_HTML_INDEX_PATH, cvHYMAP2014_WV_FILE,
     cvAVIRISc2014_HTML_INDEX_PATH, cvAVIRISc2014_WV_FILE,
-    NICKS_LEAVES_DIR,
+    cvHySpexMjolnir_WV_FILE, cvHySpexMjolnir_FWHM_FILE,
+    cvHySpex_WV_FILE, cvHySpex_FWHM_FILE,
+    NICKS_LEAVES_DIR, CALIBRATION_TARGETS_DIR,
     maximumDistance_parallelotopeVolumes_noise,
     maximumDistance_parallelotopeVolumes,
     create_mixture_layer,
-    add_gaussian_noise,
+    add_wavelength_scaled_noise,
     lookup_material_file,
     load_asd_txt,
     generate_rgba_from_hsi
@@ -102,8 +107,49 @@ SENSOR_CONFIGS = {
         "wv_file": cvASD_WV_FILE,
         "nominal_bands": 2151,
         "is_multispectral": False
+    },
+    "cvHySpexMjolnir": {
+        "display_name": "HySpex Mjolnir",
+        "html_index": cvASD_HTML_INDEX_PATH,
+        "wv_file": cvHySpexMjolnir_WV_FILE,
+        "fwhm_file": cvHySpexMjolnir_FWHM_FILE,
+        "nominal_bands": 413,
+        "is_multispectral": False,
+        "is_custom_resampled": True
+    },
+    "cvHySpex": {
+        "display_name": "HySpex Mjolnir",
+        "html_index": cvASD_HTML_INDEX_PATH,
+        "wv_file": cvHySpex_WV_FILE,
+        "fwhm_file": cvHySpex_FWHM_FILE,
+        "nominal_bands": 413,
+        "is_multispectral": False,
+        "is_custom_resampled": True
     }
 }
+
+# Module-level spectral caching and Gaussian SRF convolution for custom resampled sensors
+_material_spectral_cache = {}
+_cached_asd_wav_nm = None
+
+def resample_asd_to_sensor(asd_spectrum, asd_wavelengths_nm, sensor_cw_nm, sensor_fwhm_nm):
+    """
+    Vectorized Gaussian Spectral Response Function (SRF) convolution to resample
+    a 2151-channel (350-2500 nm) ASD spectrum to a sensor's bandpass specification.
+    """
+    valid = ~np.isnan(asd_spectrum) & ~np.isnan(asd_wavelengths_nm)
+    if not np.any(valid):
+        return np.full_like(sensor_cw_nm, np.nan, dtype=np.float32)
+    w_val = asd_wavelengths_nm[valid]
+    r_val = asd_spectrum[valid].astype(np.float64)
+    
+    diff = w_val[None, :] - sensor_cw_nm[:, None]
+    srf = np.exp(-4.0 * np.log(2.0) * (diff / sensor_fwhm_nm[:, None])**2)
+    sum_srf = srf.sum(axis=1)
+    
+    resampled = (srf @ r_val) / np.where(sum_srf > 0, sum_srf, 1.0)
+    resampled[sum_srf <= 0] = np.nan
+    return resampled.astype(np.float32)
 
 # --- Demonstration Scenarios ---
 SCENARIOS = {
@@ -456,15 +502,47 @@ def run_scenario_on_sensor(scenario_id, sensor_id, soup=None, snr=None, tile_siz
     # 2. Load material spectra for this sensor
     loaded_materials = {}
     for mat_name in sc_cfg["materials"]:
+        cache_key = (sensor_id, mat_name)
+        if cache_key in _material_spectral_cache:
+            loaded_materials[mat_name] = _material_spectral_cache[cache_key].copy()
+            continue
+            
         if mat_name.startswith("NICKLEAVES:"):
             # Load user-collected leaf spectra from sensor-resampled CSV
             leaf_id = mat_name.split(":", 1)[1]
             csv_path = os.path.join(NICKS_LEAVES_DIR, f"{sensor_id}_{leaf_id}.csv")
+            if not os.path.exists(csv_path) and sensor_id in ["cvHySpex", "cvHySpexMjolnir"]:
+                alt_sensor = "cvHySpexMjolnir" if sensor_id == "cvHySpex" else "cvHySpex"
+                alt_path = os.path.join(NICKS_LEAVES_DIR, f"{alt_sensor}_{leaf_id}.csv")
+                if os.path.exists(alt_path):
+                    csv_path = alt_path
             df_leaf = pd.read_csv(csv_path)
-            loaded_materials[mat_name] = df_leaf['DHR_mean'].values.astype(np.float32)
+            mat_data = df_leaf['DHR_mean'].values.astype(np.float32)
+        elif mat_name.startswith("CALTARGET:") or mat_name.startswith("CALIBRATION:"):
+            target_id = mat_name.split(":", 1)[1]
+            csv_path = os.path.join(CALIBRATION_TARGETS_DIR, f"{sensor_id}_{target_id}.csv")
+            if not os.path.exists(csv_path) and sensor_id in ["cvHySpex", "cvHySpexMjolnir"]:
+                alt_sensor = "cvHySpexMjolnir" if sensor_id == "cvHySpex" else "cvHySpex"
+                alt_path = os.path.join(CALIBRATION_TARGETS_DIR, f"{alt_sensor}_{target_id}.csv")
+                if os.path.exists(alt_path):
+                    csv_path = alt_path
+            df_cal = pd.read_csv(csv_path)
+            mat_data = df_cal['DHR_mean'].values.astype(np.float32)
         else:
             mat_file = lookup_material_file(html_index_path, mat_name, soup=soup)
-            loaded_materials[mat_name] = load_asd_txt(mat_file)
+            raw_asd = load_asd_txt(mat_file)
+            if sensor_cfg.get("is_custom_resampled", False):
+                global _cached_asd_wav_nm
+                if _cached_asd_wav_nm is None:
+                    _cached_asd_wav_nm = load_asd_txt(cvASD_WV_FILE) * 1000.0
+                s_wav_nm = load_asd_txt(sensor_cfg["wv_file"]) * 1000.0
+                s_fwhm_nm = load_asd_txt(sensor_cfg["fwhm_file"]) * 1000.0
+                mat_data = resample_asd_to_sensor(raw_asd, _cached_asd_wav_nm, s_wav_nm, s_fwhm_nm)
+            else:
+                mat_data = raw_asd
+                
+        _material_spectral_cache[cache_key] = mat_data
+        loaded_materials[mat_name] = mat_data.copy()
         
     # 3. Load wavelengths & construct valid spectral mask
     wavelengths = load_asd_txt(wv_file_path)
@@ -495,9 +573,10 @@ def run_scenario_on_sensor(scenario_id, sensor_id, soup=None, snr=None, tile_siz
     else:
         layer = create_mixture_layer(mat_list, tile_size, variance=variance, seed=42)
         
-    # Inject AWGN noise
+    # Inject noise
     if snr is not None and not np.isinf(snr):
-        layer_noisy, layer_noise = add_gaussian_noise(layer, snr=snr, seed=42, return_noise=True)
+        #layer_noisy, layer_noise = add_gaussian_noise(layer, snr=snr)
+        layer_noisy, layer_noise = add_wavelength_scaled_noise(layer, snr=snr, shot_noise_fraction=SHOT_NOISE_FRACTION)
     else:
         layer_noisy = layer.copy()
         layer_noise = np.zeros_like(layer)
@@ -1473,11 +1552,12 @@ def main(snr_set=None, tile_size_set=None):
     parser = argparse.ArgumentParser(
         description="Run Spectral Complexity vs. PCA simulation study across sensors, scenarios, SNRs, and tile sizes."
     )
+    canonical_sensors = [s for s in SENSOR_CONFIGS.keys() if s != "cvHySpex"]
     parser.add_argument(
         "--sensors",
         type=str,
-        default=",".join(SENSOR_CONFIGS.keys()),
-        help=f"Comma-separated list of sensors (default: all {len(SENSOR_CONFIGS)})"
+        default=",".join(canonical_sensors),
+        help=f"Comma-separated list of sensors (default: all {len(canonical_sensors)})"
     )
     parser.add_argument(
         "--scenarios",
@@ -1524,7 +1604,17 @@ def main(snr_set=None, tile_size_set=None):
     
     args = parser.parse_args()
     
-    target_sensors = [s.strip() for s in args.sensors.split(",") if s.strip() in SENSOR_CONFIGS]
+    SENSOR_ALIASES = {
+        "cvHySpex": "cvHySpexMjolnir",
+        "hyspex": "cvHySpexMjolnir",
+        "HySpex": "cvHySpexMjolnir"
+    }
+    raw_sensor_list = [s.strip() for s in args.sensors.split(",") if s.strip()]
+    target_sensors = []
+    for s in raw_sensor_list:
+        resolved = SENSOR_ALIASES.get(s, s)
+        if resolved in SENSOR_CONFIGS and resolved not in target_sensors:
+            target_sensors.append(resolved)
     target_scenarios = [s.strip() for s in args.scenarios.split(",") if s.strip() in SCENARIOS]
     
     def parse_snr_val(val_str):
@@ -1630,7 +1720,6 @@ def main(snr_set=None, tile_size_set=None):
 
 
 if __name__ == "__main__":
-    SNR_set = [5,10,15,30,50,75,100,200,500,np.inf]
-    TILE_SIZE_set = [3,5,9,11,15,35,55,101]
+    
     main(snr_set=SNR_set, tile_size_set=TILE_SIZE_set)
 

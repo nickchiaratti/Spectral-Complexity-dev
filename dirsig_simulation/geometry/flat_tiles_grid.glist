@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<geometrylist enabled="true">
+    <object name="FlatTilesGridObject">
+        <basegeometry>
+            <obj>
+                <filename>$SCENE_DIR/geometry/flat_tiles_grid.obj</filename>
+            <assign id="ground_soil">100</assign>
+            <assign id="oak_leaf">101</assign>
+            <assign id="lodgepole_pine">102</assign>
+            <assign id="aspen1">103</assign>
+            <assign id="aspen4">104</assign>
+            <assign id="douglas_fir">105</assign>
+            <assign id="conifer_meadow">106</assign>
+            <assign id="maple_leaves">107</assign>
+            <assign id="goethite_quartz">108</assign>
+            <assign id="healthy_leaf">109</assign>
+            <assign id="diseased_leaf">110</assign>
+            <assign id="cal_white">111</assign>
+            <assign id="cal_50gray">112</assign>
+            <assign id="cal_10gray">113</assign>
+            </obj>
+        </basegeometry>
+        <staticinstance>
+            <translation>
+                <point>
+                    <x>0.0000</x>
+                    <y>0.0000</y>
+                    <z>0.0000</z>
+                </point>
+            </translation>
+            <rotation>
+                <cartesiantriple>
+                    <x>0.0000</x>
+                    <y>0.0000</y>
+                    <z>0.0000</z>
+                </cartesiantriple>
+            </rotation>
+        </staticinstance>
+    </object>
+</geometrylist>

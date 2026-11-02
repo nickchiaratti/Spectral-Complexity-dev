@@ -10,6 +10,15 @@ base_dir = r"C:\satelliteImagery\ground_truth\calibration_targets"
 # Optional: reference text path for a single target file (or None to process all targets in base_dir)
 ref_txt_path = None
 
+# HySpex Mjolnir VS-620 sensor definition files (primary: ground_truth, fallback: repo wavelengths directory)
+_hyspex_wav_primary = r"C:\satelliteImagery\ground_truth\hyspex\hyspex_mjolnir_vs620_wavelengths_microns.txt"
+_hyspex_fwhm_primary = r"C:\satelliteImagery\ground_truth\hyspex\hyspex_mjolnir_vs620_fwhm_microns.txt"
+_hyspex_wav_repo = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "wavelengths", "hyspex_mjolnir_vs620_wavelengths_microns.txt"))
+_hyspex_fwhm_repo = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "wavelengths", "hyspex_mjolnir_vs620_fwhm_microns.txt"))
+
+_hyspex_wav = _hyspex_wav_primary if os.path.exists(_hyspex_wav_primary) else _hyspex_wav_repo
+_hyspex_fwhm = _hyspex_fwhm_primary if os.path.exists(_hyspex_fwhm_primary) else _hyspex_fwhm_repo
+
 SENSORS = {
     "rsLandsat8": {
         "wav": r"C:\satelliteImagery\ground_truth\splib07\ASCIIdata\ASCIIdata_splib07b_rsLandsat8\S07LSAT8_Wavelengths_Landsat8_(7_bands)_microns.txt",
@@ -30,6 +39,14 @@ SENSORS = {
     "cvAVIRISc2014": {
         "wav": r"C:\satelliteImagery\ground_truth\splib07\ASCIIdata\ASCIIdata_splib07b_cvAVIRISc2014\s07_AV14_Wavelengths_in_microns_224_ch_AVIRIS14a.txt",
         "fwhm": r"C:\satelliteImagery\ground_truth\splib07\ASCIIdata\ASCIIdata_splib07b_cvAVIRISc2014\s07_AV14_Resolution_in_microns_224_ch_AVIRIS14a.txt"
+    },
+    "cvHySpexMjolnir": {
+        "wav": _hyspex_wav,
+        "fwhm": _hyspex_fwhm
+    },
+    "cvHySpex": {
+        "wav": _hyspex_wav,
+        "fwhm": _hyspex_fwhm
     }
 }
 
@@ -106,7 +123,7 @@ def convert_calibration_spectra(target_dir=base_dir, single_file=ref_txt_path, s
         # Find all .txt files in target_dir, excluding any sensor files or other non-target text
         all_txt = glob.glob(os.path.join(target_dir, "*.txt"))
         # Exclude splib sensor definitions or existing exported logs if any
-        target_files = [f for f in all_txt if not os.path.basename(f).startswith(("S07", "s07"))]
+        target_files = [f for f in all_txt if not os.path.basename(f).startswith(("S07", "s07", "hyspex", "HySpex"))]
         target_files.sort()
         
     if not target_files:

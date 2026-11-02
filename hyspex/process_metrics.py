@@ -5,10 +5,10 @@ from tqdm import tqdm
 from tkinter import filedialog
 import torch
 
-TILE_SIZE=3
-TILE_SIZES = [101]#3,5,7,9,11,15,19,35,55,65,81,101]#[3,5,7,9,11,15,19,35,55,65,81,101]
-NUM_ENDMEMBERS = 40
-CALCULATE_NOISE_STATS = True  # Set to False to skip calculating noise equivalent heights
+TILE_SIZE=15
+TILE_SIZES = [3,5,7,9,11,15,25,35,55,65,101]#3,5,7,9,11,15,19,35,55,65,81,101]#[3,5,7,9,11,15,19,35,55,65,81,101]
+NUM_ENDMEMBERS = 20
+CALCULATE_NOISE_STATS = False  # Set to False to skip calculating noise equivalent heights
 
 def maximumDistance_volumes_torch(img_cube, num_endmembers, Sigma_n=None, Sigma_n_tensor=None):
     """
@@ -46,9 +46,9 @@ def maximumDistance_volumes_torch(img_cube, num_endmembers, Sigma_n=None, Sigma_
     """
     B, C, N = img_cube.shape
     orig_dtype = img_cube.dtype
-    img_cube = img_cube.to(torch.float64)
+    img_cube = img_cube.to(torch.float32)
     device = img_cube.device
-    dtype = torch.float64
+    dtype = torch.float32
 
     # --- Identify the two seed endmembers (max-norm and min-norm) ---
     magnitude_sq = torch.sum(img_cube ** 2, dim=1)  # (B, N)
@@ -195,9 +195,9 @@ def maximumDistance_volumes(pixels, num_endmembers, Sigma_n=None):
     """
     if pixels.ndim == 3:
         h, w, num_bands = pixels.shape
-        pixels = np.reshape(pixels, (h * w, num_bands), order="F").astype(np.float64).T
+        pixels = np.reshape(pixels, (h * w, num_bands), order="F").astype(np.float32).T
     elif pixels.ndim == 2:
-        pixels = pixels.astype(np.float64)
+        pixels = pixels.astype(np.float32)
 
     num_bands, num_pixels = pixels.shape
 
@@ -224,13 +224,13 @@ def maximumDistance_volumes(pixels, num_endmembers, Sigma_n=None):
     residuals = pixels - origin                        # (bands, num_pixels)
 
     # --- Prepare volume and height output ---
-    volumes = np.full(num_endmembers, -np.inf, dtype=np.float64)
-    heights = np.zeros(num_endmembers, dtype=np.float64)
+    volumes = np.full(num_endmembers, -np.inf, dtype=np.float32)
+    heights = np.zeros(num_endmembers, dtype=np.float32)
 
     if Sigma_n is not None:
         N_cov = Sigma_n.shape[0]
-        noise_heights = np.zeros((N_cov, num_endmembers), dtype=np.float64)
-        P_perp = np.eye(num_bands, dtype=np.float64)
+        noise_heights = np.zeros((N_cov, num_endmembers), dtype=np.float32)
+        P_perp = np.eye(num_bands, dtype=np.float32)
     else:
         noise_heights = None
 
@@ -406,7 +406,7 @@ def process_volume_sliding_tile_torch(frame_data, valid_mask=None, tile_size=TIL
     # Pre-create Sigma_n_tensor ONCE on GPU to avoid repeated numpy->GPU copies
     # in every batch call to maximumDistance_volumes_torch (~5000x fewer allocations)
     if Sigma_n is not None:
-        Sigma_n_tensor_gpu = torch.tensor(Sigma_n, dtype=torch.float64, device=device)
+        Sigma_n_tensor_gpu = torch.tensor(Sigma_n, dtype=torch.float32, device=device)
     else:
         Sigma_n_tensor_gpu = None
     

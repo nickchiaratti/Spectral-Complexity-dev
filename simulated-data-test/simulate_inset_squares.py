@@ -8,7 +8,7 @@ from bs4 import BeautifulSoup
 plt.rcParams['axes.prop_cycle'] = plt.cycler(color=plt.colormaps['okabe_ito'].colors)
 
 # --- Configuration ---
-SIMULATED_SENSORS=["rsLandsat8", "rsSentinel2", "rsWorldView3", "cvHYMAP2014", "cvAVIRISc2014", "cvASD"]
+SIMULATED_SENSORS=["rsLandsat8", "rsSentinel2", "rsWorldView3", "cvHYMAP2014", "cvAVIRISc2014", "cvASD", "cvHySpexMjolnir", "cvHySpex"]
 'Uses splib07 https://doi.org/10.5066/F7RR1WDJ'
 cvASD_HTML_INDEX_PATH = r"C:\satelliteImagery\ground_truth\splib07\indexes\datatable_splib07b_cvASD.html"
 cvASD_WV_FILE = r"C:\satelliteImagery\ground_truth\splib07\ASCIIdata\ASCIIdata_splib07b_cvASD\s07_ASD_Wavelengths_ASD_0.35-2.5_microns_2151_ch.txt"
@@ -22,6 +22,20 @@ cvHYMAP2014_HTML_INDEX_PATH = r"C:\satelliteImagery\ground_truth\splib07\indexes
 cvHYMAP2014_WV_FILE = r"C:\satelliteImagery\ground_truth\splib07\ASCIIdata\ASCIIdata_splib07b_cvHYMAP2014\s07_HY14_HyMap2_Alaska2014_wavelengths_126ch.txt"
 cvAVIRISc2014_HTML_INDEX_PATH = r"C:\satelliteImagery\ground_truth\splib07\indexes\datatable_splib07b_cvAVIRISc2014.html"
 cvAVIRISc2014_WV_FILE = r"C:\satelliteImagery\ground_truth\splib07\ASCIIdata\ASCIIdata_splib07b_cvAVIRISc2014\s07_AV14_Wavelengths_in_microns_224_ch_AVIRIS14a.txt"
+cvHySpexMjolnir_HTML_INDEX_PATH = None
+cvHySpexMjolnir_WV_FILE = (
+    r"C:\satelliteImagery\ground_truth\hyspex\hyspex_mjolnir_vs620_wavelengths_microns.txt"
+    if os.path.exists(r"C:\satelliteImagery\ground_truth\hyspex\hyspex_mjolnir_vs620_wavelengths_microns.txt")
+    else os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "wavelengths", "hyspex_mjolnir_vs620_wavelengths_microns.txt"))
+)
+cvHySpexMjolnir_FWHM_FILE = (
+    r"C:\satelliteImagery\ground_truth\hyspex\hyspex_mjolnir_vs620_fwhm_microns.txt"
+    if os.path.exists(r"C:\satelliteImagery\ground_truth\hyspex\hyspex_mjolnir_vs620_fwhm_microns.txt")
+    else os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "wavelengths", "hyspex_mjolnir_vs620_fwhm_microns.txt"))
+)
+cvHySpex_HTML_INDEX_PATH = None
+cvHySpex_WV_FILE = cvHySpexMjolnir_WV_FILE
+cvHySpex_FWHM_FILE = cvHySpexMjolnir_FWHM_FILE
 
 # Self collected Leaf spectral data using an ASD Field Spectrometer. Leaf1 type is a norway maple, Leaf2 is a silver maple. The disease is tar spot.
 NICKS_LEAVES_DIR  ="C:/satelliteImagery/ground_truth/NickLeaves_20261001"
@@ -43,6 +57,7 @@ MATERIALS_TO_USE = {
 }
 NUM_ADDITIONAL_EM = 8
 ENABLE_MODEL_PREDICTIONS = False
+SHOT_NOISE_FRACTION = 0.7 
 
 def maximumDistance_parallelotopeVolumes(pixels, num_endmembers):
     """
@@ -391,25 +406,83 @@ def load_asd_txt(filepath):
             data.append(val)
     return np.array(data, dtype=np.float32)
 
-def add_gaussian_noise(img, snr=None, seed=42, return_noise=False):
+def add_gaussian_noise(img, snr=None, seed=42):
     """
     Injects Additive White Gaussian Noise (AWGN) based on a target linear SNR.
     SNR = mu_signal / sigma_noise, where mu_signal is the mean reflectance.
     """
     if snr in [None, np.inf]:
-        if return_noise:
-            return img, np.zeros_like(img)
-        return img
+        return img, np.zeros_like(img)
         
     np.random.seed(seed)
     mu_signal = np.mean(img)
-    # Prevent division by zero if layer is completely dark
     sigma = mu_signal / snr
     
     noise = np.random.normal(0, sigma, img.shape).astype(np.float32)
-    if return_noise:
-        return img + noise, noise
-    return img + noise
+    return img + noise, noise
+
+def add_wavelength_scaled_noise(img, snr=None, shot_noise_fraction=0.70, seed=42):
+    """
+    Injects noise scaled across spectral channels (wavelength bands) using the Poisson-Gaussian model (https://doi.org/10.1109/TIP.2008.2001399):
+        sigma^2(lambda_b) = alpha * mu(lambda_b) + beta
+
+    Each spectral band receives spatially stationary noise with standard deviation
+    sigma(lambda_b). Low-reflectance bands experience lower SNR than high-reflectance
+    bands, capturing the physical transition from readout-noise-limited (at low signal)
+    to shot-noise-limited (at high signal).
+
+    Args:
+        img (np.ndarray): (bands, height, width) array of reflectance values in [0, 1].
+        snr (float or None): Nominal linear SNR at the average scene reflectance (e.g., 100, 50, 30).
+                             If None or np.inf, returns the original image unchanged.
+        shot_noise_fraction (float): Fraction of noise variance from photon shot noise at mean 
+                                     scene reflectance (default: 0.70).
+                                     - 0.70: Standard reflective imaging spectrometer.
+                                     - 0.00: Uniform flat sigma across all bands (pure read noise).
+                                     - 1.00: Pure shot-noise scaling.
+        seed (int): Random seed for reproducibility (default: 42).
+
+    Returns:
+        noisy_img (np.ndarray): Image array with injected wavelength-scaled noise (float32).
+        noise_array (np.ndarray): Injected noise array.
+    """
+    if snr in [None, np.inf]:
+        return img, np.zeros_like(img, dtype=np.float32)
+
+    if snr <= 0:
+        raise ValueError(f"Target SNR must be positive, got {snr}")
+
+    # 1. Compute per-band mean signal: mu_band has shape (bands,)
+    mu_band = np.mean(img, axis=(1, 2)).astype(np.float64)
+
+    # Global scene mean reflectance across all bands
+    mu_global = float(np.mean(mu_band))
+    if mu_global <= 0:
+        mu_global = 1e-4
+
+    # 2. Total nominal variance at the global mean reflectance
+    sigma_nominal_sq = (mu_global / float(snr)) ** 2
+
+    # 3. Derive affine parameters: sigma^2(lambda) = alpha * mu(lambda) + beta
+    f_shot = float(np.clip(shot_noise_fraction, 0.0, 1.0))
+    alpha = f_shot * (sigma_nominal_sq / mu_global)
+    beta = (1.0 - f_shot) * sigma_nominal_sq
+
+    # 4. Compute per-band standard deviation: sigma_band has shape (bands,)
+    var_band = alpha * np.maximum(mu_band, 0.0) + beta
+    sigma_band = np.sqrt(var_band).astype(np.float32)
+
+    # 5. Broadcast sigma_band across spatial dimensions
+    sigma_expanded = sigma_band[:, None, None]  # (bands, 1, 1)
+
+    # 6. Generate Gaussian noise scaled by each band's standard deviation
+    rng = np.random.default_rng(seed)
+    noise = (rng.standard_normal(img.shape, dtype=np.float32) * sigma_expanded).astype(np.float32)
+
+    noisy_img = (img + noise).astype(np.float32)
+
+    return noisy_img, noise
+
 
 def create_mixture_layer(materials, size, variance=1, seed=256):
     """
@@ -486,14 +559,19 @@ def main(sensor_name):
     elif sensor_name == "cvAVIRISc2014":
         HTML_INDEX_PATH = cvAVIRISc2014_HTML_INDEX_PATH
         WV_FILE = cvAVIRISc2014_WV_FILE
+    elif sensor_name in ["cvHySpexMjolnir", "cvHySpex"]:
+        HTML_INDEX_PATH = cvHySpexMjolnir_HTML_INDEX_PATH
+        WV_FILE = cvHySpexMjolnir_WV_FILE
     elif sensor_name == "cvASD":
         HTML_INDEX_PATH = cvASD_HTML_INDEX_PATH
         WV_FILE = cvASD_WV_FILE
     else:
         raise ValueError(f"Unknown sensor name: {sensor_name}")
         
-    with open(HTML_INDEX_PATH, 'r', encoding='utf-8', errors='ignore') as f:
-        soup = BeautifulSoup(f, 'html.parser')
+    soup = None
+    if HTML_INDEX_PATH and os.path.exists(HTML_INDEX_PATH):
+        with open(HTML_INDEX_PATH, 'r', encoding='utf-8', errors='ignore') as f:
+            soup = BeautifulSoup(f, 'html.parser')
         
     loaded_materials = {}
     all_mat_names = []
@@ -517,6 +595,11 @@ def main(sensor_name):
             df = pd.read_csv(csv_path)
             loaded_materials[mat_name] = df['DHR_mean'].values.astype(np.float32)
         else:
+            if soup is None:
+                raise ValueError(
+                    f"Material '{mat_name}' requires USGS splib07 HTML index, but sensor '{sensor_name}' has no splib07 index. "
+                    f"Use 'NICKLEAVES:' or 'CALTARGET:' prefixed materials."
+                )
             mat_file = lookup_material_file(HTML_INDEX_PATH, mat_name, soup=soup)
             print(f"Found {mat_name}: {os.path.basename(mat_file)}")
             loaded_materials[mat_name] = load_asd_txt(mat_file)
@@ -566,7 +649,8 @@ def main(sensor_name):
             layer = create_mixture_layer(mats, tz, variance=variance)
             
         if snr is not None:
-            layer, layer_noise = add_gaussian_noise(layer, snr=snr, return_noise=True)
+            #layer, layer_noise = add_gaussian_noise(layer, snr=snr)
+            layer, layer_noise = add_wavelength_scaled_noise(layer, snr=snr, shot_noise_fraction=SHOT_NOISE_FRACTION)
         else:
             layer_noise = np.zeros_like(layer)
         
@@ -632,9 +716,12 @@ def main(sensor_name):
         
     # 3. Displays
     
-    # Create dynamic output directory based on the HTML index suffix
-    html_basename = os.path.basename(HTML_INDEX_PATH)
-    suffix = html_basename.split('_')[-1].replace('.html', '')
+    # Create dynamic output directory based on the HTML index suffix (or sensor_name)
+    if HTML_INDEX_PATH:
+        html_basename = os.path.basename(HTML_INDEX_PATH)
+        suffix = html_basename.split('_')[-1].replace('.html', '')
+    else:
+        suffix = sensor_name
     output_dir = os.path.join(r"C:\satelliteImagery\simulated", suffix)
     os.makedirs(output_dir, exist_ok=True)
     print(f"Saving results to: {output_dir}")

@@ -49,6 +49,15 @@ def load_spectrum_txt(filepath):
     idx = np.argsort(w_arr)
     return w_arr[idx], r_arr[idx]
 
+# HySpex Mjolnir VS-620 sensor definition files (primary: ground_truth, fallback: repo wavelengths directory)
+_hyspex_wav_primary = r"C:\satelliteImagery\ground_truth\hyspex\hyspex_mjolnir_vs620_wavelengths_microns.txt"
+_hyspex_fwhm_primary = r"C:\satelliteImagery\ground_truth\hyspex\hyspex_mjolnir_vs620_fwhm_microns.txt"
+_hyspex_wav_repo = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "wavelengths", "hyspex_mjolnir_vs620_wavelengths_microns.txt"))
+_hyspex_fwhm_repo = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "wavelengths", "hyspex_mjolnir_vs620_fwhm_microns.txt"))
+
+_hyspex_wav = _hyspex_wav_primary if os.path.exists(_hyspex_wav_primary) else _hyspex_wav_repo
+_hyspex_fwhm = _hyspex_fwhm_primary if os.path.exists(_hyspex_fwhm_primary) else _hyspex_fwhm_repo
+
 SENSORS = {
     "rsLandsat8": {
         "wav": r"C:\satelliteImagery\ground_truth\splib07\ASCIIdata\ASCIIdata_splib07b_rsLandsat8\S07LSAT8_Wavelengths_Landsat8_(7_bands)_microns.txt",
@@ -69,6 +78,14 @@ SENSORS = {
     "cvAVIRISc2014": {
         "wav": r"C:\satelliteImagery\ground_truth\splib07\ASCIIdata\ASCIIdata_splib07b_cvAVIRISc2014\s07_AV14_Wavelengths_in_microns_224_ch_AVIRIS14a.txt",
         "fwhm": r"C:\satelliteImagery\ground_truth\splib07\ASCIIdata\ASCIIdata_splib07b_cvAVIRISc2014\s07_AV14_Resolution_in_microns_224_ch_AVIRIS14a.txt"
+    },
+    "cvHySpexMjolnir": {
+        "wav": _hyspex_wav,
+        "fwhm": _hyspex_fwhm
+    },
+    "cvHySpex": {
+        "wav": _hyspex_wav,
+        "fwhm": _hyspex_fwhm
     }
 }
 
@@ -155,7 +172,7 @@ else:
         txt_files = [ref_txt_path]
     else:
         all_txt = glob.glob(os.path.join(base_dir, "*.txt"))
-        txt_files = [f for f in all_txt if not os.path.basename(f).startswith(("S07", "s07"))]
+        txt_files = [f for f in all_txt if not os.path.basename(f).startswith(("S07", "s07", "hyspex", "HySpex"))]
         txt_files.sort()
 
     print(f"Processing {len(txt_files)} 2-column spectrum text file(s) in {base_dir}...")

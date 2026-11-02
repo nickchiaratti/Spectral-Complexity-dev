@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<classicscene name="Flat Tiles Grid Scene">
+  <metadata>
+    <entry>
+      <name>Description</name>
+      <value><![CDATA[Flat 12-tile material grid scene for cross-sensor spectral complexity and VSNR simulation.]]></value>
+    </entry>
+    <entry>
+      <name>Location</name>
+      <value><![CDATA[RIT Tait Preserve / ROCX 2025 Test Site (Rochester, NY)]]></value>
+    </entry>
+  </metadata>
+
+  <sceneorigin>
+    <location frame="geodetic">
+      <latitude>43.084400</latitude>
+      <longitude>-77.674300</longitude>
+      <altitude>168.00</altitude>
+    </location>
+  </sceneorigin>
+
+  <odbdirectory>$SCENE_DIR/geometry</odbdirectory>
+  <gdbdirectory>$SCENE_DIR/geometry</gdbdirectory>
+
+  <geometrylist enabled="true">
+    <geometrylistinclude name="TileGrid" enabled="true">geometry/flat_tiles_grid.glist</geometrylistinclude>
+  </geometrylist>
+
+  <matfilename>$SCENE_DIR/materials/materials.mat</matfilename>
+  <emsdirectory>$SCENE_DIR/materials</emsdirectory>
+  <extdirectory>$SCENE_DIR/materials</extdirectory>
+  <absdirectory>$SCENE_DIR/materials</absdirectory>
+  <srcdirectory>$SCENE_DIR/materials</srcdirectory>
+</classicscene>
