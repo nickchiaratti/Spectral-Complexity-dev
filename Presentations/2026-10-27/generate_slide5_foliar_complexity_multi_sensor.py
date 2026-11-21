@@ -300,7 +300,7 @@ def generate_slide5_figure():
     gs = fig.add_gridspec(2, 4, wspace=0.30, hspace=0.48, top=0.92, bottom=0.08, left=0.05, right=0.97)
 
     fig.suptitle(
-        r"Multi-Sensor Foliar Complexity Simulation: 5-Material Tile with $1\%$ Discriminability Threshold ($h_{\mathrm{crit}} = 0.010 \cdot \sqrt{B}$)",
+        r"Multi-Sensor Foliar Complexity Simulation: 5-Material Tile with $1\%$ Discriminability Threshold ($h_{\mathrm{min}} = 0.010 \cdot \sqrt{B}$)",
         fontsize=15, fontweight='bold'
     )
 
@@ -314,7 +314,7 @@ def generate_slide5_figure():
     cmap_5 = mcolors.ListedColormap([m['color'] for m in MATERIALS])
     norm_5 = mcolors.BoundaryNorm(np.arange(-0.5, 5.5, 1), cmap_5.N)
 
-    im_map = ax_map.imshow(mat_map, cmap=cmap_5, norm=norm_5, interpolation='nearest')
+    im_map = ax_map.imshow(results[0]['material_map'], cmap=cmap_5, norm=norm_5, interpolation='nearest')
     ax_map.set_title("(a) Simulated 5-Material Tile (15x15)", fontsize=11, fontweight='bold')
     ax_map.set_xlabel("Local Column", fontsize=9.5)
     ax_map.set_ylabel("Local Row", fontsize=9.5)
@@ -375,20 +375,25 @@ def generate_slide5_figure():
 
         # Plot 1% Critical Threshold: h_crit = 0.010 * sqrt(B)
         p2 = ax.axhline(h_crit, color='blue', linestyle='--', linewidth=1.8,label=rf'1% Threshold ($h_{{\mathrm{{crit}}}} = {h_crit:.3f}$)')
-        ax.set_yscale('symlog', linthresh=1e-2)
+        #ax.set_yscale('symlog', linthresh=1e-2)
+        ax.set_yscale('log')
         ax.set_ylim(bottom=0, top=max(h_vals[0] * 1.5, h_crit * 3.0))
         ax.set_title(f"({p_let}) {s_meta['name']} ($B={B}$)", fontsize=11, fontweight='bold')
         ax.set_xlabel("Endmember Index (k)", fontsize=9.5)
         ax.set_ylabel(r"Distance $h_k$", fontsize=9.5, color='blue')
+        ax.tick_params(axis='y', labelcolor='blue')
         ax.set_xticks(k_steps)
         ax.grid(True, linestyle=':', alpha=0.5)
 
         av = ax.twinx()
-        k_vol = k_steps[2:]
-        v_plot = v_cum_3d[2:]
-        p3 = av.plot(k_vol, v_plot, 's--', color='crimson', linewidth=1.8, markersize=5.0,label=r'Cumul 3D Vol $V_{\mathrm{cum}}^{(3\mathrm{D})}$')
-        av.set_ylabel(r"Cumulative 3D Volume $V_{\mathrm{cum}}^{(3\mathrm{D})}$", fontsize=8.5, color='crimson')
+        k_vol = k_steps[1:]
+        v_plot = np.cumprod(h_vals)
+        #v3d_plot = v_cum_3d[2:]
+        p3 = av.plot(k_steps, v_plot, 's--', color='crimson', linewidth=1.8, markersize=5.0,label=r'Volume $V_k$')
+        #p4 = av.plot(k_vol, v3d_plot, 's--', color='crimson', linewidth=1.8, markersize=5.0,label=r'Cumul 3D Vol $V_{\mathrm{cum}}^{(3\mathrm{D})}$')
+        av.set_ylabel(r"Volume $\prod h_k$", fontsize=8.5, color='crimson')
         av.tick_params(axis='y', labelcolor='crimson')
+        av.set_yscale('log')
         #if len(v_plot) > 0 and not np.all(np.isnan(v_plot)):
         #    av.set_ylim(bottom=0, top=np.nanmax(v_plot) * 1.35)
         av.grid(False)

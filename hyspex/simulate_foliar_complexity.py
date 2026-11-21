@@ -39,6 +39,8 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 from sklearn.decomposition import PCA
 
+separability_threshold = 0.01
+
 # Add simulated-data-test to sys.path for sensor simulation methods
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 SIM_DIR = os.path.normpath(os.path.join(CURRENT_DIR, "..", "simulated-data-test"))
@@ -152,7 +154,7 @@ def simulate_foliar_tile(scenario="healthy_2mat",
     """
     print(f"\n--- Simulating Foliar Tile: {scenario.upper()} ---")
     print(f"Sensor: {sensor_name} | Tile Size: {tile_size}x{tile_size} | Linear SNR: {snr}")
-    print(f"Shading Variability: {shade_variability * 100:.1f}% | Random Seed: {seed}")
+    print(f"Magnitude Variability: {shade_variability * 100:.1f}% | Random Seed: {seed}")
 
     # 1. Load Spectra
     wv, spec_hl1 = load_foliar_spectrum("HealthyLeaf1", sensor_name)
@@ -458,17 +460,18 @@ def plot_foliar_scenario(res, output_path, show_plot=True):
     # Panel 4: Orthogonal Subspace Distance (h_k) on SymLog Scale
     # ---------------------------------------------------------
     ax_h = fig.add_subplot(gs[1, 0])
-    ax_h.plot(em_idx, res['computed_heights'], marker='o', linestyle='-', color='blue', linewidth=1.8, label='Orthogonal Subspace Distance ($h_k$)')
-    ax_h.plot(em_idx[1:], res['computed_derivative'][1:], marker='^', linestyle=':', color='green', alpha=0.8, label=r'Decay Rate ($-\Delta h$)')
-    ax_h.plot(em_idx, res['noise_heights'], marker='s', linestyle='--', color='purple', linewidth=1.5, label='Simulated Noise Distance')
-    ax_h.plot(em_idx[1:], res['noise_norms_mean'][1:], marker='d', linestyle=':', color='chocolate', linewidth=1.2, label='Mean Noise Floor')
+    ax_h.plot(em_idx[1:], res['computed_heights'][1:], marker='o', linestyle='-', color='blue', linewidth=1.8, label='Orthogonal Subspace Distance ($h_k$)')
+    #ax_h.plot(em_idx[1:], res['computed_derivative'][1:], marker='^', linestyle=':', color='green', alpha=0.8, label=r'Decay Rate ($-\Delta h$)')
+    #ax_h.plot(em_idx, res['noise_heights'], marker='s', linestyle='--', color='purple', linewidth=1.5, label='Simulated Noise Distance')
+    #ax_h.plot(em_idx[1:], res['noise_norms_mean'][1:], marker='d', linestyle=':', color='chocolate', linewidth=1.2, label='Mean Noise Floor')
 
-    # 1% Reflectance Contrast Threshold: h_crit = 0.010 * sqrt(B)
+    # separability_threshold% Reflectance Contrast Threshold: h_crit = separability_threshold * sqrt(B)
     B = len(wv)
-    h_crit = 0.010 * np.sqrt(B)
-    ax_h.axhline(h_crit, color='black', linestyle='--', linewidth=1.5, label=f'1% Threshold ($h_{{crit}} = {h_crit:.3f}$)')
+    h_crit = separability_threshold * np.sqrt(B)
+    ax_h.axhline(h_crit, color='black', linestyle='--', linewidth=1.5, label=f'{int(separability_threshold*100)}% Threshold ($h_{{min}} = {h_crit:.3f}$)')
 
-    ax_h.set_yscale('symlog', linthresh=1e-3)
+    #ax_h.set_yscale('symlog', linthresh=1e-3)
+    ax_h.set_yscale('log')
     ax_h.set_ylim(bottom=0)
     ax_h.set_title(r"Orthogonal Subspace Distance ($h_k$)", fontsize=11, fontweight='bold')
     ax_h.set_xlabel("Vertex Index (k)")
@@ -487,13 +490,14 @@ def plot_foliar_scenario(res, output_path, show_plot=True):
     ax_v = fig.add_subplot(gs[1, 1])
     ax_v_twin = ax_v.twinx()
 
-    v_lin = res['computed_heights'][1] - res['computed_volumes_linear']
-    p1 = ax_v.plot(em_idx[1:],  v_lin[1:], marker='s', linestyle='-', color='crimson', linewidth=1.8, label='Spectral Complexity Vol')
+    v_lin = np.cumprod(res['computed_heights'][1:])
+    p1 = ax_v.plot(em_idx[1:],  v_lin, marker='s', linestyle='-', color='crimson', linewidth=1.8, label='Spectral Complexity Vol')
     #ax_v.set_yscale('log')
     ax_v.set_title(r"Spectral Complexity ($\prod h_k$)", fontsize=11, fontweight='bold')
     ax_v.set_xlabel("Vertex Index (k)")
-    ax_v.set_ylabel("Linear Parallelotope Volume")
-    ax_v.set_xticks(em_idx[1:])
+    ax_v.set_ylabel("Parallelotope Volume")
+    ax_v.set_xticks(em_idx)
+    ax_v.set_yscale('log')
     ax_v.grid(True, linestyle='--', alpha=0.6)
 
     #p2 = ax_v_twin.plot(em_idx[1:], res['computed_adj_volumes'][1:], marker='v', linestyle='-.', color='coral', alpha=0.8, label='Adjusted Volume')
@@ -541,7 +545,7 @@ def plot_foliar_scenario(res, output_path, show_plot=True):
         scen_title = "Two-Material Healthy Foliage (Norway Maple vs. Silver Maple)"
     else:
         scen_title = "Four-Material Pathological Contrast (50% Diseased Tar Spot Replacement)"
-    fig.suptitle(f"HySpex Mjolnir Simulation: {scen_title} (SNR={snr}, Shading={res['shade_variability']:.2%})", fontsize=14, fontweight='bold', y=0.98)
+    fig.suptitle(f"HySpex Mjolnir Simulation: {scen_title} (SNR={snr}, Magnitude Variability={res['shade_variability']:.2%})", fontsize=14, fontweight='bold', y=0.98)
 
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     plt.savefig(output_path, dpi=300, bbox_inches='tight')
@@ -638,16 +642,16 @@ def plot_contrast_figure(res_2mat, res_4mat, output_path, show_plot=True):
     # Bottom Row - Panel 4: Orthogonal Subspace Distance Comparison (SymLog)
     # ---------------------------------------------------------
     ax_b1 = fig.add_subplot(gs_bot[0, 0])
-    ax_b1.plot(em_idx, res_2mat['computed_heights'], marker='o', linestyle='-', color='blue', linewidth=2.0, label=r'2-Material Healthy $h_k$')
-    ax_b1.plot(em_idx[1:], res_2mat['computed_derivative'][1:], marker='^', linestyle=':', color='blue', linewidth=2.0, label=r'Healthy $-\Delta h_k$')
-    ax_b1.plot(em_idx, res_4mat['computed_heights'], marker='s', linestyle='-', color='red', linewidth=2.0, label=r'4-Material Infected $h_k$')
-    ax_b1.plot(em_idx[1:], res_4mat['computed_derivative'][1:], marker='^', linestyle=':', color='red', linewidth=2.0, label=r'Infected $-\Delta h_k$')
-    ax_b1.plot(em_idx[1:], res_4mat['noise_norms_mean'][1:], marker='x', linestyle='--', color='#F76902', linewidth=1.4, label='Simulated Mean Noise')
+    ax_b1.plot(em_idx[1:], res_2mat['computed_heights'][1:], marker='o', linestyle='-', color='blue', linewidth=2.0, label=r'Healthy $h_k$')
+    #ax_b1.plot(em_idx[1:], res_2mat['computed_derivative'][1:], marker='^', linestyle=':', color='blue', linewidth=2.0, label=r'Healthy $-\Delta h_k$')
+    ax_b1.plot(em_idx[1:], res_4mat['computed_heights'][1:], marker='s', linestyle='-', color='red', linewidth=2.0, label=r'Infected $h_k$')
+    #ax_b1.plot(em_idx[1:], res_4mat['computed_derivative'][1:], marker='^', linestyle=':', color='red', linewidth=2.0, label=r'Infected $-\Delta h_k$')
+    #ax_b1.plot(em_idx[1:], res_4mat['noise_norms_mean'][1:], marker='x', linestyle='--', color='#F76902', linewidth=1.4, label='Simulated Mean Noise')
 
-    # 1% Reflectance Contrast Threshold: h_crit = 0.010 * sqrt(B)
+    # separability_threshold% Reflectance Contrast Threshold: h_crit = separability_threshold * sqrt(B)
     B = len(wv)
-    h_crit = 0.010 * np.sqrt(B)
-    ax_b1.axhline(h_crit, color='black', linestyle='--', linewidth=1.5, label=f'1% Threshold ($h_{{crit}} = {h_crit:.3f}$)')
+    h_crit = separability_threshold * np.sqrt(B)
+    ax_b1.axhline(h_crit, color='black', linestyle='--', linewidth=1.5, label=f'{int(separability_threshold*100)}% Threshold ($h_{{crit}} = {h_crit:.3f}$)')
 
     # Annotate plateau points
     #ax_b1.annotate('Plateau after k*=2\n(Species distinction)', xy=(2, res_2mat['computed_heights'][1]), xytext=(2.2, 0.3),
@@ -655,8 +659,10 @@ def plot_contrast_figure(res_2mat, res_4mat, output_path, show_plot=True):
     #ax_b1.annotate('Sustained through k*=4\n(Pathology dimensions)', xy=(4, res_4mat['computed_heights'][3]), xytext=(4.3, 0.2),
     #               arrowprops=dict(facecolor='crimson', arrowstyle='->', lw=1.5), fontsize=8, fontweight='bold', color='crimson')
 
-    ax_b1.set_yscale('symlog', linthresh=1e-2)
-    ax_b1.set_ylim(bottom=0)
+    #ax_b1.set_yscale('symlog', linthresh=1e-2)
+    #ax_b1.set_ylim(bottom=0)
+    ax_b1.set_yscale('log')
+    
     ax_b1.set_title("Orthogonal Subspace Distance ($h_k$) Comparison", fontsize=11, fontweight='bold')
     ax_b1.set_xlabel("Endmember Index (k)")
     ax_b1.set_ylabel(r"Orthogonal Subspace Distance ($h_k$)")
@@ -672,13 +678,14 @@ def plot_contrast_figure(res_2mat, res_4mat, output_path, show_plot=True):
     # Bottom Row - Panel 5: Complexity Volume Comparison (Log)
     # ---------------------------------------------------------
     ax_b2 = fig.add_subplot(gs_bot[0, 1])
-    ax_b2.plot(em_idx[1:], res_2mat['computed_heights'][1] - res_2mat['computed_volumes_linear'][1:], marker='o', linestyle='-', color='blue', linewidth=2.0, label=r'2-Material Healthy $\prod h_k$')
-    ax_b2.plot(em_idx[1:], res_2mat['computed_heights'][1] - res_4mat['computed_volumes_linear'][1:], marker='s', linestyle='-', color='red', linewidth=2.0, label=r'4-Material Infected $\prod h_k$')
+    ax_b2.plot(em_idx[1:], res_2mat['computed_volumes_linear'][1:], marker='o', linestyle='-', color='blue', linewidth=2.0, label=r'2-Material Healthy $\prod h_k$')
+    ax_b2.plot(em_idx[1:], res_4mat['computed_volumes_linear'][1:], marker='s', linestyle='-', color='red', linewidth=2.0, label=r'4-Material Infected $\prod h_k$')
     
     #ax_b2.set_yscale('log')
     ax_b2.set_title(r"Spectral Complexity Volume ($\prod h_k$) Contrast", fontsize=11, fontweight='bold')
     ax_b2.set_xlabel("Endmember Index (k)")
-    ax_b2.set_ylabel("Linear Parallelotope Volume")
+    ax_b2.set_ylabel("Parallelotope Volume")
+    ax_b2.set_yscale('log')
     ax_b2.set_xticks(em_idx[1:])
     ax_b2.grid(True, linestyle='--', alpha=0.6)
     ax_b2.legend(loc='upper right', fontsize='small')
@@ -725,7 +732,7 @@ def plot_contrast_figure(res_2mat, res_4mat, output_path, show_plot=True):
 
     # Executive Supertitle
     fig.suptitle(f"Pure-Pixel Foliar Differentiability: Spectral Complexity vs. PCA Material Dimensionality Contrast\n" + \
-                 f"Linear SNR: {res_2mat['snr']} | Shading Variability: {res_2mat['shade_variability']:.2%}",
+                 f"Linear SNR: {res_2mat['snr']} | Magnitude Variability: {res_2mat['shade_variability']:.2%}",
                  fontsize=14, fontweight='bold', y=0.98)
 
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
@@ -743,7 +750,7 @@ def main():
     parser.add_argument("--tile_size", type=int, default=DEFAULT_TILE_SIZE, help="Square tile dimension (default: 15).")
     parser.add_argument("--snr", type=float, default=DEFAULT_SNR, help="Target linear SNR (default: 200).")
     parser.add_argument("--shot_fraction", type=float, default=DEFAULT_SHOT_NOISE_FRACTION, help="Shot noise fraction (default: 0.70).")
-    parser.add_argument("--shade_variability", type=float, default=DEFAULT_SHADE_VARIABILITY, help="Shading variability (default: 0.03 for 3%%).")
+    parser.add_argument("--shade_variability", type=float, default=DEFAULT_SHADE_VARIABILITY, help="Magnitude variability (default: 0.03 for 3%%).")
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED, help="Random seed for noise generation.")
     parser.add_argument("--sensor", type=str, default=DEFAULT_SENSOR, help="Sensor response name.")
     parser.add_argument("--num_endmembers", type=int, default=DEFAULT_NUM_ENDMEMBERS, help="Number of endmembers to extract.")

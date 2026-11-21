@@ -26,6 +26,8 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 import h5py
 
+separability_threshold = 0.01
+
 # Add simulated-data-test to path for library methods
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 SIM_DIR = os.path.normpath(os.path.join(CURRENT_DIR, "..", "simulated-data-test"))
@@ -526,7 +528,7 @@ def display_comparison_table(real_res, sim_res, num_endmembers=10):
     snr = sim_res.get('snr', 100)
     snr_str = f"{int(snr) if snr == int(snr) else snr}"
     shade_var = sim_res.get('shade_variability', 0.0)
-    shade_str = f", Shade={int(round(shade_var * 100))}%" if shade_var > 0 else ""
+    shade_str = f", Magnitude Variability={int(round(shade_var * 100))}%" if shade_var > 0 else ""
     sim_header = f"SIMULATED DATA (SNR={snr_str}{shade_str})"
 
     print("\n" + "=" * 115)
@@ -594,9 +596,9 @@ def plot_comparison(real_res, sim_res, map_x, map_y, tile_size=15, num_endmember
     fig.canvas.manager.set_window_title("HySpex Real vs. Simulated Complexity Comparison")
 
     snr = sim_res.get('snr', 100)
-    snr_str = f"{int(snr) if snr == int(snr) else snr}"
+    snr_str = f"SNR = {int(snr) if snr == int(snr) else snr}"
     shade_var = sim_res.get('shade_variability', 0.0)
-    shade_suffix = f", Magnitude Variability={int(round(shade_var * 100))}%" if shade_var > 0 else ""
+    shade_suffix = f"Magnitude Variability={int(round(shade_var * 100))}%" if shade_var > 0 else ""
 
     # Nested GridSpec with independent horizontal spacing per row:
     # Row 1: 4 panels with customized width_ratios (shrink context visual, expand spectral plot)
@@ -778,10 +780,12 @@ def plot_comparison(real_res, sim_res, map_x, map_y, tile_size=15, num_endmember
     ax_h = fig.add_subplot(gs_bot[0, 0])
     n_pts = len(real_res['computed_heights'])
     em_idx = np.arange(1, n_pts + 1)
+    Bands = len(real_res['wavelengths_nm'])
+    h_crit = separability_threshold * np.sqrt(Bands)
 
     # Real Heights
-    ax_h.plot(em_idx, real_res['computed_heights'], marker='o', linestyle='-', color='blue', linewidth=1.8, label=r'Real Distance ($h_k$)')
-    ax_h.plot(em_idx[1:], real_res['computed_derivative'][1:], marker='^', linestyle=':', color='blue', alpha=0.8, label=r'Real $-\Delta h_k$')
+    ax_h.plot(em_idx[1:], real_res['computed_heights'][1:], marker='o', linestyle='-', color='blue', linewidth=1.8, label=r'Real Distance ($h_k$)')
+    #ax_h.plot(em_idx[1:], real_res['computed_derivative'][1:], marker='^', linestyle=':', color='blue', alpha=0.8, label=r'Real $-\Delta h_k$')
 
     # Real Noise from H5 (if available)
     #if 'ssd' in real_res['precomputed_noise_heights'] and real_res['precomputed_noise_heights']['ssd'] is not None:
@@ -790,16 +794,18 @@ def plot_comparison(real_res, sim_res, map_x, map_y, tile_size=15, num_endmember
     #    ax_h.plot(em_idx[:len(real_res['precomputed_noise_heights']['mnf'])], real_res['precomputed_noise_heights']['mnf'], marker='x', linestyle='--', color='darkcyan', alpha=0.7, label='Real Noise (MNF)')
 
     # Simulated Heights & Noise
-    ax_h.plot(em_idx, sim_res['computed_heights'], marker='s', linestyle='-', color='crimson', linewidth=1.8, label=r'Simulated Distance ($h_k$)')
-    if 'computed_height_derivative' in sim_res and sim_res['computed_height_derivative'] is not None:
-        ax_h.plot(em_idx[1:], sim_res['computed_height_derivative'][1:], marker='v', linestyle=':', color='crimson', alpha=0.8, label=r'Simulated $-\Delta h_k$')
-    elif 'computed_derivative' in sim_res and sim_res['computed_derivative'] is not None:
-        ax_h.plot(em_idx[1:], sim_res['computed_derivative'][1:], marker='v', linestyle=':', color='crimson', alpha=0.8, label=r'Simulated $-\Delta h_k$')
+    ax_h.plot(em_idx[1:], sim_res['computed_heights'][1:], marker='s', linestyle='-', color='crimson', linewidth=1.8, label=f'Simulated Distance ($h_k$)')
+    ax_h.axhline(h_crit, color='black', linestyle='--', linewidth=1.5, label=f'{int(separability_threshold*100)}% Threshold ($h_{{min}} = {h_crit:.3f}$)')
+    #if 'computed_height_derivative' in sim_res and sim_res['computed_height_derivative'] is not None:
+    #    ax_h.plot(em_idx[1:], sim_res['computed_height_derivative'][1:], marker='v', linestyle=':', color='crimson', alpha=0.8, label=r'Simulated $-\Delta h_k$')
+    #elif 'computed_derivative' in sim_res and sim_res['computed_derivative'] is not None:
+    #    ax_h.plot(em_idx[1:], sim_res['computed_derivative'][1:], marker='v', linestyle=':', color='crimson', alpha=0.8, label=r'Simulated $-\Delta h_k$')
     #ax_h.plot(em_idx, sim_res['noise_heights'], marker='x', linestyle='--', color='darkmagenta', linewidth=1.5, label='Simulated Noise Distance')
-    ax_h.plot(em_idx[1:], sim_res['noise_norms_mean'][1:], marker='x', linestyle='--', color='#F76902', linewidth=1.2, label='Simulated Mean Noise')
+    #ax_h.plot(em_idx[1:], sim_res['noise_norms_mean'][1:], marker='x', linestyle='--', color='#F76902', linewidth=1.2, label='Simulated Mean Noise')
 
     eps32 = float(np.finfo(np.float32).eps)
-    ax_h.set_yscale('symlog', linthresh=1e-3)
+    #ax_h.set_yscale('symlog', linthresh=1e-3)
+    ax_h.set_yscale('log')
     ax_h.set_ylim(bottom=0)
     ax_h.set_title("Orthogonal Subspace Distance ($h_k$)", fontsize=11, fontweight='bold')
     ax_h.set_xlabel("Endmember Index (k)")
@@ -825,13 +831,13 @@ def plot_comparison(real_res, sim_res, map_x, map_y, tile_size=15, num_endmember
 
     p1 = ax_v.plot(em_idx[1:], real_vol[1:], marker='o', linestyle='-', color='blue', linewidth=1.8, label='Real Volume')
     p2 = ax_v.plot(em_idx[1:], sim_vol[1:], marker='s', linestyle='-', color='crimson', linewidth=1.8, label=r'Simulated Volume ($\prod h_k$)')
-    p3 = ax_v.plot(em_idx[1:], sim_noise_vol[1:], marker='x', linestyle='--', color='#F76902', linewidth=1.5, label='Simulated Noise Vol')
+    #p3 = ax_v.plot(em_idx[1:], sim_noise_vol[1:], marker='x', linestyle='--', color='#F76902', linewidth=1.5, label='Simulated Noise Vol')
 
     ax_v.set_yscale('log')
     ax_v.set_title(r"Spectral Complexity Volume ($\prod h_k$) Comparison", fontsize=11, fontweight='bold')
     ax_v.set_xlabel("Endmember Index (k)")
-    ax_v.set_ylabel(r"Spectral Complexity Volume ($\prod h_k$)")
-    ax_v.set_xticks(em_idx[1:])
+    ax_v.set_ylabel(r"Parallelotope Volume")
+    ax_v.set_xticks(em_idx)
     ax_v.grid(True, linestyle='--', alpha=0.6)
 
     # Adjusted volume on twin axis: (V^(1/k)) / sqrt(k)
@@ -844,7 +850,7 @@ def plot_comparison(real_res, sim_res, map_x, map_y, tile_size=15, num_endmember
     #secax_v.set_xticks(em_idx[1:] - 1)
 
     # Combine legends
-    lines_v = p1 + p2 + p3# + p4 + p5
+    lines_v = p1 + p2 #+ p3# + p4 + p5
     labels_v = [l.get_label() for l in lines_v]
     ax_v.legend(lines_v, labels_v, loc='lower left', fontsize='x-small')
 
@@ -881,9 +887,9 @@ def plot_comparison(real_res, sim_res, map_x, map_y, tile_size=15, num_endmember
 
     # Overall Supertitle
     if layout in ['split_v', 'split_h', 'split_diag', 'edge_with_border'] and mat2_disp:
-        suptitle_text = f"HySpex Mjolnir Comparison: Real {tile_size}x{tile_size} Tile at ({map_x}, {map_y}) vs. Simulated Edge ({mat1_disp} + {mat2_disp}, SNR={snr_str}, Shade={shade_suffix})"
+        suptitle_text = f"HySpex Mjolnir Comparison: Real {tile_size}x{tile_size} Tile at ({map_x}, {map_y}) vs. Simulated Edge ({mat1_disp} + {mat2_disp}, {snr_str}, {shade_suffix})"
     else:
-        suptitle_text = f"HySpex Mjolnir Comparison: Real {tile_size}x{tile_size} Tile at ({map_x}, {map_y}) vs. Simulated {mat1_disp} (SNR={snr_str}, Shade={shade_suffix})"
+        suptitle_text = f"HySpex Mjolnir Comparison: Real {tile_size}x{tile_size} Tile at ({map_x}, {map_y}) vs. Simulated {mat1_disp} ({snr_str}, {shade_suffix})"
     fig.suptitle(suptitle_text, fontsize=14, fontweight='bold', y=0.98)
 
     save_path = os.path.join(output_dir, f"hyspex_comparison_real_vs_simulated_{map_x}_{map_y}.png")

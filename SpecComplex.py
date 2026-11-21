@@ -335,133 +335,251 @@ def calcGramLocalVolumes(endmembers, localization_vector):
     return volumes
 
 
-def maximumDistance_volumes(pixels, num_endmembers, return_heights=False):
+def maximumDistance_volumes(pixels, num_endmembers):
     """
-    Combined endmember extraction and Gram volume estimation in a single
-    iterative Orthogonal Subspace Projection (OSP) pass.
+    Combined endmember extraction and Gram volume estimation using the maximum distance (MaxD) method with iterative orthogonal projection.
 
-    Localizes the pixel neighborhood by subtracting the minimum-norm pixel
-    (the local origin), then iteratively selects endmembers by largest
-    orthogonal projection distance while recording the heights needed for 
-    the volume curve.
-
-    Rejects inputs containing any NaN values.
+    Localizes the pixel neighborhood by subtracting the minimum-norm pixel (the local origin), then iteratively selects endmembers by largest
+    orthogonal projection distance while recording the heights needed for the volume curve.
 
     Args:
-        pixels:  ndarray of shape (bands, num_pixels) or 3D patch (H, W, bands).
-                 If 2D, each column is one pixel's spectral signature.
-        num_endmembers:  int, total number of endmembers to extract (k).
-                         Must be <= num_pixels.
-        return_heights:  bool, optional. If True, also returns the orthogonal
-                         projection heights (h_n) array of shape (num_endmembers,).
-
+        pixels (np.ndarray): (bands, pixels) or (height, width, bands) array of x pixel spectra.
+        num_endmembers (int): The number of r endmembers to extract.
     Returns:
-        endmembers:  ndarray of shape (bands, num_endmembers).
-                     Raw (non-localized) endmember spectra.
-                     Column 0 = max-norm pixel, column 1 = min-norm pixel (origin).
-        volumes:     ndarray of shape (num_endmembers,).
-                     Localized Gram volume curve.
-                     volumes[0] = 0   (origin contributes no volume),
-                     volumes[1] = h_1,
-                     volumes[j] = h_1 * h_2 * ... * h_j   for j >= 1.
-        heights:     (Only if return_heights=True) ndarray of shape (num_endmembers,).
-                     Orthogonal projection heights (h_n). heights[0] = 0, heights[1] = h_1,
-                     heights[j] = h_j for j >= 1.
+        endmembers (np.ndarray): (bands, num_endmembers) array of endmember spectra v_r.
+        volumes (np.ndarray): (num_endmembers,) array of ln(Vol_r).
+        heights (np.ndarray): (num_endmembers,) array of heights h_r.
+        indices (np.ndarray): (num_endmembers,) array of indices i_r of the extracted endmembers.
     """
-    nan_return = (
-        (np.full((pixels.shape[-1] if pixels.ndim == 3 else pixels.shape[0], num_endmembers), np.nan),
-         np.full(num_endmembers, np.nan),
-         np.full(num_endmembers, np.nan))
-        if return_heights else
-        (np.full((pixels.shape[-1] if pixels.ndim == 3 else pixels.shape[0], num_endmembers), np.nan),
-         np.full(num_endmembers, np.nan))
-    )
-
     if pixels.ndim == 3:
         h, w, num_bands = pixels.shape
-        if np.isnan(pixels).any():
-            return nan_return
-        pixels = np.reshape(pixels, (h * w, num_bands), order="F").astype(np.float32).T
-    elif pixels.ndim == 2:
-        if np.isnan(pixels).any():
-            return nan_return
+        pixels = np.reshape(pixels, (h * w, num_bands), order="F").astype(pixels.dtype).T
 
     num_bands, num_pixels = pixels.shape
+    epsilon=np.sqrt(num_bands)*np.finfo(pixels.dtype).eps
 
-    if num_pixels < num_endmembers:
-        return nan_return
+    # Initialize Variables
+    endmembers = np.zeros((num_bands, num_endmembers), dtype=pixels.dtype)
+    volumes = np.full(num_endmembers, -np.inf, dtype=pixels.dtype)
+    heights = np.zeros(num_endmembers, dtype=pixels.dtype)
+    indices = np.zeros(num_endmembers, dtype=int)
 
-    # --- Identify the two seed pixels by spectral magnitude ---
+    # Initialization
+    # 𝒗_0=arg⁡𝑚𝑖𝑛‖𝒙‖
+    # 𝒗_1=arg⁡𝑚𝑎𝑥‖𝒙‖
     magnitudes = np.linalg.norm(pixels, axis=0)
     idx_maxnorm = np.argmax(magnitudes)
     idx_minnorm = np.argmin(magnitudes)
-
-    # Store raw endmembers in extraction order
-    endmembers = np.zeros((num_bands, num_endmembers), dtype=pixels.dtype)
     endmembers[:, 0] = pixels[:, idx_maxnorm]
     endmembers[:, 1] = pixels[:, idx_minnorm]
+    indices[0] = idx_maxnorm
+    indices[1] = idx_minnorm
+    selected_indices = [idx_minnorm, idx_maxnorm]
 
-    # --- Localize: shift so the min-norm pixel is at the origin ---
+    # Shift all pixel spectra to a localized origin at 𝒗_0 to form the initial residual vectors 𝒓_1
+    # 𝒓_1 (𝒙)=𝒙−𝒗_0
     origin = pixels[:, idx_minnorm].reshape(-1, 1)    # (bands, 1)
     residuals = pixels - origin                        # (bands, num_pixels)
 
-    # --- Prepare volume and height output ---
-    volumes = np.zeros(num_endmembers, dtype=np.float64)
-    if return_heights:
-        heights = np.zeros(num_endmembers, dtype=np.float64)
-
-    selected = np.zeros(num_pixels, dtype=bool)
-    selected[idx_minnorm] = True
-    selected[idx_maxnorm] = True
-
-    # --- First endmember: the localized max-norm pixel ---
-    v = residuals[:, idx_maxnorm].copy()
-    h = np.linalg.norm(v)
-    volumes[1] = h
-    if return_heights:
-        heights[1] = h
-
-    # Project all pixels into the subspace orthogonal to v
-    if h > 1e-12:
-        # OSP projection component: d(d^T d)^-1 d^T X
-        proj_component = np.outer(v, np.dot(v, residuals) / (h ** 2))
+    # Calculate the first direction vector 𝒅_1, height ℎ_1, and orthonormal basis 𝒒_1
+    # 𝒅_1=𝒗_0−𝒗_1
+    # ℎ_1=‖𝒅_1 ‖
+    # 𝒒_1=𝒅_1/ℎ_1  
+    d1 = residuals[:, idx_maxnorm].copy()              # (bands, )
+    h1 = np.linalg.norm(d1)
+    volumes[1] = np.log(h1) if h1 > epsilon else -np.inf
+    heights[1] = h1
+    if h1 > epsilon:
+        q1 = d1 / h1  # (bands,1)
+        proj_component = np.outer(q1, np.dot(q1, residuals))  # equivalent to q1*q1.T*residuals in vector operations
         residuals -= proj_component
 
-    # --- Iteratively extract remaining endmembers ---
+    # The residual vectors are deflated across subsequent iterations 𝑗=2,…,𝑟 to select 𝑟 endmembers
     for j in range(2, num_endmembers):
-        # Magnitudes of unselected pixels in the current orthogonal subspace
-        residual_mag = np.sum(residuals ** 2, axis=0)  # (num_pixels,)
-        residual_mag[selected] = -np.inf
+        # Select the next endmember 𝒗_𝑗 as the pixel with maximum magnitude in the current residual subspace 
+        # excluding the indices for 𝒗_0,𝒗_1,𝒗_2,…𝒗_(𝑗−1)
+        # 𝒗_𝑗=arg𝑚𝑎𝑥‖𝒓_𝑗 (𝒙)‖
+        residual_norm = np.linalg.norm(residuals, axis=0)  # (num_pixels,)
+        if len(selected_indices) < num_pixels:
+            residual_norm[selected_indices] = -np.inf
+            idx_new = np.argmax(residual_norm)
+            selected_indices.append(idx_new)
+        else:
+            idx_new = 0
 
-        idx_new = np.argmax(residual_mag)
+        v_j = residuals[:, idx_new].copy()
         endmembers[:, j] = pixels[:, idx_new]
-        selected[idx_new] = True
+        indices[j] = idx_new
 
-        # The orthogonal distance is the magnitude of the projected vector
-        v = residuals[:, idx_new].copy()
-        h = np.linalg.norm(v)
-
-        # Volume is the cumulative product of orthogonal heights
-        volumes[j] = volumes[j - 1] * h
-        if return_heights:
-            heights[j] = h
-
-        # Project all pixels into the subspace orthogonal to the new endmember
-        if h > 1e-12:
-            proj_component = np.outer(v, np.dot(v, residuals) / (h ** 2))
+        # Calculate the subsequent height ℎ_𝑗 and orthonormal basis 𝒒_𝑗
+        # ℎ_𝑗=‖𝒓_𝑗 (𝒗_𝑗 )‖
+        # 𝒒_𝒋=(𝒓_𝑗 (𝒗_𝑗 ))/ℎ_𝑗 
+        v_64 = v_j.astype(np.float64)
+        h_j = float(np.linalg.norm(v_64))
+        
+        if h_j > epsilon:
+            heights[j] = h_j
+            q_j = (v_64 / h_j).astype(np.float32)
+            volumes[j] = volumes[j - 1] + np.log(h_j)
+            proj_component = np.outer(q_j, np.dot(q_j, residuals)) # equivalent to q_j*q_j.T*residuals in vector operations
             residuals -= proj_component
+        else:
+            heights[j] = -np.inf
+            volumes[j] = -np.inf
 
-    if return_heights:
-        return endmembers, volumes, heights
-    return endmembers, volumes
+    return endmembers, volumes, heights, indices
 
-def maximumDistance_volumes_test(pixels, num_endmembers):
+
+def maximumDistance_volumes_cholesky(pixels, num_endmembers=None):
     """
-    Test version of maximumDistance_volumes that returns orthogonal heights (h_n).
-    """
-    return maximumDistance_volumes(pixels, num_endmembers, return_heights=True)
+    Endmember extraction and geometric parallelotope volume estimation
+    via Gram-space Pivoted Cholesky decomposition.
 
-maximumDistance_volumes_heights = maximumDistance_volumes_test
+    Localizes the pixel neighborhood by subtracting the minimum-norm pixel
+    (the local origin), forms the local spatial Gram matrix K = Y^T Y,
+    and iteratively extracts endmembers, volumes, and orthogonal heights via
+    diagonal Schur complement downdating (Harbrecht et al., 2012).
+
+    Args:
+        pixels: ndarray of shape (bands, num_pixels) or 3D patch (H, W, bands).
+        num_endmembers: int, optional. Target number of endmembers to extract.
+                        If None, defaults to min(bands, num_pixels).
+
+    Returns:
+        endmembers:  ndarray of shape (bands, k). Raw (non-localized) endmember spectra.
+                     Column 0 = max-norm pixel, column 1 = min-norm pixel (origin).
+        volumes_arr: ndarray of shape (k,). Geometric volume curve.
+                     volumes[0] = 0.0, volumes[1] = h_1, volumes[j] = prod_{m=1}^j h_m.
+        heights_arr: ndarray of shape (k,). Orthogonal projection heights.
+                     heights[0] = 0.0, heights[1] = h_1, heights[j] = h_j.
+        indices_arr: ndarray of shape (k,), dtype int. Extracted pixel indices.
+        rss_arr:     ndarray of shape (k,), dtype float64. Residual sum of squares ||P_k^perp Y||_F^2.
+    """
+    if pixels.ndim == 3:
+        h_dim, w_dim, num_bands = pixels.shape
+        if np.isnan(pixels).any():
+            raise ValueError("Input patch contains NaN values.")
+        Y_input = np.reshape(pixels, (h_dim * w_dim, num_bands), order="F").T
+    elif pixels.ndim == 2:
+        if np.isnan(pixels).any():
+            raise ValueError("Input data contains NaN values.")
+        Y_input = pixels
+    else:
+        raise ValueError(f"Expected 2D or 3D input array, got ndim={pixels.ndim}")
+
+    num_bands, num_pixels = Y_input.shape
+
+    if num_pixels < 2:
+        raise ValueError("At least 2 pixels are required for maxD initialization.")
+
+    ceiling = min(num_bands, num_pixels)
+    max_k = ceiling if (num_endmembers is None or num_endmembers > ceiling) else num_endmembers
+
+    # MaxD initial conditions: identify min-norm and max-norm raw pixels
+    sq_mags = np.sum(Y_input ** 2, axis=0)
+    idx_min = int(np.argmin(sq_mags))
+    idx_max = int(np.argmax(sq_mags))
+
+    # Spatial localization: shift origin to min-norm pixel v_0 (cast to float64 to prevent cancellation)
+    origin = Y_input[:, idx_min:idx_min + 1]
+    Y_loc = (Y_input - origin).astype(np.float64)
+
+    # Residual squared norms of all pixels from origin
+    diag_K = np.sum(Y_loc ** 2, axis=0)
+
+    # First localized endmember height h_1 = ||v_1 - v_0||
+    h1_sq = max(0.0, float(diag_K[idx_max]))
+    h1 = np.sqrt(h1_sq)
+
+    selected_mask = np.zeros(num_pixels, dtype=bool)
+    selected_mask[idx_min] = True
+    selected_mask[idx_max] = True
+
+    selected_order = [idx_max, idx_min]
+    heights = [0.0, h1]
+    volumes = [0.0, h1]
+    rss = [float(np.sum(diag_K))]
+
+    # Preallocate Cholesky factor columns buffer (N x max_k)
+    L = np.zeros((num_pixels, max_k), dtype=np.float64)
+
+    # Adaptive branch: Small window (N <= B) vs Large tile (N > B)
+    if num_pixels <= num_bands:
+        # Precompute full Gram matrix K = Y_loc^T * Y_loc (N x N)
+        K = np.dot(Y_loc.T, Y_loc)
+
+        if h1 > 1e-15:
+            L[:, 0] = K[:, idx_max] / h1
+            diag_K -= L[:, 0] ** 2
+
+        rss.append(float(np.sum(np.maximum(diag_K[~selected_mask], 0.0))))
+
+        col_idx = 1
+        while len(selected_order) < max_k:
+            masked_d = np.where(selected_mask, -np.inf, diag_K)
+            idx_next = int(np.argmax(masked_d))
+            h_sq = diag_K[idx_next]
+
+            if h_sq <= 1e-24:
+                break
+
+            h_k = np.sqrt(h_sq)
+
+            selected_mask[idx_next] = True
+            selected_order.append(idx_next)
+            heights.append(h_k)
+            volumes.append(volumes[-1] * h_k)
+
+            # Compute column from precomputed K
+            col = K[:, idx_next] - np.dot(L[:, :col_idx], L[idx_next, :col_idx])
+            L[:, col_idx] = col / h_k
+
+            diag_K -= L[:, col_idx] ** 2
+            rss.append(float(np.sum(np.maximum(diag_K[~selected_mask], 0.0))))
+
+            col_idx += 1
+    else:
+        # Lazy on-demand Cholesky for large tiles (avoids allocating N x N matrix)
+        if h1 > 1e-15:
+            k_col = np.dot(Y_loc.T, Y_loc[:, idx_max])
+            L[:, 0] = k_col / h1
+            diag_K -= L[:, 0] ** 2
+
+        rss.append(float(np.sum(np.maximum(diag_K[~selected_mask], 0.0))))
+
+        col_idx = 1
+        while len(selected_order) < max_k:
+            masked_d = np.where(selected_mask, -np.inf, diag_K)
+            idx_next = int(np.argmax(masked_d))
+            h_sq = diag_K[idx_next]
+
+            if h_sq <= 1e-24:
+                break
+
+            h_k = np.sqrt(h_sq)
+
+            selected_mask[idx_next] = True
+            selected_order.append(idx_next)
+            heights.append(h_k)
+            volumes.append(volumes[-1] * h_k)
+
+            # Compute single column on-demand via matrix-vector product
+            k_col = np.dot(Y_loc.T, Y_loc[:, idx_next])
+            col = k_col - np.dot(L[:, :col_idx], L[idx_next, :col_idx])
+            L[:, col_idx] = col / h_k
+
+            diag_K -= L[:, col_idx] ** 2
+            rss.append(float(np.sum(np.maximum(diag_K[~selected_mask], 0.0))))
+
+            col_idx += 1
+
+    endmembers = Y_input[:, selected_order]
+    volumes_arr = np.array(volumes, dtype=np.float64)
+    heights_arr = np.array(heights, dtype=np.float64)
+    indices_arr = np.array(selected_order, dtype=int)
+    rss_arr = np.array(rss, dtype=np.float64)
+
+    return endmembers, volumes_arr, heights_arr, indices_arr, rss_arr
 
 def load_scaled_reflectance(dataset, slice_obj=np.s_[...]):
     """
@@ -1388,7 +1506,7 @@ def process_msd_sliding_tile(frame_data, tile_size, stride):
     output_map = np.where(count_map > 0, sum_map / count_map, np.nan)
     return output_map
 
-def calc_ndvi_frame(frame_data, red_idx=3, nir_idx=4):
+def calc_ndvi_frame(frame_data, red_idx, nir_idx):
     """
     Calculates the Normalized Difference Vegetation Index (NDVI) per pixel.
     
@@ -1545,4 +1663,142 @@ def calcGramLocalVolumes_QR(endmembers, localization_vector):
     # The cumulative product of the heights gives the expanding volumes
     volumes = np.cumprod(heights)
     
+    return volumes
+
+
+
+#####################################################################################
+
+## ORIGINAL BASELINE
+
+#####################################################################################
+
+
+
+
+def maximumDistance_volumes_original(data, num_endmembers):
+    '''
+    Args:
+        data (np.ndarray): 3D image cube [nPixels0, nPixels1, nbands]
+        num_endmembers (int): number of endmembers to be calculated (choose more than expected to find)
+    Returns:
+        endmembers [bands, num_endmembers]
+        endmembers_index [1, num_endmembers]
+        volumes [1, num_endmembers]
+    '''   
+    endmembers, em_idx = maximumDistance_original(data, num_endmembers)
+    volumes = calcGramLocalVolumes_original(endmembers, endmembers[:,1])
+
+    return endmembers, em_idx, volumes
+
+def maximumDistance_original(data, num_endmembers):
+    '''
+    Args:
+        data (np.ndarray): 3D image cube [nPixels0, nPixels1, nbands]
+        num_endmembers (int): number of endmembers to be calculated (choose more than expected to find)
+    Returns:
+        endmembers [bands, num_endmembers]
+        endmembers_index [1, num_endmembers]
+    '''      
+    # Flatten 3D cube [rows, cols, bands] -> 2D [pixels, bands]
+    image2D = np.reshape(data, (data.shape[0] * data.shape[1], data.shape[2]), order="F")
+
+    image2D = np.clip(image2D, 0, 1)
+
+    # --- NaN Handling ---
+    valid_mask = ~np.isnan(image2D).any(axis=1)
+    
+    if np.sum(valid_mask) < num_endmembers:
+        print(f"Not enough valid pixels (no NaNs) to find {num_endmembers} endmembers. Found {np.sum(valid_mask)} valid pixels.")
+        return np.full((image2D.shape[1], num_endmembers), np.nan), np.full((1, num_endmembers), np.nan)
+
+    valid_data = image2D[valid_mask]
+    valid_indices = np.where(valid_mask)[0]
+
+    # Transpose to [bands, pixels]
+    data_t = np.transpose(valid_data)
+    num_bands, num_pix = data_t.shape
+
+    # calculate magnitude of all vectors to find min and max
+    magnitude = np.linalg.norm(data_t, axis=0)
+    idx1 = np.argmax(magnitude)
+    idx2 = np.argmin(magnitude)
+
+    # create empty output arrays for endmembers
+    endmembers = np.zeros([num_bands, num_endmembers])
+    endmembers_index = np.zeros([1, num_endmembers], dtype=int)   
+
+    # assign largest and smallest vector as first and second endmembers
+    endmembers[:, 0] = data_t[:, idx1]
+    endmembers[:, 1] = data_t[:, idx2]
+    
+    endmembers_index[0, 0] = valid_indices[idx1]
+    endmembers_index[0, 1] = valid_indices[idx2]
+
+    # Use standard ndarray instead of deprecated np.matrix. 
+    # Create a copy so we don't modify the original data_t needed for extraction
+    data_proj = data_t.copy()
+    identity_matrix = np.identity(num_bands)
+
+    for i in range(2, num_endmembers):
+        # Extract difference vector as 2D column array (bands, 1) to maintain shape for broadcasting
+        diff = data_proj[:, idx2:idx2+1] - data_proj[:, idx1:idx1+1]
+        # calculate pseudo inverse of difference vector
+        pseudo = np.linalg.pinv(diff)
+        data_proj = np.matmul((identity_matrix - np.matmul(diff, pseudo)), data_proj)
+
+        idx1 = idx2
+        vec = data_proj[:, idx2:idx2+1] # Shape (bands, 1)
+            
+        diff_new = np.sum(np.square(vec - data_proj), axis=0)
+
+        # find the maximum distance for next endmember
+        # np.argmax returns the index of the first occurrence of the maximum value
+        idx2 = np.argmax(diff_new)
+
+        # assign to endmember file
+        endmembers[:, i] = data_t[:, idx2]
+        
+        # Map back to original index
+        endmembers_index[0, i] = valid_indices[idx2]
+
+    return endmembers, endmembers_index
+
+
+def calcGramLocalVolumes_original(endmembers, localization_vector):
+    """
+    Calculates the Local Gram matrix.
+    1. Subtracts the localization vector from all other endmembers (centering the simplex on x).
+    2. Calculates the Gram matrix of these centered vectors.
+    3. Calculates the parallelotope volume estimate for 1 through N endmembers
+    4. Returns volume values in an array of length N
+    """
+    # Reduce to current number of endmembers
+    # Shape: (Bands, N)
+    localized_vectors = endmembers - localization_vector[:, np.newaxis]
+
+    # Calculate Gram Matrix
+    # G = V^T * V (Shape: N x N)
+    gram = np.matmul(localized_vectors.T, localized_vectors)
+    
+    # Initialize array to store the volume sequence
+    N = gram.shape[0]
+    volumes = np.zeros(N)
+    
+    # Calculate the parallelotope volume estimate for 1 through N endmembers
+    for i in range(1, N + 1):
+        # Extract the i x i top-left submatrix
+        sub_gram = gram[:i, :i]
+        
+        # Calculate the Gramian determinant
+        det = np.linalg.det(sub_gram)
+        
+        # Guard against floating-point inaccuracies that can cause tiny 
+        # negative determinants near the linear dependence threshold
+        if det < 0:
+            det = 0.0
+            
+        # Volume is the square root of the Gramian determinant
+        volumes[i-1] = np.sqrt(det)
+        
     return volumes

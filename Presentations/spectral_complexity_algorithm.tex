@@ -1,0 +1,302 @@
+\documentclass[aspectratio=169, 10pt]{beamer}
+
+% -----------------------------------------------------------------------------
+% Presentation Theme and Styling
+% -----------------------------------------------------------------------------
+\usetheme{Madrid}
+\usecolortheme{default}
+\usefonttheme{professionalfonts}
+
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{microtype}
+
+% Color Definitions (Consistent with Research Overview Palette)
+\definecolor{NavyBlue}{RGB}{31, 73, 125}     % #1F497D
+\definecolor{TealAccent}{RGB}{0, 156, 189}    % #009CBD
+\definecolor{DarkSlate}{RGB}{40, 44, 52}      % #282C34
+\definecolor{CardBg}{RGB}{248, 250, 252}      % #F8FAFC
+\definecolor{CardBorder}{RGB}{203, 213, 225}  % #CBD5E1
+\definecolor{AlertRed}{RGB}{192, 80, 77}      % #C0504D
+\definecolor{SuccessGreen}{RGB}{44, 160, 44}  % #2CA02C
+
+% Beamer Color Assignments
+\setbeamercolor{palette primary}{bg=NavyBlue, fg=white}
+\setbeamercolor{palette secondary}{bg=NavyBlue!85, fg=white}
+\setbeamercolor{palette tertiary}{bg=NavyBlue!70, fg=white}
+\setbeamercolor{structure}{fg=NavyBlue}
+\setbeamercolor{title}{fg=NavyBlue}
+\setbeamercolor{frametitle}{fg=NavyBlue, bg=white}
+\setbeamercolor{block title}{bg=NavyBlue!12, fg=NavyBlue}
+\setbeamercolor{block body}{bg=CardBg, fg=DarkSlate}
+\setbeamercolor{item}{fg=TealAccent}
+
+% Remove default navigation symbols
+\setbeamertemplate{navigation symbols}{}
+
+% Clean footline with slide numbers
+\setbeamertemplate{footline}{
+  \leavevmode%
+  \hbox{%
+    \begin{beamercolorbox}[wd=.70\paperwidth,ht=2.5ex,dp=1.1ex,left]{author in head/foot}%
+      \hspace*{2ex}\textcolor{gray}{\scriptsize Spectral Complexity Algorithm Mathematics}
+    \end{beamercolorbox}%
+    \begin{beamercolorbox}[wd=.30\paperwidth,ht=2.5ex,dp=1.1ex,right]{title in head/foot}%
+      \textcolor{gray}{\scriptsize Slide \insertframenumber{} / \inserttotalframenumber}\hspace*{2ex}
+    \end{beamercolorbox}%
+  }%
+  \vskip0pt%
+}
+
+% -----------------------------------------------------------------------------
+% Title Information
+% -----------------------------------------------------------------------------
+\title[Spectral Complexity Mathematics]{Mathematical Formulation of the Spectral Complexity Algorithm}
+\subtitle{Gram-Space Cholesky Maximum Distance, Simplex Volume, and Residual Noise Floor Tracking}
+\author{Nick Chiaratti}
+\institute{Rochester Institute of Technology \\ Chester F. Carlson Center for Imaging Science}
+\date{}
+
+\begin{document}
+
+% -----------------------------------------------------------------------------
+% Title Frame
+% -----------------------------------------------------------------------------
+\begin{frame}
+  \titlepage
+\end{frame}
+
+% -----------------------------------------------------------------------------
+% Slide 1: Geometric Simplex Volume & Orthogonal Heights
+% -----------------------------------------------------------------------------
+\begin{frame}{Geometric Simplex Volume from Iterative Orthogonal Heights}
+  \begin{columns}[T]
+    \begin{column}{0.48\textwidth}
+      \begin{block}{Iterative Endmember Selection}
+        \footnotesize
+        \begin{itemize}\setlength{\itemsep}{1.5pt}
+          \item \textbf{Anchor ($v_0$):} Initial reference pixel (e.g. furthest from origin).
+          \item \textbf{Pivot 1 ($v_1$):} Max distance $h_0 = \|v_1 - v_0\|$ (1D base line).
+          \item \textbf{Pivot 2 ($v_2$):} Max perpendicular height $h_1$ to segment $v_0\text{--}v_1$.
+          \item \textbf{Pivot 3 ($v_3$):} Max perpendicular height $h_2$ to plane $v_0\text{--}v_1\text{--}v_2$.
+        \end{itemize}
+      \end{block}
+    \end{column}
+    
+    \begin{column}{0.48\textwidth}
+      \begin{block}{General Simplex Volume Formula}
+        \footnotesize
+        \begin{itemize}\setlength{\itemsep}{1.5pt}
+          \item Simplex volume defined by product of orthogonal heights:
+          $$\text{Volume}_k = \frac{1}{k!} \prod_{j=0}^{k-1} h_j = \frac{1}{k!} (h_0 \cdot h_1 \cdots h_{k-1})$$
+          \item 2D Triangle Area: $\text{Vol}_2 = \frac{1}{2!} h_0 h_1 = \frac{1}{2} \cdot \text{Base} \cdot \text{Height}$
+          \item 3D Tetrahedron Vol: $\text{Vol}_3 = \frac{1}{3!} h_0 h_1 h_2$
+          \item Exact volume without spectral dimensionality reduction.
+        \end{itemize}
+      \end{block}
+    \end{column}
+  \end{columns}
+
+  \vspace{0.05cm}
+  \begin{center}
+    \includegraphics[height=0.24\textheight]{output_hyspex_residuals/diagram_endmember_heights.png}
+  \end{center}
+\end{frame}
+
+% -----------------------------------------------------------------------------
+% Slide 2: Gram-Space Formulation & Initial Distances
+% -----------------------------------------------------------------------------
+\begin{frame}{Gram-Space Representation \& Distance Initialization}
+  \begin{columns}[T]
+    \begin{column}{0.48\textwidth}
+      \begin{block}{1. Localized Spatial Gram Matrix}
+        \footnotesize
+        \begin{itemize}\setlength{\itemsep}{2pt}
+          \item Local pixel window $Y = [y_1, \dots, y_N] \in \mathbb{R}^{B \times N}$ ($N=9$).
+          \item Form $N \times N$ Gram matrix once per local window:
+          $$K = Y^T Y \in \mathbb{R}^{N \times N}, \quad K_{ij} = y_i^T y_j$$
+          \item Decouples operations from the spectral dimension $B$.
+        \end{itemize}
+      \end{block}
+
+      \begin{block}{2. Distance to Initial Vertex ($v_0$)}
+        \footnotesize
+        \begin{itemize}\setlength{\itemsep}{2pt}
+          \item Squared Euclidean distance evaluated directly from $K$:
+          $$d_i^{(1)} = \|y_i - v_0\|^2 = K_{ii} - 2 K_{i, i_0} + K_{i_0, i_0}$$
+          \item Requires zero access to raw $B$-dimensional spectra.
+        \end{itemize}
+      \end{block}
+    \end{column}
+
+    \begin{column}{0.48\textwidth}
+      \begin{block}{3. Greedy Pivot Selection}
+        \footnotesize
+        \begin{itemize}\setlength{\itemsep}{2pt}
+          \item At step $k$, select unselected pixel with max distance:
+          $$i_k = \arg\max_{i \notin \mathcal{S}} d_i^{(k)}$$
+          \item Orthogonal height is the square root of max distance:
+          $$h_k = \sqrt{d_{i_k}^{(k)}}$$
+          \item Update selected set: $\mathcal{S}_k = \mathcal{S}_{k-1} \cup \{i_k\}$.
+        \end{itemize}
+      \end{block}
+
+      \begin{block}{Computational Efficiency}
+        \footnotesize
+        \begin{itemize}\setlength{\itemsep}{2pt}
+          \item Local spatial window has $N = 9 \ll B$ (where $B=200\text{--}400$).
+          \item Initializing in Gram space replaces expensive spectral vector passes with $O(N)$ lookups.
+        \end{itemize}
+      \end{block}
+    \end{column}
+  \end{columns}
+\end{frame}
+
+% -----------------------------------------------------------------------------
+% Slide 3: Cholesky Factorization & Exact Schur Downdating
+% -----------------------------------------------------------------------------
+\begin{frame}{Cholesky Factorization \& Exact Schur Downdating}
+  \begin{columns}[T]
+    \begin{column}{0.48\textwidth}
+      \begin{block}{4. Cholesky Factor Column Update}
+        \footnotesize
+        \begin{itemize}\setlength{\itemsep}{1pt}
+          \item Compute column $k$ of lower triangular factor $L \in \mathbb{R}^{N \times k}$:
+          $$L_{i, k} = \frac{1}{h_k} \left( K_{i, i_k} - \sum_{j=1}^{k-1} L_{i, j} L_{i_k, j} \right)$$
+          \item Pivot value: $L_{i_k, k} = h_k$.
+          \item Previously selected pivots: $L_{i_j, k} = 0$ for $j < k$.
+        \end{itemize}
+      \end{block}
+
+      \begin{block}{5. Exact Schur Complement Downdate}
+        \footnotesize
+        \begin{itemize}\setlength{\itemsep}{1pt}
+          \item Update squared orthogonal distances for unselected pixels:
+          $$d_i^{(k+1)} = d_i^{(k)} - L_{i, k}^2$$
+          \item \textbf{Subspace Equivalence:} $d_i^{(k+1)} \equiv \|P_{\mathcal{S}_k}^\perp y_i\|^2$, matching orthogonal subspace projection.
+        \end{itemize}
+      \end{block}
+    \end{column}
+
+    \begin{column}{0.48\textwidth}
+      \begin{block}{Elimination of Matrix Inversion}
+        \footnotesize
+        \begin{itemize}\setlength{\itemsep}{1pt}
+          \item Classic OSP explicitly constructs:
+          $$P_k^\perp = I - U_k (U_k^T U_k)^{-1} U_k^T$$
+          \item Incurring $O(B^2 N + B^3)$ operations at every iteration.
+          \item Cholesky Schur downdating requires only $O(N \cdot k)$ operations, with zero matrix inversions.
+        \end{itemize}
+      \end{block}
+
+      \begin{block}{Numerical Implementation Properties}
+        \footnotesize
+        \begin{itemize}\setlength{\itemsep}{1pt}
+          \item Computed in full \texttt{float64} precision to eliminate loss of significance on small residuals.
+          \item Yields $1.5\times\text{--}2.0\times$ acceleration over classic OSP.
+          \item Preserves raw data reality without synthetic smoothing.
+        \end{itemize}
+      \end{block}
+    \end{column}
+  \end{columns}
+\end{frame}
+
+% -----------------------------------------------------------------------------
+% Slide 4: Residual Tracking & Pooled Noise Variance
+% -----------------------------------------------------------------------------
+\begin{frame}{Residual Tracking \& Degree-of-Freedom Pooled Noise}
+  \begin{columns}[T]
+    \begin{column}{0.48\textwidth}
+      \begin{block}{1. Total Residual Sum of Squares (RSS)}
+        \footnotesize
+        \begin{itemize}\setlength{\itemsep}{2pt}
+          \item Summing updated distances $d_i$ across unselected pixels gives the unmodeled Frobenius energy:
+          $$\text{RSS}_k = \sum_{i \notin \mathcal{S}_k} d_i^{(k+1)} \equiv \|P_{\mathcal{S}_k}^\perp Y\|_F^2$$
+          \item Evaluated directly from the Schur complement downdate.
+        \end{itemize}
+      \end{block}
+
+      \begin{block}{2. Degrees of Freedom Accounting}
+        \footnotesize
+        \begin{itemize}\setlength{\itemsep}{2pt}
+          \item Total data measurements in local patch: $B \times N$.
+          \item Consumes $k$ spectral directions ($B - k$ remaining).
+          \item Consumes $k$ spatial pivot constraints ($N - k$ remaining).
+          \item Net unmodeled degrees of freedom: $(B - k)(N - k)$.
+        \end{itemize}
+      \end{block}
+    \end{column}
+
+    \begin{column}{0.48\textwidth}
+      \begin{block}{3. Pooled Noise Standard Deviation}
+        \footnotesize
+        \begin{itemize}\setlength{\itemsep}{2pt}
+          \item Unbiased pooled estimate of residual noise:
+          $$\hat{\sigma}_k = \sqrt{\frac{\text{RSS}_k}{(B - k)(N - k)}}$$
+          \item Properly normalizes for subspace rank exhaustion.
+        \end{itemize}
+      \end{block}
+
+      \begin{block}{Why Heuristic Elbow Tests Fail}
+        \footnotesize
+        \begin{itemize}\setlength{\itemsep}{2pt}
+          \item Heuristic ratio tests ($h_k / h_1 \le 0.01$) couple to scene dynamic range $h_1 = \|v_1 - v_0\|$.
+          \item Pure noise retains energy $(B-k)N\sigma_n^2$ in subspace.
+          \item Greedy selection forces $h_k$ to plateau at extreme-value noise ceiling $\approx \sigma_n \sqrt{2 \ln N}$.
+        \end{itemize}
+      \end{block}
+    \end{column}
+  \end{columns}
+\end{frame}
+
+% -----------------------------------------------------------------------------
+% Slide 5: Residual Variance Drop Ratio & Noise Floor Identification
+% -----------------------------------------------------------------------------
+\begin{frame}{Residual Variance Drop Ratio \& Noise Floor Identification}
+  \begin{columns}[T]
+    \begin{column}{0.48\textwidth}
+      \begin{block}{Step-to-Step Variance Drop Ratio}
+        \footnotesize
+        \begin{itemize}\setlength{\itemsep}{2pt}
+          \item Ratio of successive pooled standard deviations:
+          $$\rho_k = \frac{\hat{\sigma}_{k-1}}{\hat{\sigma}_k}$$
+          \item Measures fractional reduction in unmodeled variance.
+        \end{itemize}
+      \end{block}
+
+      \begin{block}{Physical Material Signal Regime}
+        \footnotesize
+        \begin{itemize}\setlength{\itemsep}{2pt}
+          \item Resolving a physical material captures substantial variance:
+          $$\rho_k \ge 3.0 \quad (\text{empirically } 4.0\times\text{--}18.9\times)$$
+          \item Validated on panels, boundaries, and diseased foliage.
+        \end{itemize}
+      \end{block}
+    \end{column}
+
+    \begin{column}{0.48\textwidth}
+      \begin{block}{Isotropic Sensor Noise Floor Regime}
+        \footnotesize
+        \begin{itemize}\setlength{\itemsep}{2pt}
+          \item When only noise remains, projecting arbitrary directions removes only nominal degrees of freedom $\approx \frac{1}{N-k}$:
+          $$\rho_k \approx 1.01\text{--}1.06 \approx 1.00\times$$
+          \item Collapses to theoretical isotropic noise baseline ($1.0\times$).
+        \end{itemize}
+      \end{block}
+
+      \begin{block}{Scale-Free Stopping Criterion}
+        \footnotesize
+        \begin{itemize}\setlength{\itemsep}{2pt}
+          \item Intrinsic rank $k^*$ is identified when $\rho_k$ hits noise floor:
+          $$k^* = \min \{ k : \rho_{k+1} < \tau_{\text{noise}} \}, \quad \tau_{\text{noise}} \approx 1.5\times$$
+          \item Operates across sensors without prior noise calibration.
+        \end{itemize}
+      \end{block}
+    \end{column}
+  \end{columns}
+\end{frame}
+
+\end{document}

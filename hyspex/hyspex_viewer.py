@@ -1,3 +1,4 @@
+import os
 import h5py
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
@@ -8,20 +9,38 @@ import numpy as np
 import cupy as cp
 from cupyx.scipy import ndimage
 import pandas as pd
+import time
+import spectral
 
 # Complexity Volume calculation method:
-# '3D': Cumulative 3D-Normalized Volume V_cum^(3D)(k) = V_3 + sum_{j=4}^k (prod_{m=1}^j h_m)^(3/j)
+# '3D': Threshold-Truncated 3D-Normalized Volume:
+#       V_n^(3D) = V_3 + sum_{j=4}^n (prod_{m=1}^j h_m)^(3/j)
+#       where n is the index of the last h_k prior to h_k < h_crit (stopping criteria)
 # '3EM': Volume produced by 3 endmembers V_3 = P[2] = h_1 * h_2 * h_3
 # 'maxVol': Original method choosing maximum value of the running products P
 VOLUME_METHOD = '3D'  # Options: '3D', '3EM', 'maxVol'
-
-TILE_SIZES = [3,7,15]# 19,31,41,61,81,101]
+SEPARABILITY_THRESHOLD = 0.01  # Minimum h_k threshold fraction: h_crit = SEPARABILITY_THRESHOLD * sqrt(B)
+TILE_SIZES = [9,55,65]#[3,5,7,9,15,25,35,55,65,101,201]# 19,31,41,61,81,101]
 NOISE_SOURCES = ['ssd', 'mlr', 'dct', 'mnf']
+
+# Orientation configuration:
+# When True, flightlines where height > width * ASPECT_RATIO_ROTATION_THRESHOLD (North/South flightlines)
+# are rotated 90 degrees counterclockwise so East is at the top of the screen.
+ROTATE_NS_FLIGHTLINES = True
+ASPECT_RATIO_ROTATION_THRESHOLD = 1.2  # Trigger rotation when height / width > threshold
 
 FALSE_COLOR_R_TILE = TILE_SIZES[0]
 FALSE_COLOR_G_TILE = TILE_SIZES[len(TILE_SIZES)//2]
 FALSE_COLOR_B_TILE = TILE_SIZES[-1] # Adjusted for HySpex default tiles (3, 5, 7, 9)
-FALSE_COLOR_POWER = 2.0  # Nonlinear scaling exponent to amplify high values and make white pixels distinct (>1 enhances contrast of high values)
+FALSE_COLOR_POWER = 2.5  # Nonlinear scaling exponent to amplify high values and make white pixels distinct (>1 enhances contrast of high values)
+
+if VOLUME_METHOD =='3D':
+    folder_name = f"V_k-{VOLUME_METHOD}-{int(SEPARABILITY_THRESHOLD*100)}-_tiles-R{TILE_SIZES[0]}_G{TILE_SIZES[len(TILE_SIZES)//2]}_B{TILE_SIZES[-1]}"
+else:
+    folder_name = f"V_k-{VOLUME_METHOD}_tiles-R{TILE_SIZES[0]}_G{TILE_SIZES[len(TILE_SIZES)//2]}_B{TILE_SIZES[-1]}"
+
+SAVE_INITIAL_FIGURES = True
+SAVE_FIGURES_DPI = 400
 
 OVERLAY_GROUND_TRUTH=True
 GROUND_TRUTH_FILE=r"C:\satelliteImagery\ground_truth\GPS_GE18_Landmine_UXO_locations.xlsx"
@@ -65,12 +84,21 @@ def main():
             wavelengths = surface_reflectance_ds.attrs['wavelengths']
             scale_factor = surface_reflectance_ds.attrs.get('Scale_Factor', [10000.0])[0]
             B = len(wavelengths)
-            h_crit = 0.010 * np.sqrt(B)
-            print(f"Spectral Bands B = {B}, 1% Critical Threshold h_crit = {h_crit:.4f}")
+            h_crit = SEPARABILITY_THRESHOLD * np.sqrt(B)
+            print(f"Spectral Bands B = {B}, Critical Threshold h_crit = {h_crit:.4f} (separability_threshold = {SEPARABILITY_THRESHOLD})")
             
             # ortho_vis from HySpex translator is (1, 4, L, S) or (4, L, S)
             if ortho_vis.ndim == 3 and ortho_vis.shape[0] in [3, 4]:
                 ortho_vis = np.transpose(ortho_vis, (1, 2, 0))
+            
+            orig_H, orig_W = ortho_vis.shape[0], ortho_vis.shape[1]
+            rotate_ccw = ROTATE_NS_FLIGHTLINES and (orig_H > orig_W * ASPECT_RATIO_ROTATION_THRESHOLD)
+            if rotate_ccw:
+                print(f"Detected North-South flightline ({orig_H} lines x {orig_W} samples, aspect ratio {orig_H/orig_W:.2f} > {ASPECT_RATIO_ROTATION_THRESHOLD}).")
+                print("Rotating display 90 degrees counterclockwise (East at top of screen).")
+                ortho_vis = np.rot90(ortho_vis, k=1, axes=(0, 1))
+            else:
+                print(f"Flightline dimensions: {orig_H} lines x {orig_W} samples (aspect ratio {orig_H/orig_W:.2f}). Standard display orientation.")
             
             tile_sizes = TILE_SIZES
             # Use globally configured NOISE_SOURCES
@@ -82,27 +110,39 @@ def main():
             
             print("Loading metrics...")
             for t in tile_sizes:
-                nm_name = f'neighborhood_map_{t}x{t}'
                 h_name = f'heights_map_{t}x{t}'
                 
-                if nm_name in grp and h_name in grp:
-                    nm_data = np.squeeze(grp[nm_name][:])
+                if h_name in grp:
                     h_data = np.squeeze(grp[h_name][:])
                     
                     if VOLUME_METHOD == '3D':
                         h_nz = np.maximum(h_data[..., 1:], 1e-12)
                         P_map = np.cumprod(h_nz, axis=-1)
-                        k_steps = np.arange(1, h_nz.shape[-1] + 1, dtype=np.float32)
-                        v_terms = P_map ** (3.0 / k_steps)
-                        v_3d = P_map[..., 2] + np.sum(v_terms[..., 3:], axis=-1)
-                        nm_data = np.log(np.maximum(v_3d, 1e-12))
+                        if h_nz.shape[-1] >= 3:
+                            k_steps = np.arange(1, h_nz.shape[-1] + 1, dtype=np.float32)
+                            v_terms = P_map ** (3.0 / k_steps)
+                            # Stopping criteria: accumulate higher dimensions j >= 4 only while h_k >= h_crit
+                            is_above = (h_data[..., 1:] >= h_crit)
+                            valid_signal = np.cumprod(is_above.astype(bool), axis=-1).astype(bool)
+                            term_mask = valid_signal[..., 3:]
+                            v_sum = np.sum(np.where(term_mask, v_terms[..., 3:], 0.0), axis=-1)
+                            v_3d = P_map[..., 2] + v_sum
+                            nm_data = np.log(np.maximum(v_3d, 1e-12))
+                        else:
+                            nm_data = np.full(h_data.shape[:-1], np.nan, dtype=np.float32)
                     elif VOLUME_METHOD == '3EM':
                         h_nz = np.maximum(h_data[..., 1:], 1e-12)
                         v_3em = h_nz[..., 0] * h_nz[..., 1] * h_nz[..., 2]
                         nm_data = np.log(np.maximum(v_3em, 1e-12))
                     elif VOLUME_METHOD == 'maxVol':
-                        # Use stored neighborhood_map (precomputed maxVol from process_metrics.py)
-                        pass
+                        h_nz = np.maximum(h_data[..., 1:], 1e-12)
+                        log_P = np.cumsum(np.log(h_nz), axis=-1)
+                        if log_P.shape[-1] > 1:
+                            nm_data = np.max(log_P[..., 1:], axis=-1)
+                        else:
+                            nm_data = np.full(h_data.shape[:-1], np.nan, dtype=np.float32)
+                    else:
+                        raise ValueError(f"Unknown VOLUME_METHOD: '{VOLUME_METHOD}'. Expected '3D', '3EM', or 'maxVol'.")
                     
                     if SPATIAL_AVERAGE:
                         
@@ -121,6 +161,10 @@ def main():
                     
                     nm_data = np.ma.masked_invalid(nm_data)
                     
+                    if rotate_ccw:
+                        nm_data = np.rot90(nm_data, k=1, axes=(0, 1))
+                        h_data = np.rot90(h_data, k=1, axes=(0, 1))
+                    
                     ortho_nms[t] = nm_data
                     ortho_heights[t] = h_data
                     
@@ -129,11 +173,13 @@ def main():
                         n_name = f'noise_heights_map_{src}_{t}x{t}'
                         if n_name in grp:
                             ndata = np.squeeze(grp[n_name][:])
+                            if rotate_ccw:
+                                ndata = np.rot90(ndata, k=1, axes=(0, 1))
                             ortho_noise_heights[t][src] = ndata
                         else:
                             ortho_noise_heights[t][src] = None
                 else:
-                    print(f"Warning: Data for tile size {t}x{t} not found.")
+                    print(f"Warning: Heights map for tile size {t}x{t} ('{h_name}') not found.")
             
             loaded_tile_sizes = [t for t in tile_sizes if t in ortho_nms]
             
@@ -144,10 +190,11 @@ def main():
             num_plots = len(loaded_tile_sizes) + 1
                 
             # --- Figure 1: Orthorectified View ---
-            fig_ortho, axes_ortho = plt.subplots(1, num_plots, figsize=(18, 10))
+            fig_ortho, axes_ortho = plt.subplots(num_plots, 1, figsize=(16, max(6, 2.5 * num_plots)))
             if num_plots == 1:
                 axes_ortho = [axes_ortho]
-            fig_ortho.canvas.manager.set_window_title(f'Map Geometry (Orthorectified - {VOLUME_METHOD})')
+            orientation_tag = " [East Top]" if rotate_ccw else ""
+            fig_ortho.canvas.manager.set_window_title(f'Orthorectified - {VOLUME_METHOD}{orientation_tag}')
             fig_ortho.tight_layout(pad=0.1)
             axes_ortho = np.array(axes_ortho).flatten()
             
@@ -202,7 +249,11 @@ def main():
                 'fig_hist': fig_hist,
                 'ax_hist': ax_hist,
                 'ax_h_twins': ax_h_twins,
-                'ax_h_twins2': ax_h_twins2
+                'ax_h_twins2': ax_h_twins2,
+                'fig_analysis': None,
+                'axes_analysis': None,
+                'fig_rx': None,
+                'axes_rx': None
             }
 
             def onclick(event):
@@ -210,12 +261,18 @@ def main():
                     return
                 
                 is_ortho_main = event.inaxes in axes_ortho
+                has_analysis = state.get('axes_analysis') is not None
+                is_analysis = has_analysis and (event.inaxes in state['axes_analysis'])
+                has_rx = state.get('axes_rx') is not None
+                is_rx_ortho = has_rx and (event.inaxes in state['axes_rx'])
                 has_fc = 'axes_fc' in locals()
-                is_fc_ortho = has_fc and event.inaxes == axes_fc
+                is_fc_ortho = has_fc and (event.inaxes in axes_fc)
+                has_ratio = 'axes_ratio' in locals()
+                is_ratio_ortho = has_ratio and (event.inaxes in axes_ratio)
                 has_gt = 'axes_gt' in locals()
-                is_gt_ortho = has_gt and event.inaxes == axes_gt
+                is_gt_ortho = has_gt and (event.inaxes in axes_gt)
                 
-                if not (is_ortho_main or is_fc_ortho or is_gt_ortho):
+                if not (is_ortho_main or is_analysis or is_rx_ortho or is_fc_ortho or is_ratio_ortho or is_gt_ortho):
                     return
                     
                 ix, iy = int(round(event.xdata)), int(round(event.ydata))
@@ -239,16 +296,42 @@ def main():
                             ax.add_patch(rect)
                             state['patches_all'].append(rect)
                             
+                    square_width = 50 + 1
+                    if has_analysis:
+                        for ax in state['axes_analysis']:
+                            rect_a = patches.Rectangle((map_x - ((square_width-1)//2), map_y - ((square_width-1)//2)), square_width, square_width, linewidth=1.5, edgecolor='white', facecolor='none')
+                            ax.add_patch(rect_a)
+                            state['patches_all'].append(rect_a)
+                    if has_rx:
+                        for ax in state['axes_rx']:
+                            rect_rx = patches.Rectangle((map_x - ((square_width-1)//2), map_y - ((square_width-1)//2)), square_width, square_width, linewidth=1.5, edgecolor='white', facecolor='none')
+                            ax.add_patch(rect_rx)
+                            state['patches_all'].append(rect_rx)
                     if has_fc:
-                        crosshair_fc = axes_fc.plot(map_x, map_y, marker='+', color='white', markersize=12, markeredgewidth=2)[0]
-                        state['patches_all'].append(crosshair_fc)
+                        for ax in axes_fc:
+                            rect_fc = patches.Rectangle((map_x - ((square_width-1)//2), map_y - ((square_width-1)//2)), square_width, square_width, linewidth=1.5, edgecolor='white', facecolor='none')
+                            ax.add_patch(rect_fc)
+                            state['patches_all'].append(rect_fc)
+                    if has_ratio:
+                        for ax in axes_ratio:
+                            rect_ratio = patches.Rectangle((map_x - ((square_width-1)//2), map_y - ((square_width-1)//2)), square_width, square_width, linewidth=1.5, edgecolor='white', facecolor='none')
+                            ax.add_patch(rect_ratio)
+                            state['patches_all'].append(rect_ratio)
                     if has_gt:
-                        crosshair_gt = axes_gt.plot(map_x, map_y, marker='+', color='white', markersize=12, markeredgewidth=2)[0]
-                        state['patches_all'].append(crosshair_gt)
+                        for ax in axes_gt:
+                            rect_gt = patches.Rectangle((map_x - ((square_width-1)//2), map_y - ((square_width-1)//2)), square_width, square_width, linewidth=1.5, edgecolor='white', facecolor='none')
+                            ax.add_patch(rect_gt)
+                            state['patches_all'].append(rect_gt)
                 
                 fig_ortho.canvas.draw_idle()
+                if has_analysis and state.get('fig_analysis') is not None:
+                    state['fig_analysis'].canvas.draw_idle()
+                if has_rx and state.get('fig_rx') is not None:
+                    state['fig_rx'].canvas.draw_idle()
                 if has_fc:
                     fig_fc.canvas.draw_idle()
+                if has_ratio:
+                    fig_ratio.canvas.draw_idle()
                 if has_gt:
                     fig_gt.canvas.draw_idle()
                 
@@ -283,11 +366,13 @@ def main():
                             P = np.cumprod(safe_hnz)
                             
                             if VOLUME_METHOD == '3D':
+                                below_thresh = np.where(h_nz < h_crit)[0]
+                                m_stop = int(below_thresh[0]) if len(below_thresh) > 0 else len(h_nz)
                                 k_steps = np.arange(1, len(h_nz) + 1)
                                 v_3d_terms = P ** (3.0 / k_steps)
                                 v_cum_3d = np.full(len(h_vals), np.nan)
                                 v_cum_3d[3] = P[2]
-                                for idx_k in range(3, len(h_nz)):
+                                for idx_k in range(3, min(len(h_nz), m_stop)):
                                     v_cum_3d[idx_k + 1] = v_cum_3d[idx_k] + v_3d_terms[idx_k]
                                 valid_v = v_cum_3d[~np.isnan(v_cum_3d)]
                                 if len(valid_v) > 0:
@@ -366,20 +451,20 @@ def main():
                         max_p_val = None
 
                         if VOLUME_METHOD == '3D':
-                            # Cumulative 3D-Normalized Volume:
-                            # V_cum^(3D)(k) = V_3 + sum_{j=4}^k (prod_{m=1}^j h_m)^(3/j) for k >= 4
-                            # with base V_cum^(3D)(3) = V_3 = h_1 * h_2 * h_3 at k=4 (index 3 in heights)
+                            # Threshold-Truncated 3D-Normalized Volume:
+                            # Vol^(3D)_n = Vol_3 + sum_{j=4}^n (prod_{m=1}^j h_m)^(3/j)
+                            # where n is the index of the last h_k prior to h_k < h_crit
                             if K > 3:
                                 k_steps = np.arange(1, len(h_nz) + 1)
                                 v_3d_terms = P ** (3.0 / k_steps)
                                 volumes[3] = P[2]  # V_3 = h1 * h2 * h3
-                                for idx_k in range(3, len(h_nz)):
+                                for idx_k in range(3, min(len(h_nz), m_stop)):
                                     volumes[idx_k + 1] = volumes[idx_k] + v_3d_terms[idx_k]
                             y_scale = 'linear'
-                            vol_label = r'Cumul 3D Vol $V_{\mathrm{cum}}^{(3\mathrm{D})}$'
-                            vol_ylabel = r"Cumulative 3D Volume $V_{\mathrm{cum}}^{(3\mathrm{D})}$"
-                            val_stop = volumes[stop_k - 1] if (stop_k <= len(volumes) and not np.isnan(volumes[stop_k - 1])) else volumes[-1]
-                            metric_str = f"V_3D={val_stop:.3f}" if not np.isnan(val_stop) else "V_3D=N/A"
+                            vol_label = r'3D Vol $V_n^{(3\mathrm{D})}$'
+                            vol_ylabel = r"3D Volume $V_n^{(3\mathrm{D})}$"
+                            val_stop = volumes[stop_k - 1] if (stop_k <= len(volumes) and not np.isnan(volumes[stop_k - 1])) else (volumes[3] if len(volumes) > 3 else np.nan)
+                            metric_str = f"V_3D={val_stop:.3f} (k*={stop_k})" if not np.isnan(val_stop) else "V_3D=N/A"
 
                         elif VOLUME_METHOD == '3EM':
                             # Volume produced by 3 endmembers: V_3 = P[2] = h1 * h2 * h3
@@ -424,6 +509,8 @@ def main():
                             ax_h_twin.plot(max_p_k, max_p_val, marker='*', markersize=12, color='darkred', label=f'maxVol ({max_p_val:.2e})')
                         elif VOLUME_METHOD == '3EM' and len(P) > 2:
                             ax_h_twin.plot(4, P[2], marker='*', markersize=12, color='darkred', label=f'3EM ($V_3={P[2]:.3f}$)')
+                        elif VOLUME_METHOD == '3D' and not np.isnan(val_stop):
+                            ax_h_twin.plot(stop_k, val_stop, marker='*', markersize=12, color='darkred', label=rf'$V_n^{{(3\mathrm{{D}})}}={val_stop:.3f}$ ($k^*={stop_k}$)')
                         
                         ax_h_twin.set_ylabel(vol_ylabel, color='red')
                         ax_h_twin.tick_params(axis='y', labelcolor='red')
@@ -433,7 +520,15 @@ def main():
                         
                         ax_h_twin2.set_visible(False)
                         
-                        title_str = f"Tile {t}x{t} at Map ({map_x}, {map_y}) [Stop k={stop_k}, {metric_str}]"
+                        if rotate_ccw:
+                            orig_center_y = map_x
+                            orig_center_x = orig_W - 1 - map_y
+                            title_str = f"Tile {t}x{t} at Rotated ({map_x}, {map_y}) [Orig ({orig_center_x}, {orig_center_y})] [Stop k={stop_k}, {metric_str}]"
+                        else:
+                            orig_center_y = map_y
+                            orig_center_x = map_x
+                            title_str = f"Tile {t}x{t} at Map ({map_x}, {map_y}) [Stop k={stop_k}, {metric_str}]"
+                            
                         ax_h.set_title(title_str)
                         ax_h.set_ylabel("Orthogonal Height")
                         ax_h.grid(True)
@@ -448,8 +543,26 @@ def main():
                         if idx == len(loaded_tile_sizes) - 1:
                             ax_h.set_xlabel("Endmember Index")
                             
-                        # Plot Spectra for the txt neighborhood
-                        spectra_block = surface_reflectance_ds[0, :, y_start:y_end, x_start:x_end]
+                        # Plot Spectra for the txt neighborhood from original surface_reflectance
+                        if rotate_ccw:
+                            orig_y_start = max(0, orig_center_y - offset)
+                            orig_y_end = min(orig_H, orig_center_y + offset + 1)
+                            orig_x_start = max(0, orig_center_x - offset)
+                            orig_x_end = min(orig_W, orig_center_x + offset + 1)
+                            center_y_local = orig_center_y - orig_y_start
+                            center_x_local = orig_center_x - orig_x_start
+                        else:
+                            orig_y_start = y_start
+                            orig_y_end = y_end
+                            orig_x_start = x_start
+                            orig_x_end = x_end
+                            center_y_local = map_y - y_start
+                            center_x_local = map_x - x_start
+                            
+                        if surface_reflectance_ds.ndim == 4:
+                            spectra_block = surface_reflectance_ds[0, :, orig_y_start:orig_y_end, orig_x_start:orig_x_end]
+                        else:
+                            spectra_block = surface_reflectance_ds[:, orig_y_start:orig_y_end, orig_x_start:orig_x_end]
                         spectra_pixels = spectra_block.reshape(spectra_block.shape[0], -1)
                         spectra_pixels = spectra_pixels.astype(np.float32)
                         
@@ -458,9 +571,6 @@ def main():
                             spectra_pixels[spectra_pixels == fill_val] = np.nan
                             
                         spectra_pixels = spectra_pixels / scale_factor
-                        
-                        center_y_local = map_y - y_start
-                        center_x_local = map_x - x_start
                         
                         max_d = max(
                             max(center_y_local, spectra_block.shape[1] - 1 - center_y_local),
@@ -505,84 +615,295 @@ def main():
                 state['fig_hist'].tight_layout()
                 state['fig_hist'].canvas.draw_idle()
             
-            # --- Figure 2: False Color Composite ---
+            def normalize_map(m, power=FALSE_COLOR_POWER):
+                if np.ma.is_masked(m):
+                    m_valid = np.asarray(m.compressed())
+                else:
+                    m_valid = np.asarray(m[~np.isnan(m)])
+                vmin, vmax = np.percentile(m_valid, [2, 98]) if m_valid.size > 0 else (0, 1)
+                if vmax == vmin:
+                    vmax = vmin + 1e-5
+                norm_m = np.clip((m - vmin) / (vmax - vmin), 0, 1)
+                if power != 1.0:
+                    norm_m = np.power(norm_m, power)
+                if np.ma.is_masked(norm_m):
+                    norm_m = norm_m.filled(0)
+                else:
+                    norm_m[np.isnan(norm_m)] = 0
+                return norm_m
+                
+            # --- Combined Analysis Window: 4 Vertical Subplots ---
+            # 1. Ground Truth Extraction
+            x_pixels_valid = np.array([])
+            y_pixels_valid = np.array([])
+            if OVERLAY_GROUND_TRUTH:
+                geo_transform = surface_reflectance_ds.attrs.get('GeoTransform', None)
+                if geo_transform is not None:
+                    try:
+                        df = pd.read_excel(GROUND_TRUTH_FILE, header=None)
+                        easting = pd.to_numeric(df.iloc[:, 2], errors='coerce').values
+                        northing = pd.to_numeric(df.iloc[:, 1], errors='coerce').values
+                        
+                        valid_coords = ~np.isnan(easting) & ~np.isnan(northing)
+                        easting = easting[valid_coords]
+                        northing = northing[valid_coords]
+                        
+                        x_pixels = (easting - geo_transform[0]) / geo_transform[1]
+                        y_pixels = (northing - geo_transform[3]) / geo_transform[5]
+                        
+                        if rotate_ccw:
+                            # Rotate ground truth pixel coords 90° CCW:
+                            x_gt = y_pixels
+                            y_gt = (orig_W - 1.0) - x_pixels
+                        else:
+                            x_gt = x_pixels
+                            y_gt = y_pixels
+                            
+                        valid_gt = (x_gt >= 0) & (x_gt < ortho_vis.shape[1]) & (y_gt >= 0) & (y_gt < ortho_vis.shape[0])
+                        x_pixels_valid = x_gt[valid_gt]
+                        y_pixels_valid = y_gt[valid_gt]
+                    except Exception as e:
+                        print(f"Failed to overlay ground truth: {e}")
+                else:
+                    print("GeoTransform not found in surface_reflectance, cannot overlay ground truth.")
+
+            # 2. False Color Composite
+            rgb_ortho = None
             if FALSE_COLOR_R_TILE in ortho_nms and FALSE_COLOR_G_TILE in ortho_nms and FALSE_COLOR_B_TILE in ortho_nms:
-                def normalize_map(m, power=FALSE_COLOR_POWER):
-                    m_valid = m.compressed() if np.ma.is_masked(m) else m[~np.isnan(m)]
-                    vmin, vmax = np.percentile(m_valid, [2, 98]) if m_valid.size > 0 else (0, 1)
-                    if vmax == vmin:
-                        vmax = vmin + 1e-5
-                    norm_m = np.clip((m - vmin) / (vmax - vmin), 0, 1)
-                    if power != 1.0:
-                        norm_m = np.power(norm_m, power)
-                    if np.ma.is_masked(norm_m):
-                        norm_m = norm_m.filled(0)
-                    else:
-                        norm_m[np.isnan(norm_m)] = 0
-                    return norm_m
-                    
                 rgb_ortho = np.stack([
                     normalize_map(ortho_nms[FALSE_COLOR_R_TILE]), 
                     normalize_map(ortho_nms[FALSE_COLOR_G_TILE]), 
                     normalize_map(ortho_nms[FALSE_COLOR_B_TILE])
                 ], axis=-1)
+            elif len(ortho_nms) > 0:
+                t_first = next(iter(ortho_nms))
+                rgb_ortho = normalize_map(ortho_nms[t_first])
+
+            # 3. Spectral Diversity Ratio ((h2 * h3) / h1^2)
+            def compute_ratio_map(h_arr, t):
+                if h_arr is None or h_arr.shape[-1] < 4:
+                    return None
+                h1 = np.maximum(h_arr[..., 1], 1e-12)
+                h2 = np.maximum(h_arr[..., 2], 0.0)
+                h3 = np.maximum(h_arr[..., 3], 0.0)
+                ratio = (h2 * h3) / (h1 ** 2)
+                valid_mask = np.isfinite(ratio) & (h_arr[..., 1] > 1e-6)
                 
-                fig_fc, axes_fc = plt.subplots(1, 1, figsize=(10, 8))
-                fig_fc.canvas.manager.set_window_title('False Color Complexity View')
-                fig_fc.tight_layout(pad=0.1)
+                if SPATIAL_AVERAGE:
+                    try:
+                        d_data = cp.array(np.where(valid_mask, ratio, 0.0))
+                        d_weights = cp.array(valid_mask.astype(float))
+                        sum_vals = ndimage.uniform_filter(d_data, size=t, mode='constant', cval=0.0).get()
+                        sum_weights = ndimage.uniform_filter(d_weights, size=t, mode='constant', cval=0.0).get()
+                    except Exception:
+                        import scipy.ndimage as sc_ndimage
+                        d_data = np.where(valid_mask, ratio, 0.0)
+                        d_weights = valid_mask.astype(float)
+                        sum_vals = sc_ndimage.uniform_filter(d_data, size=t, mode='constant', cval=0.0)
+                        sum_weights = sc_ndimage.uniform_filter(d_weights, size=t, mode='constant', cval=0.0)
+                        
+                    with np.errstate(invalid='ignore', divide='ignore'):
+                        ratio = np.where(valid_mask & (sum_weights > 0), sum_vals / sum_weights, np.nan)
+                else:
+                    ratio = np.where(valid_mask, ratio, np.nan)
+                    
+                return np.ma.masked_invalid(ratio)
+
+            rgb_ratio = None
+            #if FALSE_COLOR_R_TILE in ortho_heights and FALSE_COLOR_G_TILE in ortho_heights and FALSE_COLOR_B_TILE in ortho_heights:
+            #    ratio_r = compute_ratio_map(ortho_heights[FALSE_COLOR_R_TILE], FALSE_COLOR_R_TILE)
+            #    ratio_g = compute_ratio_map(ortho_heights[FALSE_COLOR_G_TILE], FALSE_COLOR_G_TILE)
+            #    ratio_b = compute_ratio_map(ortho_heights[FALSE_COLOR_B_TILE], FALSE_COLOR_B_TILE)
+            #    if ratio_r is not None and ratio_g is not None and ratio_b is not None:
+            #        rgb_ratio = np.stack([
+            #            normalize_map(ratio_r),
+            #            normalize_map(ratio_g),
+            #            normalize_map(ratio_b)
+            #        ], axis=-1)
+            #elif len(ortho_heights) > 0:
+            #    t_first = next(iter(ortho_heights))
+            #    r_single = compute_ratio_map(ortho_heights[t_first], t_first)
+            #    if r_single is not None:
+            #        rgb_ratio = normalize_map(r_single)
+#
+            # 4. RX Anomaly Detector (spectral.rx)
+            def compute_rx_map(surface_reflectance_ds, orig_H, orig_W, rotate_ccw):
+                print("Computing RX anomaly detector scores (spectral.rx)...")
+                t0_rx = time.time()
                 
-                axes_fc.imshow(rgb_ortho)
-                axes_fc.set_title(f"Orthorectified False Color ({VOLUME_METHOD}, p={FALSE_COLOR_POWER}) (R={FALSE_COLOR_R_TILE}, G={FALSE_COLOR_G_TILE}, B={FALSE_COLOR_B_TILE})")
-                axes_fc.axis('off')
+                # Sample contiguous lines to estimate clean background covariance
+                sample_y = np.linspace(orig_H // 6, orig_H - orig_H // 6, 6, dtype=int)
+                train_list = [surface_reflectance_ds[0, :, y, :] for y in sample_y]
+                train_arr = np.concatenate(train_list, axis=1) # (B, 6 * W)
                 
-                fig_fc.tight_layout()
+                valid_bands = np.mean(train_arr > 0.0, axis=1) > 0.1
+                if not np.any(valid_bands):
+                    valid_bands = np.ones(surface_reflectance_ds.shape[1], dtype=bool)
+                    
+                train_valid = train_arr[valid_bands].T # (N, B_valid)
+                mask = np.all(train_valid > 0.0, axis=-1)
+                bg_pixels = train_valid[mask]
                 
-                # --- Figure 3: Ground Truth Overlay ---
-                if OVERLAY_GROUND_TRUTH:
-                    geo_transform = surface_reflectance_ds.attrs.get('GeoTransform', None)
-                    if geo_transform is not None:
-                        try:
-                            df = pd.read_excel(GROUND_TRUTH_FILE, header=None)
-                            easting = pd.to_numeric(df.iloc[:, 2], errors='coerce').values
-                            northing = pd.to_numeric(df.iloc[:, 1], errors='coerce').values
-                            
-                            valid_coords = ~np.isnan(easting) & ~np.isnan(northing)
-                            easting = easting[valid_coords]
-                            northing = northing[valid_coords]
-                            
-                            x_pixels = (easting - geo_transform[0]) / geo_transform[1]
-                            y_pixels = (northing - geo_transform[3]) / geo_transform[5]
-                            
-                            valid = (x_pixels >= 0) & (x_pixels < rgb_ortho.shape[1]) & (y_pixels >= 0) & (y_pixels < rgb_ortho.shape[0])
-                            x_pixels_valid = x_pixels[valid]
-                            y_pixels_valid = y_pixels[valid]
-                            
-                            fig_gt, axes_gt = plt.subplots(1, 1, figsize=(10, 8))
-                            fig_gt.canvas.manager.set_window_title('Ground Truth Overlay')
-                            fig_gt.tight_layout(pad=0.1)
-                            
-                            axes_gt.imshow(rgb_ortho)
-                            axes_gt.scatter(x_pixels_valid, y_pixels_valid, color='red', marker='x', s=50, label='Ground Truth')
-                            axes_gt.set_title(f"Ground Truth Overlay (Found {np.sum(valid)} targets)")
-                            axes_gt.axis('off')
-                            axes_gt.legend()
-                            fig_gt.tight_layout()
-                            
-                        except Exception as e:
-                            print(f"Failed to overlay ground truth: {e}")
-                    else:
-                        print("GeoTransform not found in surface_reflectance, cannot overlay ground truth.")
+                if len(bg_pixels) > 10:
+                    mean = np.mean(bg_pixels, axis=0)
+                    cov = np.cov(bg_pixels, rowvar=False)
+                    cov_reg = cov + (1e-4 * np.trace(cov) / cov.shape[0]) * np.eye(cov.shape[0])
+                    bg_stats = spectral.GaussianStats(mean, cov_reg)
+                else:
+                    bg_stats = None
+                    
+                rx_map = np.full((orig_H, orig_W), np.nan, dtype=np.float32)
+                chunk_size = 1000
+                for y_start in range(0, orig_H, chunk_size):
+                    y_end = min(orig_H, y_start + chunk_size)
+                    c_raw = surface_reflectance_ds[0, :, y_start:y_end, :] # (B, chunk_lines, W)
+                    c = np.transpose(c_raw[valid_bands], (1, 2, 0)) # (chunk_lines, W, B_valid)
+                    valid_mask = np.all(c > 0.0, axis=-1)
+                    if np.any(valid_mask):
+                        rx_res = spectral.rx(c, background=bg_stats)
+                        rx_map[y_start:y_end] = np.where(valid_mask, rx_res, np.nan)
+                        
+                if rotate_ccw:
+                    rx_map = np.rot90(rx_map, k=1, axes=(0, 1))
+                    
+                print(f"RX map completed in {time.time()-t0_rx:.2f}s.")
+                return rx_map
+            
+            if 'rxanomaly' in grp:
+                print("Loading existing rxanomaly dataset from file...")
+                rx_ds = grp['rxanomaly']
+                if rx_ds.ndim == 3:
+                    rx_map = rx_ds[0, :, :].astype(np.float32)
+                else:
+                    rx_map = rx_ds[:].astype(np.float32)
+                if rotate_ccw:
+                    rx_map = np.rot90(rx_map, k=1, axes=(0, 1))
+            else:
+                rx_map = compute_rx_map(surface_reflectance_ds, orig_H, orig_W, rotate_ccw)
+
+            # --- Combined Figure: 3 Subplots Vertically Arranged ---
+            fig_analysis, axes_analysis = plt.subplots(2, 1, figsize=(14, 8))
+            fig_analysis.canvas.manager.set_window_title(f'Ortho Visual & Spectral Complexity{orientation_tag}')
+            fig_analysis.tight_layout(pad=0.1)
+            
+            # Subplot 0: Ortho Visual with Ground Truth Overlay
+            axes_analysis[0].imshow(ortho_vis)
+            if len(x_pixels_valid) > 0:
+                axes_analysis[0].scatter(x_pixels_valid, y_pixels_valid, color='red', marker='x', s=50, label='Ground Truth')
+                axes_analysis[0].legend(loc='upper right')
+                axes_analysis[0].set_title(f"1. Ortho Visual with Ground Truth Overlay{orientation_tag}")
+            else:
+                axes_analysis[0].set_title(f"1. Ortho Visual{orientation_tag}")
+            axes_analysis[0].axis('off')
+            
+            # Subplot 1: False Color Complexity
+            if rgb_ortho is not None:
+                if rgb_ortho.ndim == 3:
+                    axes_analysis[1].imshow(rgb_ortho)
+                    axes_analysis[1].set_title(rf"2. False Color Complexity ($Vol_n$={VOLUME_METHOD}) (R={FALSE_COLOR_R_TILE}, G={FALSE_COLOR_G_TILE}, B={FALSE_COLOR_B_TILE}){orientation_tag}")
+                else:
+                    im_fc = axes_analysis[1].imshow(rgb_ortho, cmap='inferno')
+                    fig_analysis.colorbar(im_fc, ax=axes_analysis[1], fraction=0.046, pad=0.04)
+                    axes_analysis[1].set_title(f"2. False Color Spectral Complexity ({VOLUME_METHOD}){orientation_tag}")
+                if len(x_pixels_valid) > 0:
+                    axes_analysis[1].scatter(x_pixels_valid, y_pixels_valid, color='red', marker='x', s=50, linewidth=1.5, label='Ground Truth')
+                    axes_analysis[1].legend(loc='upper right')
+            else:
+                axes_analysis[1].set_title(f"2. False Color Complexity (Not Available){orientation_tag}")
+            axes_analysis[1].axis('off')
+            
+            # Subplot 2: Spectral Diversity Ratio
+            if rgb_ratio is not None:
+                if rgb_ratio.ndim == 3:
+                    axes_analysis[2].imshow(rgb_ratio)
+                    axes_analysis[2].set_title(rf"3. Spectral Diversity Ratio $(h_2 \cdot h_3 / h_1^2)$ (R={FALSE_COLOR_R_TILE}, G={FALSE_COLOR_G_TILE}, B={FALSE_COLOR_B_TILE}){orientation_tag}")
+                else:
+                    im_ratio = axes_analysis[2].imshow(rgb_ratio, cmap='inferno')
+                    fig_analysis.colorbar(im_ratio, ax=axes_analysis[2], fraction=0.046, pad=0.04)
+                    axes_analysis[2].set_title(rf"3. Spectral Diversity Ratio $(h_2 \cdot h_3 / h_1^2){orientation_tag}")
+                if len(x_pixels_valid) > 0:
+                    axes_analysis[2].scatter(x_pixels_valid, y_pixels_valid, color='red', marker='x', s=50, linewidth=1.5, label='Ground Truth')
+                    axes_analysis[2].legend(loc='upper right')
+
+                axes_analysis[2].axis('off')
+            
+            fig_analysis.tight_layout()
+            state['fig_analysis'] = fig_analysis
+            state['axes_analysis'] = axes_analysis
+            
+            # --- New Figure: RX Anomaly Detector & Ortho Visual ---
+            fig_rx, axes_rx = plt.subplots(2, 1, figsize=(14, 8))
+            fig_rx.canvas.manager.set_window_title(f'RX Anomaly Detector & Ortho Visual{orientation_tag}')
+            fig_rx.tight_layout(pad=0.1)
+            
+            # Subplot 0: Ortho Visual with Ground Truth Overlay
+            axes_rx[0].imshow(ortho_vis)
+            if len(x_pixels_valid) > 0:
+                axes_rx[0].scatter(x_pixels_valid, y_pixels_valid, color='red', marker='x', s=50, linewidth=1.5, label='Ground Truth')
+                axes_rx[0].legend(loc='upper right')
+                axes_rx[0].set_title(f"1. Ortho Visual with Ground Truth Overlay {orientation_tag}")
+            else:
+                axes_rx[0].set_title(f"1. Ortho Visual{orientation_tag}")
+            axes_rx[0].axis('off')
+            
+            # Subplot 1: RX Anomaly Detector (spectral.rx) with black background for the plot area
+            cmap_rx = plt.get_cmap('inferno').copy()
+            cmap_rx.set_bad(color='black')
+            
+            axes_rx[1].set_facecolor('black')
+            axes_rx[1].set_xticks([])
+            axes_rx[1].set_yticks([])
+            for s in axes_rx[1].spines.values():
+                s.set_visible(False)
+                
+            rx_valid = rx_map[np.isfinite(rx_map)]
+            if rx_valid.size > 0:
+                vmin_rx, vmax_rx = np.percentile(rx_valid, [2, 98])
+                im_rx = axes_rx[1].imshow(np.clip(rx_map, vmin_rx, vmax_rx), cmap=cmap_rx)
+                cb_rx = fig_rx.colorbar(im_rx, ax=axes_rx[1], fraction=0.046, pad=0.04)
+                cb_rx.set_label("RX Detector Score")
+            else:
+                im_rx = axes_rx[1].imshow(rx_map, cmap=cmap_rx)
+            if len(x_pixels_valid) > 0:
+                axes_rx[1].scatter(x_pixels_valid, y_pixels_valid, color='red', marker='x', s=50, linewidth=1.5, label='Ground Truth')
+                axes_rx[1].legend(loc='upper right')
+            axes_rx[1].set_title(f"2. RX Anomaly Detector (spectral.rx){orientation_tag}")
+            
+            fig_rx.tight_layout()
+            state['fig_rx'] = fig_rx
+            state['axes_rx'] = axes_rx
             
             fig_ortho.canvas.mpl_connect('button_press_event', onclick)
+            if 'fig_analysis' in locals():
+                fig_analysis.canvas.mpl_connect('button_press_event', onclick)
+            if 'fig_rx' in locals():
+                fig_rx.canvas.mpl_connect('button_press_event', onclick)
             
-            if 'fig_fc' in locals():
-                fig_fc.canvas.mpl_connect('button_press_event', onclick)
-            else:
-                print(f"False color composite skipped: Could not find all of tiles {FALSE_COLOR_R_TILE}, {FALSE_COLOR_G_TILE}, {FALSE_COLOR_B_TILE}")
-            
-            if 'fig_gt' in locals():
-                fig_gt.canvas.mpl_connect('button_press_event', onclick)
-                
+            # Save initial display figures
+            if SAVE_INITIAL_FIGURES:
+                h5_dir = os.path.dirname(os.path.abspath(file_path))
+                base_name = os.path.splitext(os.path.basename(file_path))[0]
+                save_dir = os.path.join(h5_dir, f"{base_name}_{folder_name}")
+                os.makedirs(save_dir, exist_ok=True)
+                print(f"\nSaving initial display figures to: {save_dir}")
+
+                if 'fig_ortho' in locals() and fig_ortho is not None:
+                    ortho_path = os.path.join(save_dir, f"{base_name}_map_geometry.png")
+                    print(f"  Saving Map Geometry figure: {ortho_path}")
+                    fig_ortho.savefig(ortho_path, dpi=SAVE_FIGURES_DPI, bbox_inches='tight')
+
+                if 'fig_analysis' in locals() and fig_analysis is not None:
+                    analysis_path = os.path.join(save_dir, f"{base_name}_comparative_analysis.png")
+                    print(f"  Saving Comparative Analysis figure: {analysis_path}")
+                    fig_analysis.savefig(analysis_path, dpi=SAVE_FIGURES_DPI, bbox_inches='tight')
+
+                if 'fig_rx' in locals() and fig_rx is not None:
+                    rx_path = os.path.join(save_dir, f"{base_name}_rx_anomaly_detector.png")
+                    print(f"  Saving RX Anomaly Detector figure: {rx_path}")
+                    fig_rx.savefig(rx_path, dpi=SAVE_FIGURES_DPI, bbox_inches='tight')
+
+                print("Initial display figures saved successfully.\n")
+
             plt.show()
             
     except Exception as e:

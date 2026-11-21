@@ -161,7 +161,7 @@ def generate_foliar_ground_truth():
                     mask = (wl_1b >= t_min) & (wl_1b <= t_max)
                     mean_1b[mask] = np.nan
                     std_1b[mask] = np.nan
-                ax_spec.plot(wl_1b, mean_1b, label='Norway Maple (Tar Spot - Replicate 1b)', 
+                ax_spec.plot(wl_1b, mean_1b, label='Norway Maple (Tar Spot 1b - Rearranged Placement)', 
                              color='#e6550d', linestyle=':', linewidth=2.0)
                 ax_spec.fill_between(wl_1b, mean_1b - std_1b, mean_1b + std_1b, color='#e6550d', alpha=0.1)
 

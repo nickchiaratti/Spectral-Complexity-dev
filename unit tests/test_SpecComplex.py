@@ -12,7 +12,7 @@ import SpecComplex
 import SpecComplexTorch
 from maximumDistance_Volumes import maximumDistance_parallelotopeVolumes
 
-FILE_PATH = r"C:/satelliteImagery/MGRS30mConstellation/Harmonized_MGRS_Stack_Rochesterv2.h5"
+FILE_PATH = r"C:\satelliteImagery\HLST30\HLST_Rochesterv2.h5"
 
 def get_test_cases():
     if not os.path.exists(FILE_PATH):
@@ -78,6 +78,11 @@ def real_data(request):
         # Fallback if too strict
         if np.sum(valid_mask) < 25:
             valid_mask = np.all((img_flat >= 0) & (img_flat <= 1), axis=1)
+            
+        # Incorporate common_mask from ARD HDF5 file (True = Invalid/Masked, False = Valid)
+        if 'common_mask' in ds.parent:
+            cm = ds.parent['common_mask'][frame_idx]
+            valid_mask = valid_mask & (~cm.flatten())
             
         valid_pixels = img_flat[valid_mask]
         
@@ -398,6 +403,158 @@ def test_maximumDistance_parallelotopeVolumes_synthetic():
         vol_sep, vol_linear_2d, rtol=1e-8, atol=1e-5,
         err_msg="Synthetic: Linear scale volumes mismatch on 2D input"
     )
+
+
+def test_maximumDistance_cholesky(real_data):
+    """
+    Validates equivalence of maximumDistance_cholesky against maximumDistance_volumes
+    on real satellite data filtered via common_mask.
+    """
+    num_endmembers = 7
+    img = real_data
+    rows, cols, bands = img.shape
+    
+    img_flat = np.reshape(img, (rows * cols, bands), order="F")
+    pixels_t = img_flat.T  # (bands, num_pixels)
+    
+    em_chol, vol_chol, h_chol = SpecComplex.maximumDistance_cholesky(pixels_t, num_endmembers)
+    em_vol, vol_vol, h_vol = SpecComplex.maximumDistance_volumes_test(pixels_t, num_endmembers)
+    
+    np.testing.assert_allclose(
+        em_chol, em_vol, rtol=1e-5, atol=1e-5,
+        err_msg="Endmembers mismatch between Cholesky and standard MaxD"
+    )
+    np.testing.assert_allclose(
+        vol_chol, vol_vol, rtol=1e-5, atol=1e-5,
+        err_msg="Volumes mismatch between Cholesky and standard MaxD"
+    )
+    np.testing.assert_allclose(
+        h_chol, h_vol, rtol=1e-5, atol=1e-5,
+        err_msg="Heights mismatch between Cholesky and standard MaxD"
+    )
+    
+    expected_vol = np.cumprod(h_chol[1:])
+    np.testing.assert_allclose(
+        vol_chol[1:], expected_vol, rtol=1e-6, atol=1e-6,
+        err_msg="Cumulative product of heights does not match volumes in Cholesky"
+    )
+
+
+def test_maximumDistance_cholesky_torch(real_data):
+    """
+    Validates equivalence of maximumDistance_cholesky_torch against maximumDistance_volumes_torch
+    on real satellite data filtered via common_mask.
+    """
+    num_endmembers = 7
+    img = real_data
+    rows, cols, bands = img.shape
+    
+    img_flat = np.reshape(img, (rows * cols, bands), order="F")
+    data_torch = torch.from_numpy(img_flat).transpose(0, 1).unsqueeze(0)  # (1, bands, pixels)
+    
+    em_chol, vol_chol, h_chol = SpecComplexTorch.maximumDistance_cholesky_torch(
+        data_torch, num_endmembers, return_heights=True
+    )
+    em_vol, vol_vol, h_vol = SpecComplexTorch.maximumDistance_volumes_torch(
+        data_torch, num_endmembers, return_heights=True
+    )
+    
+    em_chol_np = em_chol.squeeze(0).cpu().numpy()
+    vol_chol_np = vol_chol.squeeze(0).cpu().numpy()
+    h_chol_np = h_chol.squeeze(0).cpu().numpy()
+    
+    em_vol_np = em_vol.squeeze(0).cpu().numpy()
+    vol_vol_np = vol_vol.squeeze(0).cpu().numpy()
+    h_vol_np = h_vol.squeeze(0).cpu().numpy()
+    
+    np.testing.assert_allclose(
+        em_chol_np, em_vol_np, rtol=1e-5, atol=1e-5,
+        err_msg="Endmembers mismatch between Torch Cholesky and Torch standard"
+    )
+    np.testing.assert_allclose(
+        vol_chol_np, vol_vol_np, rtol=1e-5, atol=1e-5,
+        err_msg="Volumes mismatch between Torch Cholesky and Torch standard"
+    )
+    np.testing.assert_allclose(
+        h_chol_np, h_vol_np, rtol=1e-5, atol=1e-5,
+        err_msg="Heights mismatch between Torch Cholesky and Torch standard"
+    )
+
+
+def test_process_cholesky_volume_sliding_tile_real_data():
+    """
+    Validates process_cholesky_volume_sliding_tile against process_volume_sliding_tile
+    on real satellite imagery where common_mask is applied to exclude invalid pixels.
+    Confirms identical invalid/NaN tile handling and relative difference within float32 limits.
+    """
+    if not os.path.exists(FILE_PATH):
+        pytest.skip(f"Test file not found: {FILE_PATH}")
+        
+    with h5py.File(FILE_PATH, 'r') as f:
+        if 'HDFEOS/GRIDS/HLSL30/Data Fields' not in f:
+            pytest.skip("HLSL30 grid not found")
+        df = f['HDFEOS/GRIDS/HLSL30/Data Fields']
+        sr_ds = df['surface_reflectance']
+        cm_ds = df['common_mask']
+        scale = sr_ds.attrs.get('scale_to_float', 0.0001)
+        
+        frame_idx = None
+        for i in range(min(10, cm_ds.shape[0])):
+            cm = cm_ds[i]
+            if np.sum(~cm) > 1000:
+                frame_idx = i
+                break
+        if frame_idx is None:
+            pytest.skip("No frame with valid common_mask pixels found")
+            
+        cm = cm_ds[frame_idx]
+        sr = sr_ds[frame_idx].astype(np.float32) * scale
+        sr[:, cm] = np.nan
+        
+        valid_coords = np.argwhere(~cm)
+        r_mid, c_mid = valid_coords[len(valid_coords) // 2]
+        r_start = max(0, r_mid - 50)
+        c_start = max(0, c_mid - 50)
+        sub_sr = sr[:, r_start:r_start+100, c_start:c_start+100]
+        
+        tile_size = 3
+        stride = 1
+        num_endmembers = 4
+        
+        final_std, neigh_std, esd_std, sii_std = SpecComplexTorch.process_volume_sliding_tile(
+            sub_sr, tile_size, stride, num_endmembers, compute_esd=True, compute_sii=True, global_sigma_n=0.01
+        )
+        final_chol, neigh_chol, esd_chol, sii_chol = SpecComplexTorch.process_cholesky_volume_sliding_tile(
+            sub_sr, tile_size, stride, num_endmembers, compute_esd=True, compute_sii=True, global_sigma_n=0.01
+        )
+        
+        # 1. Both methods must produce identical NaN masks (strict tile validity match)
+        np.testing.assert_array_equal(
+            np.isnan(neigh_std), np.isnan(neigh_chol),
+            err_msg="Tile validity mask differs between standard and Cholesky sliding tile"
+        )
+        
+        # 2. On valid tiles, relative difference must be bounded by float32 precision
+        valid_tiles = np.isfinite(neigh_std)
+        assert np.sum(valid_tiles) > 0, "No valid tiles in sub-region"
+        
+        vol_std = neigh_std[valid_tiles]
+        vol_chol = neigh_chol[valid_tiles]
+        
+        rel_diff = np.abs(vol_std - vol_chol) / np.maximum(vol_std, 1e-12)
+        assert np.max(rel_diff) < 1e-5, f"Relative difference exceeds tolerance: max rel diff = {np.max(rel_diff)}"
+        
+        # 3. ESD counts must match exactly on all valid tiles
+        np.testing.assert_array_equal(
+            esd_std[valid_tiles], esd_chol[valid_tiles],
+            err_msg="ESD counts mismatch on valid tiles"
+        )
+        
+        # 4. SII values must match within tolerance
+        np.testing.assert_allclose(
+            sii_std[valid_tiles], sii_chol[valid_tiles], rtol=1e-5, atol=1e-5,
+            err_msg="SII values mismatch on valid tiles"
+        )
 
 
 if __name__ == "__main__":

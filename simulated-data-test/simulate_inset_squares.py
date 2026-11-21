@@ -5,7 +5,10 @@ import sys
 import pandas as pd
 from bs4 import BeautifulSoup
 # Set default color sequence for line plots and scatter plots
-plt.rcParams['axes.prop_cycle'] = plt.cycler(color=plt.colormaps['okabe_ito'].colors)
+try:
+    plt.rcParams['axes.prop_cycle'] = plt.cycler(color=plt.colormaps['okabe_ito'].colors)
+except Exception:
+    pass
 
 # --- Configuration ---
 SIMULATED_SENSORS=["rsLandsat8", "rsSentinel2", "rsWorldView3", "cvHYMAP2014", "cvAVIRISc2014", "cvASD", "cvHySpexMjolnir", "cvHySpex"]
@@ -22,7 +25,7 @@ cvHYMAP2014_HTML_INDEX_PATH = r"C:\satelliteImagery\ground_truth\splib07\indexes
 cvHYMAP2014_WV_FILE = r"C:\satelliteImagery\ground_truth\splib07\ASCIIdata\ASCIIdata_splib07b_cvHYMAP2014\s07_HY14_HyMap2_Alaska2014_wavelengths_126ch.txt"
 cvAVIRISc2014_HTML_INDEX_PATH = r"C:\satelliteImagery\ground_truth\splib07\indexes\datatable_splib07b_cvAVIRISc2014.html"
 cvAVIRISc2014_WV_FILE = r"C:\satelliteImagery\ground_truth\splib07\ASCIIdata\ASCIIdata_splib07b_cvAVIRISc2014\s07_AV14_Wavelengths_in_microns_224_ch_AVIRIS14a.txt"
-cvHySpexMjolnir_HTML_INDEX_PATH = None
+cvHySpexMjolnir_HTML_INDEX_PATH = cvASD_HTML_INDEX_PATH
 cvHySpexMjolnir_WV_FILE = (
     r"C:\satelliteImagery\ground_truth\hyspex\hyspex_mjolnir_vs620_wavelengths_microns.txt"
     if os.path.exists(r"C:\satelliteImagery\ground_truth\hyspex\hyspex_mjolnir_vs620_wavelengths_microns.txt")
@@ -33,13 +36,36 @@ cvHySpexMjolnir_FWHM_FILE = (
     if os.path.exists(r"C:\satelliteImagery\ground_truth\hyspex\hyspex_mjolnir_vs620_fwhm_microns.txt")
     else os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "wavelengths", "hyspex_mjolnir_vs620_fwhm_microns.txt"))
 )
-cvHySpex_HTML_INDEX_PATH = None
+cvHySpex_HTML_INDEX_PATH = cvASD_HTML_INDEX_PATH
 cvHySpex_WV_FILE = cvHySpexMjolnir_WV_FILE
 cvHySpex_FWHM_FILE = cvHySpexMjolnir_FWHM_FILE
 
 # Self collected Leaf spectral data using an ASD Field Spectrometer. Leaf1 type is a norway maple, Leaf2 is a silver maple. The disease is tar spot.
 NICKS_LEAVES_DIR  ="C:/satelliteImagery/ground_truth/NickLeaves_20261001"
-CALIBRATION_TARGETS_DIR = r"C:\satelliteImagery\ground_truth\calibration_targets"
+CALIBRATION_TARGETS_DIR = r"C:\satelliteImagery\ground_truth\calibration_targets"#These are the materials that are used in the experiment.
+GOOD_MATERIAL_LIST =[
+    "Oak Oak-Leaf-1",
+    "NICKLEAVES:HealthyLeaf1",
+    "NICKLEAVES:HealthyLeaf2",
+    "CALTARGET:big_white_panel",
+    "CALTARGET:big_gray_panel",
+    "CALTARGET:50_percent_cal_panel",
+    "CALTARGET:10_percent_gray_panel",
+    "Lodgepole-Pine",
+    "Maple_Leaves",
+    "Douglas-Fir",
+    "Aspen Aspen-1",
+    "Aspen Aspen-4",
+    "Conifer-Meadow",
+    "Goethite0.02+Quartz",
+    "Sheet_Metal GDS352",
+    "Ultramarine GDS791",
+    "Cuprite HS127.3B",
+    "NICKLEAVES:DiseaseLeaf1",
+    "NICKLEAVES:DiseaseLeaf2",
+    "NICKLEAVES:HealthyLeaf1",
+    "NICKLEAVES:HealthyLeaf2",
+]
 
 # Provide materials (outermost to innermost square)
 MATERIALS_TO_USE = {
@@ -77,16 +103,15 @@ def maximumDistance_parallelotopeVolumes(pixels, num_endmembers):
     """
     if pixels.ndim == 3:
         h, w, num_bands = pixels.shape
-        pixels = np.reshape(pixels, (h * w, num_bands), order="F").astype(np.float64).T
-    elif pixels.ndim == 2:
-        pixels = pixels.astype(np.float64)
+        pixels = np.reshape(pixels, (h * w, num_bands), order="F").astype(pixels.dtype).T
 
     num_bands, num_pixels = pixels.shape
+    epsilon=np.sqrt(num_bands)*np.finfo(pixels.dtype).eps
 
     # Initialize Variables
     endmembers = np.zeros((num_bands, num_endmembers), dtype=pixels.dtype)
-    volumes = np.full(num_endmembers, -np.inf, dtype=np.float64)
-    heights = np.zeros(num_endmembers, dtype=np.float64)
+    volumes = np.full(num_endmembers, -np.inf, dtype=pixels.dtype)
+    heights = np.zeros(num_endmembers, dtype=pixels.dtype)
     indices = np.zeros(num_endmembers, dtype=int)
 
     # Initialization
@@ -107,14 +132,14 @@ def maximumDistance_parallelotopeVolumes(pixels, num_endmembers):
     residuals = pixels - origin                        # (bands, num_pixels)
 
     # Calculate the first direction vector 𝒅_1, height ℎ_1, and orthonormal basis 𝒒_1
-    # 𝒅_1=𝒗_1−𝒗_0
+    # 𝒅_1=𝒗_0−𝒗_1
     # ℎ_1=‖𝒅_1 ‖
     # 𝒒_1=𝒅_1/ℎ_1  
-    d1 = residuals[:, idx_maxnorm].copy()              # (bands, 1)
+    d1 = residuals[:, idx_maxnorm].copy()              # (bands, )
     h1 = np.linalg.norm(d1)
-    volumes[1] = np.log(h1) if h1 > 1e-15 else -np.inf
+    volumes[1] = np.log(h1) if h1 > epsilon else -np.inf
     heights[1] = h1
-    if h1 > 1e-15:
+    if h1 > epsilon:
         q1 = d1 / h1  # (bands,1)
         proj_component = np.outer(q1, np.dot(q1, residuals))  # equivalent to q1*q1.T*residuals in vector operations
         residuals -= proj_component
@@ -139,15 +164,17 @@ def maximumDistance_parallelotopeVolumes(pixels, num_endmembers):
         # Calculate the subsequent height ℎ_𝑗 and orthonormal basis 𝒒_𝑗
         # ℎ_𝑗=‖𝒓_𝑗 (𝒗_𝑗 )‖
         # 𝒒_𝒋=(𝒓_𝑗 (𝒗_𝑗 ))/ℎ_𝑗 
-        h_j = np.linalg.norm(v_j)
-        heights[j] = h_j
-
-        if h_j > 1e-15:
-            q_j = v_j / h_j
+        v_64 = v_j.astype(np.float64)
+        h_j = float(np.linalg.norm(v_64))
+        
+        if h_j > epsilon:
+            heights[j] = h_j
+            q_j = (v_64 / h_j).astype(np.float32)
             volumes[j] = volumes[j - 1] + np.log(h_j)
             proj_component = np.outer(q_j, np.dot(q_j, residuals)) # equivalent to q_j*q_j.T*residuals in vector operations
             residuals -= proj_component
         else:
+            heights[j] = -np.inf
             volumes[j] = -np.inf
 
     return endmembers, volumes, heights, indices
@@ -172,26 +199,27 @@ def maximumDistance_parallelotopeVolumes_noise(pixels, num_endmembers, noise_pix
     """
     if pixels.ndim == 3:
         h, w, num_bands = pixels.shape
-        pixels = np.reshape(pixels, (h * w, num_bands), order="F").astype(np.float32).T
+        pixels = np.reshape(pixels, (h * w, num_bands), order="F").astype(pixels.dtype).T
     elif pixels.ndim == 2:
-        pixels = pixels.astype(np.float32)
+        pixels = pixels.astype(pixels.dtype)
 
     if noise_pixels.ndim == 3:
         hn, wn, num_bands_n = noise_pixels.shape
-        noise_pixels = np.reshape(noise_pixels, (hn * wn, num_bands_n), order="F").astype(np.float32).T
+        noise_pixels = np.reshape(noise_pixels, (hn * wn, num_bands_n), order="F").astype(pixels.dtype).T
     elif noise_pixels.ndim == 2:
-        noise_pixels = noise_pixels.astype(np.float32)
+        noise_pixels = noise_pixels.astype(pixels.dtype)
     
     noise_residuals = noise_pixels.copy()
-    noise_norms_mean = np.zeros(num_endmembers, dtype=np.float32)
-    noise_heights = np.zeros(num_endmembers, dtype=np.float32)
+    noise_norms_mean = np.zeros(num_endmembers, dtype=pixels.dtype)
+    noise_heights = np.zeros(num_endmembers, dtype=pixels.dtype)
 
     num_bands, num_pixels = pixels.shape
+    epsilon=np.sqrt(num_bands)*np.finfo(pixels.dtype).eps
 
     # Initialize Variables
     endmembers = np.zeros((num_bands, num_endmembers), dtype=pixels.dtype)
-    volumes = np.full(num_endmembers, -np.inf, dtype=np.float32)
-    heights = np.zeros(num_endmembers, dtype=np.float32)
+    volumes = np.full(num_endmembers, -np.inf, dtype=pixels.dtype)
+    heights = np.zeros(num_endmembers, dtype=pixels.dtype)
     indices = np.zeros(num_endmembers, dtype=int)
 
     # Initialization
@@ -248,20 +276,24 @@ def maximumDistance_parallelotopeVolumes_noise(pixels, num_endmembers, noise_pix
         # Calculate the subsequent height ℎ_𝑗 and orthonormal basis 𝒒_𝑗
         # ℎ_𝑗=‖𝒓_𝑗 (𝒗_𝑗 )‖
         # 𝒒_𝒋=(𝒓_𝑗 (𝒗_𝑗 ))/ℎ_𝑗 
-        h_j = np.linalg.norm(v_j)
-        heights[j] = h_j
-        noise_heights[j] = np.linalg.norm(noise_residuals[:, idx_new].copy())
-        noise_norms_mean[j] = np.mean(np.linalg.norm(noise_residuals, axis=0))
+        v_64 = v_j.astype(np.float64)
+        h_j = float(np.linalg.norm(v_64))
 
-        if h_j > 1e-15:
-            q_j = v_j / h_j
+        if h_j > epsilon:
+            heights[j] = h_j
+            noise_heights[j] = np.linalg.norm(noise_residuals[:, idx_new].copy())
+            noise_norms_mean[j] = np.mean(np.linalg.norm(noise_residuals, axis=0))
+            q_j = (v_64 / h_j).astype(np.float32)
             volumes[j] = volumes[j - 1] + np.log(h_j)
             proj_component = np.outer(q_j, np.dot(q_j, residuals)) # equivalent to q_j*q_j.T*residuals in vector operations
             residuals -= proj_component
             noise_proj = np.outer(q_j, np.dot(q_j, noise_residuals))
             noise_residuals -= noise_proj
         else:
+            heights[j] = -np.inf
             volumes[j] = -np.inf
+            noise_heights[j] = -np.inf
+            noise_norms_mean[j] = -np.inf
 
     return endmembers, volumes, heights, indices, noise_heights, noise_norms_mean
 
@@ -542,82 +574,197 @@ def create_4corner_mixture_layer(materials, size):
         
     return layer
 
-def main(sensor_name):
-    print("Parsing HTML index to find material files...")
+# --- Material Loading, Resampling & Tile Generation ---
+_SOUP_CACHE = {}
+_MATERIAL_SPECTRAL_CACHE = {}
+_CACHED_ASD_WAV_NM = None
+
+def resample_asd_to_sensor(asd_spectrum, asd_wavelengths_nm, sensor_cw_nm, sensor_fwhm_nm):
+    """
+    Vectorized Gaussian Spectral Response Function (SRF) convolution to resample
+    a 2151-channel (350-2500 nm) ASD spectrum to a sensor's bandpass specification.
+    """
+    valid = ~np.isnan(asd_spectrum) & ~np.isnan(asd_wavelengths_nm)
+    if not np.any(valid):
+        return np.full_like(sensor_cw_nm, np.nan, dtype=np.float32)
+    w_val = asd_wavelengths_nm[valid]
+    r_val = asd_spectrum[valid].astype(np.float64)
+    
+    diff = w_val[None, :] - sensor_cw_nm[:, None]
+    srf = np.exp(-4.0 * np.log(2.0) * (diff / sensor_fwhm_nm[:, None])**2)
+    sum_srf = srf.sum(axis=1)
+    
+    resampled = (srf @ r_val) / np.where(sum_srf > 0, sum_srf, 1.0)
+    resampled[sum_srf <= 0] = np.nan
+    return resampled.astype(np.float32)
+
+def get_sensor_paths(sensor_name):
+    """Returns (html_index_path, wv_file, fwhm_file) for the requested sensor."""
     if sensor_name == "rsLandsat8":
-        HTML_INDEX_PATH = rsLandsat8_HTML_INDEX_PATH
-        WV_FILE = rsLandsat8_WV_FILE
+        return rsLandsat8_HTML_INDEX_PATH, rsLandsat8_WV_FILE, None
     elif sensor_name == "rsSentinel2":
-        HTML_INDEX_PATH = rsSentinel2_HTML_INDEX_PATH
-        WV_FILE = rsSentinel2_WV_FILE
+        return rsSentinel2_HTML_INDEX_PATH, rsSentinel2_WV_FILE, None
     elif sensor_name == "rsWorldView3":
-        HTML_INDEX_PATH = rsWorldView3_HTML_INDEX_PATH
-        WV_FILE = rsWorldView3_WV_FILE
+        return rsWorldView3_HTML_INDEX_PATH, rsWorldView3_WV_FILE, None
     elif sensor_name == "cvHYMAP2014":
-        HTML_INDEX_PATH = cvHYMAP2014_HTML_INDEX_PATH
-        WV_FILE = cvHYMAP2014_WV_FILE
+        return cvHYMAP2014_HTML_INDEX_PATH, cvHYMAP2014_WV_FILE, None
     elif sensor_name == "cvAVIRISc2014":
-        HTML_INDEX_PATH = cvAVIRISc2014_HTML_INDEX_PATH
-        WV_FILE = cvAVIRISc2014_WV_FILE
+        return cvAVIRISc2014_HTML_INDEX_PATH, cvAVIRISc2014_WV_FILE, None
     elif sensor_name in ["cvHySpexMjolnir", "cvHySpex"]:
-        HTML_INDEX_PATH = cvHySpexMjolnir_HTML_INDEX_PATH
-        WV_FILE = cvHySpexMjolnir_WV_FILE
+        return cvASD_HTML_INDEX_PATH, cvHySpexMjolnir_WV_FILE, cvHySpexMjolnir_FWHM_FILE
     elif sensor_name == "cvASD":
-        HTML_INDEX_PATH = cvASD_HTML_INDEX_PATH
-        WV_FILE = cvASD_WV_FILE
+        return cvASD_HTML_INDEX_PATH, cvASD_WV_FILE, None
     else:
         raise ValueError(f"Unknown sensor name: {sensor_name}")
-        
-    soup = None
-    if HTML_INDEX_PATH and os.path.exists(HTML_INDEX_PATH):
-        with open(HTML_INDEX_PATH, 'r', encoding='utf-8', errors='ignore') as f:
-            soup = BeautifulSoup(f, 'html.parser')
-        
+
+def load_sensor_material_spectra(sensor_name, material_names, verbose=False):
+    """
+    Loads material reflectance spectra resampled/aligned to a specific sensor bandpass.
+    Supports USGS splib07 libraries, NICKLEAVES field spectra, and CALTARGET calibration panels.
+    Returns (loaded_materials_dict, clean_wavelengths).
+    """
+    global _CACHED_ASD_WAV_NM
+    html_path, wv_file, fwhm_file = get_sensor_paths(sensor_name)
+
     loaded_materials = {}
+    for mat_name in material_names:
+        cache_key = (sensor_name, mat_name)
+        if cache_key in _MATERIAL_SPECTRAL_CACHE:
+            loaded_materials[mat_name] = _MATERIAL_SPECTRAL_CACHE[cache_key].copy()
+            if verbose:
+                print(f"Found {mat_name} (cached)")
+            continue
+
+        if mat_name.startswith("NICKLEAVES:"):
+            filename_str = mat_name.split(":", 1)[1]
+            csv_path = os.path.join(NICKS_LEAVES_DIR, f"{sensor_name}_{filename_str}.csv")
+            if not os.path.exists(csv_path) and sensor_name in ["cvHySpex", "cvHySpexMjolnir"]:
+                alt_sensor = "cvHySpexMjolnir" if sensor_name == "cvHySpex" else "cvHySpex"
+                alt_path = os.path.join(NICKS_LEAVES_DIR, f"{alt_sensor}_{filename_str}.csv")
+                if os.path.exists(alt_path):
+                    csv_path = alt_path
+            if verbose:
+                print(f"Found {mat_name}: {os.path.basename(csv_path)}")
+            df = pd.read_csv(csv_path)
+            mat_data = df['DHR_mean'].values.astype(np.float32)
+        elif mat_name.startswith("CALTARGET:") or mat_name.startswith("CALIBRATION:"):
+            filename_str = mat_name.split(":", 1)[1]
+            csv_path = os.path.join(CALIBRATION_TARGETS_DIR, f"{sensor_name}_{filename_str}.csv")
+            if not os.path.exists(csv_path) and sensor_name in ["cvHySpex", "cvHySpexMjolnir"]:
+                alt_sensor = "cvHySpexMjolnir" if sensor_name == "cvHySpex" else "cvHySpex"
+                alt_path = os.path.join(CALIBRATION_TARGETS_DIR, f"{alt_sensor}_{filename_str}.csv")
+                if os.path.exists(alt_path):
+                    csv_path = alt_path
+            if verbose:
+                print(f"Found {mat_name}: {os.path.basename(csv_path)}")
+            df = pd.read_csv(csv_path)
+            mat_data = df['DHR_mean'].values.astype(np.float32)
+        else:
+            if html_path not in _SOUP_CACHE:
+                with open(html_path, 'r', encoding='utf-8', errors='ignore') as f:
+                    _SOUP_CACHE[html_path] = BeautifulSoup(f, 'html.parser')
+            soup = _SOUP_CACHE[html_path]
+            mat_file = lookup_material_file(html_path, mat_name, soup=soup)
+            if verbose:
+                print(f"Found {mat_name}: {os.path.basename(mat_file)}")
+            raw_asd = load_asd_txt(mat_file)
+            if sensor_name in ["cvHySpexMjolnir", "cvHySpex"]:
+                if _CACHED_ASD_WAV_NM is None:
+                    _CACHED_ASD_WAV_NM = load_asd_txt(cvASD_WV_FILE) * 1000.0
+                s_wav_nm = load_asd_txt(wv_file) * 1000.0
+                s_fwhm_nm = load_asd_txt(fwhm_file) * 1000.0
+                mat_data = resample_asd_to_sensor(raw_asd, _CACHED_ASD_WAV_NM, s_wav_nm, s_fwhm_nm)
+            else:
+                mat_data = raw_asd
+
+        _MATERIAL_SPECTRAL_CACHE[cache_key] = mat_data
+        loaded_materials[mat_name] = mat_data.copy()
+
+    wavelengths = load_asd_txt(wv_file)
+    valid_mask = ~np.isnan(wavelengths)
+    for mat_data in loaded_materials.values():
+        valid_mask &= ~np.isnan(mat_data)
+
+    clean_wavelengths = wavelengths[valid_mask]
+    for mat_name in loaded_materials:
+        loaded_materials[mat_name] = loaded_materials[mat_name][valid_mask]
+
+    return loaded_materials, clean_wavelengths
+
+def generate_tile_sample(
+    tile_size=15,
+    sensor="cvHySpexMjolnir",
+    num_materials=7,
+    SNR=200,
+    magnitude_variation=0.06,
+    dirichlet_alpha=0.8,
+    seed=51,
+):
+    """
+    Creates a simulated square test tile from random material combinations.
+
+    Args:
+        tile_size (int): Spatial dimension of the square tile (tile_size x tile_size). Default is 15.
+        sensor (str): Sensor specification from SIMULATED_SENSORS. Default is "cvHySpexMjolnir".
+        num_materials (int): Number of materials to randomly select from GOOD_MATERIAL_LIST. Default is 7.
+        SNR (float or None): Linear Signal-to-Noise Ratio for wavelength-scaled Poisson-Gaussian noise. Default is 200.
+        magnitude_variation (float): Illumination / shading variability fraction. Default is 0.06.
+        dirichlet_alpha (float): Variance parameter for create_mixture_layer. Default is 0.8.
+        seed (int): Random seed for material selection, mixing, and noise. Default is 51.
+
+    Returns:
+        pixel_tile (np.ndarray): Clean square tile of shape (bands, tile_size, tile_size).
+        noisy_tile (np.ndarray): Square noise injected tile of shape (bands, tile_size, tile_size).
+        selected_materials (list[str]): Names of the materials included in the tile.
+        spectra (np.ndarray): Array of the spectra of those materials of shape (num_materials, bands).
+    """
+    rng = np.random.default_rng(seed)
+    candidate_materials = list(dict.fromkeys(GOOD_MATERIAL_LIST))
+    if num_materials > len(candidate_materials):
+        raise ValueError(
+            f"Requested {num_materials} materials, but only {len(candidate_materials)} unique materials exist in GOOD_MATERIAL_LIST."
+        )
+
+    chosen_indices = rng.choice(len(candidate_materials), size=num_materials, replace=False)
+    selected_material_names = [candidate_materials[i] for i in chosen_indices]
+
+    loaded_mats, _ = load_sensor_material_spectra(sensor, selected_material_names)
+    spectra_list = [loaded_mats[m] for m in selected_material_names]
+    spectra_array = np.array(spectra_list, dtype=np.float32)
+
+    tile = create_mixture_layer(
+        spectra_list,
+        tile_size,
+        variance=dirichlet_alpha,
+        seed=seed,
+    )
+
+    if magnitude_variation is not None and magnitude_variation > 0:
+        shade_map = rng.uniform(1.0 - magnitude_variation, 1.0, (tile_size, tile_size)).astype(np.float32)
+        pixel_tile = (tile * shade_map[None, :, :]).astype(np.float32)
+    else:
+        pixel_tile = tile.copy()
+
+    noisy_tile, _ = add_wavelength_scaled_noise(
+        pixel_tile,
+        snr=SNR,
+        shot_noise_fraction=SHOT_NOISE_FRACTION,
+        seed=seed,
+    )
+
+    return pixel_tile, noisy_tile, selected_material_names, spectra_array
+
+def main(sensor_name):
+    print("Parsing HTML index to find material files...")
     all_mat_names = []
     for layer_config in MATERIALS_TO_USE.values():
         if isinstance(layer_config, dict):
             all_mat_names.extend(layer_config.get("materials", []))
         else:
             all_mat_names.extend(layer_config)
-        
-    for mat_name in all_mat_names:
-        if mat_name.startswith("NICKLEAVES:"):
-            filename_str = mat_name.split(":", 1)[1]
-            csv_path = os.path.join(NICKS_LEAVES_DIR, f"{sensor_name}_{filename_str}.csv")
-            print(f"Found {mat_name}: {os.path.basename(csv_path)}")
-            df = pd.read_csv(csv_path)
-            loaded_materials[mat_name] = df['DHR_mean'].values.astype(np.float32)
-        elif mat_name.startswith("CALTARGET:") or mat_name.startswith("CALIBRATION:"):
-            filename_str = mat_name.split(":", 1)[1]
-            csv_path = os.path.join(CALIBRATION_TARGETS_DIR, f"{sensor_name}_{filename_str}.csv")
-            print(f"Found {mat_name}: {os.path.basename(csv_path)}")
-            df = pd.read_csv(csv_path)
-            loaded_materials[mat_name] = df['DHR_mean'].values.astype(np.float32)
-        else:
-            if soup is None:
-                raise ValueError(
-                    f"Material '{mat_name}' requires USGS splib07 HTML index, but sensor '{sensor_name}' has no splib07 index. "
-                    f"Use 'NICKLEAVES:' or 'CALTARGET:' prefixed materials."
-                )
-            mat_file = lookup_material_file(HTML_INDEX_PATH, mat_name, soup=soup)
-            print(f"Found {mat_name}: {os.path.basename(mat_file)}")
-            loaded_materials[mat_name] = load_asd_txt(mat_file)
-        
+
     print("Loading data...")
-    wavelengths = load_asd_txt(WV_FILE)
-    original_band_count = len(wavelengths)
-    
-    # Create valid mask across all materials
-    valid_mask = ~np.isnan(wavelengths)
-    for mat_data in loaded_materials.values():
-        valid_mask &= ~np.isnan(mat_data)
-        
-    # Apply valid mask
-    wavelengths = wavelengths[valid_mask]
-    for mat_name in loaded_materials:
-        loaded_materials[mat_name] = loaded_materials[mat_name][valid_mask]
-        
+    loaded_materials, wavelengths = load_sensor_material_spectra(sensor_name, all_mat_names, verbose=True)
     num_bands = len(wavelengths)
     print(f"Number of valid bands: {num_bands}")
     
@@ -717,11 +864,15 @@ def main(sensor_name):
     # 3. Displays
     
     # Create dynamic output directory based on the HTML index suffix (or sensor_name)
-    if HTML_INDEX_PATH:
-        html_basename = os.path.basename(HTML_INDEX_PATH)
-        suffix = html_basename.split('_')[-1].replace('.html', '')
-    else:
+    if sensor_name in ["cvHySpexMjolnir", "cvHySpex"]:
         suffix = sensor_name
+    else:
+        html_path, _, _ = get_sensor_paths(sensor_name)
+        if html_path:
+            html_basename = os.path.basename(html_path)
+            suffix = html_basename.split('_')[-1].replace('.html', '')
+        else:
+            suffix = sensor_name
     output_dir = os.path.join(r"C:\satelliteImagery\simulated", suffix)
     os.makedirs(output_dir, exist_ok=True)
     print(f"Saving results to: {output_dir}")

@@ -68,14 +68,15 @@ def compute_frame_metrics(payload):
             
             spatial_slice = np.s_[r_s:r_e, c_s:c_e]
             
+            sr_name = payload.get('sr_dataset_name', 'surface_reflectance')
             if sensor_type == "ENMAP":
-                frame_sr, valid_wavelengths = sc.load_enmap_sr(data_grp["surface_reflectance"], t_local, spatial_slice)
-                gw_mask = data_grp["surface_reflectance"].attrs.get("all_good_wavelengths")[t_local].astype(bool)
+                frame_sr, valid_wavelengths = sc.load_enmap_sr(data_grp[sr_name], t_local, spatial_slice)
+                gw_mask = data_grp[sr_name].attrs.get("all_good_wavelengths")[t_local].astype(bool)
             elif sensor_type == "TANAGER":
-                frame_sr, valid_wavelengths = sc.load_tanager_sr(data_grp["surface_reflectance"], t_local, spatial_slice)
-                gw_mask = data_grp["surface_reflectance"].attrs.get("all_good_wavelengths")[t_local].astype(bool)
+                frame_sr, valid_wavelengths = sc.load_tanager_sr(data_grp[sr_name], t_local, spatial_slice)
+                gw_mask = data_grp[sr_name].attrs.get("all_good_wavelengths")[t_local].astype(bool)
             else:
-                frame_sr = sc.load_scaled_reflectance(data_grp["surface_reflectance"], np.s_[t_local, :, r_s:r_e, c_s:c_e])
+                frame_sr = sc.load_scaled_reflectance(data_grp[sr_name], np.s_[t_local, :, r_s:r_e, c_s:c_e])
                 gw_mask = None
                 
             if gw_mask is not None:
@@ -352,7 +353,7 @@ def compute_frame_metrics(payload):
             'telemetry': telemetry
         }
 
-def main(target_location=None, tile_size=3, num_endmembers=7, norm_param=None, file_path=None):
+def main(target_location=None, tile_size=3, num_endmembers=7, norm_param=None, file_path=None, sr_dataset='surface_reflectance'):
 
     # ==========================================
     # 1. CONFIGURATION & FEATURE TOGGLES
@@ -365,6 +366,14 @@ def main(target_location=None, tile_size=3, num_endmembers=7, norm_param=None, f
     CUSTOM_SUFFIX = ''
     NORM_PARAM = norm_param
     MASKING = True 
+    SR_DATASET = sr_dataset
+    IS_INJECTED = (SR_DATASET == 'injected_surface_reflectance' or 'injected' in SR_DATASET)
+    SLIDE_DSET_NAME = 'injected_sliding_volume_map' if IS_INJECTED else 'sliding_volume_map'
+    Z_DSET_NAME = 'injected_sliding_volume_z_score' if IS_INJECTED else 'sliding_volume_z_score'
+    SMACC_SLIDE_DSET_NAME = 'injected_smacc_sliding_volume_map' if IS_INJECTED else 'smacc_sliding_volume_map'
+    SMACC_Z_DSET_NAME = 'injected_smacc_sliding_volume_z_score' if IS_INJECTED else 'smacc_sliding_volume_z_score'
+    NEIGHBORHOOD_DSET_NAME = 'injected_neighborhood_volume_map' if IS_INJECTED else 'neighborhood_volume_map'
+    NEIGHBORHOOD_Z_DSET_NAME = 'injected_neighborhood_volume_z_score' if IS_INJECTED else 'neighborhood_volume_z_score'
 
     # --- ANALYTICAL FEATURE TOGGLES ---
     # Set to True to calculate and overwrite. Set to False to skip processing and 
@@ -498,16 +507,16 @@ def main(target_location=None, tile_size=3, num_endmembers=7, norm_param=None, f
                     raise ValueError(f"CRITICAL ERROR: Data Fields missing for {grid} in {orig_filepath}")
                 
                 data_grp = f_direct[base_path]
-                grid_geotransforms[grid] = data_grp["surface_reflectance"].attrs.get('GeoTransform')
-                if 'wavelengths' in data_grp["surface_reflectance"].attrs:
-                    grid_wavelengths[grid] = data_grp["surface_reflectance"].attrs['wavelengths'][:]
+                grid_geotransforms[grid] = data_grp[SR_DATASET].attrs.get('GeoTransform')
+                if 'wavelengths' in data_grp[SR_DATASET].attrs:
+                    grid_wavelengths[grid] = data_grp[SR_DATASET].attrs['wavelengths'][:]
             
-                for req_ds in ["surface_reflectance", "common_mask"]:
+                for req_ds in [SR_DATASET, "common_mask"]:
                     if req_ds not in data_grp:
                         raise ValueError(f"CRITICAL ERROR: '{req_ds}' missing in {grid}. Ensure ARD Harmonizer ran successfully.")
                     
-                acq_times = data_grp["surface_reflectance"].attrs['acquisition_time']
-                spacecraft_ids = data_grp["surface_reflectance"].attrs['spacecraft_id']
+                acq_times = data_grp[SR_DATASET].attrs['acquisition_time']
+                spacecraft_ids = data_grp[SR_DATASET].attrs['spacecraft_id']
             
                 for i, ts in enumerate(acq_times):
                     sp_id = spacecraft_ids[i]
@@ -539,7 +548,7 @@ def main(target_location=None, tile_size=3, num_endmembers=7, norm_param=None, f
                     CALC_SMACC_VOLUME = True
 
             ref_f = direct_handles[grids[0]]
-            ref_sr = ref_f[f"/HDFEOS/GRIDS/{grids[0]}/Data Fields/surface_reflectance"]
+            ref_sr = ref_f[f"/HDFEOS/GRIDS/{grids[0]}/Data Fields/{SR_DATASET}"]
             _, _, height, width = ref_sr.shape
             spatial_ref = ref_sr.attrs.get('spatial_ref')
             master_gt = ref_sr.attrs.get('GeoTransform')
@@ -587,17 +596,17 @@ def main(target_location=None, tile_size=3, num_endmembers=7, norm_param=None, f
             # Pre-allocate ONLY requested datasets
             ds_harm_mask = overwrite_dset(harm_grp, 'common_mask', (total_frames, height, width), dtype='uint8', spatial_ref=spatial_ref, geo_transform=master_gt, chunks=chunks_3d)
             ds_harm_ortho = overwrite_dset(harm_grp, 'ortho_visual', (total_frames, 4, height, width), dtype='uint8', spatial_ref=spatial_ref, geo_transform=master_gt, chunks=(1, 4, chunk_h, chunk_w))
-            ds_harm_slide = overwrite_dset(harm_grp, 'sliding_volume_map', (total_frames, height, width), spatial_ref=spatial_ref, geo_transform=master_gt, chunks=chunks_3d) if CALC_SLIDING_VOLUME else None
-            ds_harm_neighborhood = overwrite_dset(harm_grp, 'neighborhood_volume_map', (total_frames, height, width), spatial_ref=spatial_ref, geo_transform=master_gt, chunks=chunks_3d) if CALC_NEIGHBORHOOD_VOLUME else None
-            ds_harm_smacc_slide = overwrite_dset(harm_grp, 'smacc_sliding_volume_map', (total_frames, height, width), spatial_ref=spatial_ref, geo_transform=master_gt, chunks=chunks_3d) if CALC_SMACC_VOLUME else None
+            ds_harm_slide = overwrite_dset(harm_grp, SLIDE_DSET_NAME, (total_frames, height, width), spatial_ref=spatial_ref, geo_transform=master_gt, chunks=chunks_3d) if CALC_SLIDING_VOLUME else None
+            ds_harm_neighborhood = overwrite_dset(harm_grp, NEIGHBORHOOD_DSET_NAME, (total_frames, height, width), spatial_ref=spatial_ref, geo_transform=master_gt, chunks=chunks_3d) if CALC_NEIGHBORHOOD_VOLUME else None
+            ds_harm_smacc_slide = overwrite_dset(harm_grp, SMACC_SLIDE_DSET_NAME, (total_frames, height, width), spatial_ref=spatial_ref, geo_transform=master_gt, chunks=chunks_3d) if CALC_SMACC_VOLUME else None
             ds_harm_ndvi = overwrite_dset(harm_grp, 'ndvi_map', (total_frames, height, width), dtype='int16', scale_factor=scale_fac_indices, fill_value=fill_val, spatial_ref=spatial_ref, geo_transform=master_gt, chunks=chunks_3d) if CALC_NDVI else None
             ds_harm_ndbi = overwrite_dset(harm_grp, 'ndbi_map', (total_frames, height, width), dtype='int16', scale_factor=scale_fac_indices, fill_value=fill_val, spatial_ref=spatial_ref, geo_transform=master_gt, chunks=chunks_3d) if CALC_NDBI else None
             ds_harm_msd = overwrite_dset(harm_grp, 'msd_map', (total_frames, height, width), dtype='int16', scale_factor=scale_fac_indices, fill_value=fill_val, spatial_ref=spatial_ref, geo_transform=master_gt, chunks=chunks_3d) if CALC_MSD else None
-            ds_harm_z = overwrite_dset(harm_grp, 'sliding_volume_z_score', (total_frames, height, width), dtype='int16', scale_factor=scale_fac_z, fill_value=fill_val, spatial_ref=spatial_ref, geo_transform=master_gt, chunks=chunks_3d) if CALC_Z_SCORE else None
-            ds_harm_smacc_z = overwrite_dset(harm_grp, 'smacc_sliding_volume_z_score', (total_frames, height, width), dtype='int16', scale_factor=scale_fac_z, fill_value=fill_val, spatial_ref=spatial_ref, geo_transform=master_gt, chunks=chunks_3d) if CALC_SMACC_ZSCORE else None
+            ds_harm_z = overwrite_dset(harm_grp, Z_DSET_NAME, (total_frames, height, width), dtype='int16', scale_factor=scale_fac_z, fill_value=fill_val, spatial_ref=spatial_ref, geo_transform=master_gt, chunks=chunks_3d) if CALC_Z_SCORE else None
+            ds_harm_smacc_z = overwrite_dset(harm_grp, SMACC_Z_DSET_NAME, (total_frames, height, width), dtype='int16', scale_factor=scale_fac_z, fill_value=fill_val, spatial_ref=spatial_ref, geo_transform=master_gt, chunks=chunks_3d) if CALC_SMACC_ZSCORE else None
             ds_harm_robust = overwrite_dset(harm_grp, 'sliding_volume_robust_scale', (total_frames, height, width), dtype='int16', scale_factor=scale_fac_z, fill_value=fill_val, spatial_ref=spatial_ref, geo_transform=master_gt, chunks=chunks_3d) if CALC_ROBUST_SCALE else None
             ds_harm_box_cox = overwrite_dset(harm_grp, 'sliding_volume_box_cox', (total_frames, height, width), dtype='int16', scale_factor=scale_fac_z, fill_value=fill_val, spatial_ref=spatial_ref, geo_transform=master_gt, chunks=chunks_3d) if CALC_BOX_COX else None
-            ds_harm_neighborhood_z = overwrite_dset(harm_grp, 'neighborhood_volume_z_score', (total_frames, height, width), dtype='int16', scale_factor=scale_fac_z, fill_value=fill_val, spatial_ref=spatial_ref, geo_transform=master_gt, chunks=chunks_3d) if CALC_NEIGHBORHOOD_Z_SCORE else None
+            ds_harm_neighborhood_z = overwrite_dset(harm_grp, NEIGHBORHOOD_Z_DSET_NAME, (total_frames, height, width), dtype='int16', scale_factor=scale_fac_z, fill_value=fill_val, spatial_ref=spatial_ref, geo_transform=master_gt, chunks=chunks_3d) if CALC_NEIGHBORHOOD_Z_SCORE else None
             ds_harm_temp_z = overwrite_dset(harm_grp, 'temporal_z_score', (total_frames, height, width), dtype='int16', scale_factor=scale_fac_z, fill_value=fill_val, spatial_ref=spatial_ref, geo_transform=master_gt, chunks=chunks_3d) if CALC_TEMPORAL_Z_SCORE else None
             ds_harm_pixel_temp_z = overwrite_dset(harm_grp, 'pixel_temporal_z_score', (total_frames, height, width), dtype='int16', scale_factor=scale_fac_z, fill_value=fill_val, spatial_ref=spatial_ref, geo_transform=master_gt, chunks=chunks_3d) if CALC_PIXEL_TEMPORAL_Z_SCORE else None
             ds_harm_esd = overwrite_dset(harm_grp, 'effective_spectral_dimensionality', (total_frames, height, width), dtype='uint8', spatial_ref=spatial_ref, geo_transform=master_gt, chunks=chunks_3d) if CALC_ESD else None
@@ -607,8 +616,8 @@ def main(target_location=None, tile_size=3, num_endmembers=7, norm_param=None, f
             import os
             for grid in grids:
                 data_grp = h5_out.require_group(f"/HDFEOS/GRIDS/{grid}/Data Fields")
-                if 'surface_reflectance' not in data_grp:
-                    data_grp['surface_reflectance'] = h5py.ExternalLink(os.path.basename(orig_filepath), f"/HDFEOS/GRIDS/{grid}/Data Fields/surface_reflectance")
+                if SR_DATASET not in data_grp:
+                    data_grp[SR_DATASET] = h5py.ExternalLink(os.path.basename(orig_filepath), f"/HDFEOS/GRIDS/{grid}/Data Fields/{SR_DATASET}")
                 if 'common_mask' not in data_grp:
                     data_grp['common_mask'] = h5py.ExternalLink(os.path.basename(orig_filepath), f"/HDFEOS/GRIDS/{grid}/Data Fields/common_mask")
 
@@ -616,12 +625,12 @@ def main(target_location=None, tile_size=3, num_endmembers=7, norm_param=None, f
                 for grid in grids:
                     f_direct = direct_handles[grid]
                     orig_data_grp = f_direct[f"/HDFEOS/GRIDS/{grid}/Data Fields"]
-                    sr_shape = orig_data_grp["surface_reflectance"].shape
+                    sr_shape = orig_data_grp[SR_DATASET].shape
                     n_frames, n_bands = sr_shape[0], sr_shape[1]
                 
                     data_grp = h5_out[f"/HDFEOS/GRIDS/{grid}/Data Fields"]
                     em_ds = overwrite_dset(data_grp, 'frame_endmembers', (n_frames, n_bands, NUM_ENDMEMBERS), dtype='int16', scale_factor=scale_fac_indices, fill_value=fill_val, spatial_ref=spatial_ref, geo_transform=master_gt, chunks=(1, n_bands, NUM_ENDMEMBERS))
-                    em_ds.attrs['wavelengths'] = orig_data_grp["surface_reflectance"].attrs['wavelengths']
+                    em_ds.attrs['wavelengths'] = orig_data_grp[SR_DATASET].attrs['wavelengths']
                     idx_ds = overwrite_dset(data_grp, 'frame_endmember_indices', (n_frames, NUM_ENDMEMBERS), dtype='int32', chunks=(1, NUM_ENDMEMBERS))
                     vol_ds = overwrite_dset(data_grp, 'frame_endmember_volumes', (n_frames, NUM_ENDMEMBERS), chunks=(1, NUM_ENDMEMBERS))
                 
@@ -681,6 +690,7 @@ def main(target_location=None, tile_size=3, num_endmembers=7, norm_param=None, f
                 'row_offset': int(round((grid_geotransforms[grid_name][3] - master_y) / 30.0)),
                 'col_offset': int(round((master_x - grid_geotransforms[grid_name][0]) / 30.0)),
                 'persistent_water_mask': persistent_water_mask,
+                'sr_dataset_name': SR_DATASET,
                 'calc_flags': {
                     'ndvi': CALC_NDVI, 'ndbi': CALC_NDBI, 'msd': CALC_MSD,
                     'endmembers': CALC_GLOBAL_ENDMEMBERS, 'volume': CALC_SLIDING_VOLUME,

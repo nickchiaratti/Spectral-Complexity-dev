@@ -243,7 +243,107 @@ def maximumDistance_volumes_torch_test(img_cube, num_endmembers):
 
 maximumDistance_volumes_heights_torch = maximumDistance_volumes_torch_test
 
-def estimate_effective_dimensionality_torch(img_cube, k_max, sigma_n, kappa=3.0):
+
+def maximumDistance_cholesky_torch(img_cube, num_endmembers, return_heights=False):
+    """
+    Batched, GPU-accelerated endmember extraction and localized Gram volume calculation
+    via Gram-space Pivoted Cholesky decomposition (Harbrecht et al., 2012).
+
+    Localizes the pixel neighborhood to the minimum-norm pixel, forms the local spatial
+    Gram matrix K = Y_loc^T * Y_loc, and extracts endmembers, volumes, and orthogonal heights
+    via batched Schur complement downdating.
+
+    Args:
+        img_cube: Tensor of shape (B, C, N) [Batch, Bands, Pixels]
+        num_endmembers: int, total number of endmembers to extract (k).
+        return_heights: bool, optional. If True, also returns orthogonal heights (B, k).
+
+    Returns:
+        endmembers: Tensor of shape (B, C, num_endmembers)
+        volumes:    Tensor of shape (B, num_endmembers)
+        heights:    (Only if return_heights=True) Tensor of shape (B, num_endmembers)
+    """
+    B, C, N = img_cube.shape
+    device = img_cube.device
+    dtype = img_cube.dtype
+    b_idx = torch.arange(B, device=device)
+
+    # 1. Identify seed pixels by magnitude
+    magnitude_sq = torch.sum(img_cube ** 2, dim=1)
+    idx_max = torch.argmax(magnitude_sq, dim=1)
+    idx_min = torch.argmin(magnitude_sq, dim=1)
+
+    endmembers = torch.zeros(B, C, num_endmembers, dtype=dtype, device=device)
+    endmembers[:, :, 0] = img_cube[b_idx, :, idx_max]
+    endmembers[:, :, 1] = img_cube[b_idx, :, idx_min]
+
+    # 2. Localize: translate neighborhood so min-norm pixel is at origin (cast to float64)
+    origin = img_cube[b_idx, :, idx_min].unsqueeze(2)
+    Y_loc = (img_cube - origin).to(torch.float64)
+
+    # 3. Local spatial Gram matrix K = Y_loc^T * Y_loc (B, N, N)
+    K = torch.bmm(Y_loc.transpose(1, 2), Y_loc)
+    diag_K = torch.diagonal(K, dim1=1, dim2=2).clone()
+
+    # 4. First localized endmember height
+    h1_sq = diag_K[b_idx, idx_max].clamp(min=0.0)
+    h1 = torch.sqrt(h1_sq)
+
+    volumes = torch.zeros(B, num_endmembers, dtype=torch.float64, device=device)
+    volumes[:, 1] = h1
+    if return_heights:
+        heights = torch.zeros(B, num_endmembers, dtype=torch.float64, device=device)
+        heights[:, 1] = h1
+
+    L = torch.zeros(B, N, num_endmembers, dtype=torch.float64, device=device)
+    h1_safe = torch.where(h1 > 1e-12, h1, torch.ones_like(h1)).unsqueeze(1)
+    L[:, :, 0] = K[b_idx, :, idx_max] / h1_safe
+    diag_K -= L[:, :, 0] ** 2
+
+    selected_mask = torch.zeros(B, N, dtype=torch.bool, device=device)
+    selected_mask[b_idx, idx_min] = True
+    selected_mask[b_idx, idx_max] = True
+    diag_K[selected_mask] = -float('inf')
+
+    # 5. Iterative extraction via greedy diagonal Schur downdating
+    for j in range(2, num_endmembers):
+        idx_next = torch.argmax(diag_K, dim=1)
+        h_sq = diag_K[b_idx, idx_next].clamp(min=0.0)
+        h_k = torch.sqrt(h_sq)
+
+        endmembers[:, :, j] = img_cube[b_idx, :, idx_next]
+        volumes[:, j] = volumes[:, j - 1] * h_k
+        if return_heights:
+            heights[:, j] = h_k
+
+        selected_mask[b_idx, idx_next] = True
+
+        k_col = K[b_idx, :, idx_next]
+        L_prev = L[:, :, :j-1]
+        L_pivot = L[b_idx, idx_next, :j-1].unsqueeze(2)
+        proj = torch.bmm(L_prev, L_pivot).squeeze(2)
+        col = k_col - proj
+
+        h_k_safe = torch.where(h_k > 1e-12, h_k, torch.ones_like(h_k)).unsqueeze(1)
+        L[:, :, j - 1] = col / h_k_safe
+
+        diag_K -= L[:, :, j - 1] ** 2
+        diag_K[selected_mask] = -float('inf')
+
+    if return_heights:
+        return endmembers, volumes.to(dtype), heights.to(dtype)
+    return endmembers, volumes.to(dtype)
+
+
+def maximumDistance_cholesky_torch_test(img_cube, num_endmembers):
+    """
+    Test version of maximumDistance_cholesky_torch that returns orthogonal heights.
+    """
+    return maximumDistance_cholesky_torch(img_cube, num_endmembers, return_heights=True)
+
+maximumDistance_cholesky_heights_torch = maximumDistance_cholesky_torch_test
+
+def estimate_effective_dimensionality_torch(img_cube, k_max, sigma_n, kappa=3.0, heights=None):
     """
     Estimate the effective spectral dimensionality (ESD) of each tile by
     monitoring the orthogonal height sequence h_k from MaxD extraction.
@@ -270,11 +370,12 @@ def estimate_effective_dimensionality_torch(img_cube, k_max, sigma_n, kappa=3.0)
         k_max: int, maximum number of endmembers to extract.
         sigma_n: float or Tensor (B_batch,), global scene-level noise standard deviation.
         kappa: float, confidence multiplier. 2.0 = ~95%, 3.0 = ~99.7%.
+        heights: Tensor of shape (B_batch, k_max) float32, optional precomputed heights.
 
     Returns:
-        esd: (B_batch,) int32 tensor — effective spectral dimensionality count.
-        sii: (B_batch,) float32 tensor — Spectral Innovation Integral.
-        heights: (B_batch, k_max) float32 tensor — full orthogonal height profile.
+        esd: (B_batch,) int32 tensor: effective spectral dimensionality count.
+        sii: (B_batch,) float32 tensor: Spectral Innovation Integral.
+        heights: (B_batch, k_max) float32 tensor: full orthogonal height profile.
     """
     B_batch, C_bands, N_pixels = img_cube.shape
     device = img_cube.device
@@ -288,8 +389,11 @@ def estimate_effective_dimensionality_torch(img_cube, k_max, sigma_n, kappa=3.0)
     else:
         sigma_n = sigma_n.to(device=device, dtype=dtype)
 
-    # --- Extract heights via the existing MaxD engine ---
-    _, _, heights = maximumDistance_volumes_torch(img_cube, k_max, return_heights=True)
+    # --- Extract heights via the existing MaxD engine if not supplied ---
+    if heights is None:
+        _, _, heights = maximumDistance_volumes_torch(img_cube, k_max, return_heights=True)
+    elif heights.shape[1] > k_max:
+        heights = heights[:, :k_max]
 
     # --- Build the adaptive noise threshold for each step k ---
     # At step k, the projected noise vector lives in (B - k + 1) dimensions,
@@ -478,6 +582,211 @@ def process_volume_sliding_tile(frame_data, tile_size, stride, num_endmembers,
                      center_offset:center_offset + out_w][~valid_grid] = np.nan
                      
     # 6. Final Map — Fast Spatial Averaging via 2D Convolution (mean filter)
+    if tile_size > 3:
+        # Disable spatial averaging for 5x5, 7x7 etc to prevent excessive blurring
+        final_map = neighborhood_map.copy()
+    else:
+        clean_neighborhood = np.nan_to_num(neighborhood_map, nan=0.0)
+        valid_binary = ~np.isnan(neighborhood_map)
+        
+        sum_map = uniform_filter(clean_neighborhood, size=tile_size, mode='constant', cval=0.0) 
+        count_map = uniform_filter(valid_binary.astype(np.float32), size=tile_size, mode='constant', cval=0.0)
+        
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", category=RuntimeWarning)
+            final_map = np.where(count_map > 0, sum_map / count_map, np.nan)
+    
+    result = (final_map, neighborhood_map)
+    
+    if compute_esd:
+        esd_map = np.zeros((height, width), dtype=np.uint8)
+        esd_grid = esd_vals.numpy().reshape(out_h, out_w)
+        esd_map[center_offset:center_offset + out_h, center_offset:center_offset + out_w] = esd_grid
+        esd_map[center_offset:center_offset + out_h, center_offset:center_offset + out_w][~valid_grid] = 0
+        result += (esd_map,)
+        
+    if compute_sii:
+        sii_map = np.full((height, width), np.nan, dtype=np.float32)
+        sii_grid = sii_vals.numpy().reshape(out_h, out_w)
+        sii_map[center_offset:center_offset + out_h, center_offset:center_offset + out_w] = sii_grid
+        sii_map[center_offset:center_offset + out_h, center_offset:center_offset + out_w][~valid_grid] = np.nan
+        result += (sii_map,)
+        
+    return result
+
+
+def process_cholesky_volume_sliding_tile(frame_data, tile_size, stride, num_endmembers, 
+                                          compute_esd=False, compute_sii=False, 
+                                          global_sigma_n=0.0, esd_kappa=3.0):
+    """
+    GPU-accelerated Spectral Complexity calculation using Gram-space Pivoted Cholesky
+    decomposition with CPU-host memory spooling.
+    
+    The spatial unfold tensor is kept in system RAM to avoid saturating GPU VRAM.
+    Small batch chunks are transferred to the GPU for batched Gram matrix formation
+    and pivoted Cholesky Schur complement downdating, then volume results are
+    immediately returned to CPU. This keeps VRAM utilization bounded to a fixed
+    fraction of total GPU memory regardless of image or band count.
+    
+    Precision: float32 interface, internally promotes to float64 for Gram Cholesky
+    decomposition to avoid catastrophic numerical cancellation.
+    
+    Args:
+        frame_data: ndarray of shape (bands, height, width), surface reflectance.
+        tile_size: int, spatial window size (e.g., 3 for 3x3).
+        stride: int, sliding window stride.
+        num_endmembers: int, maximum number of endmembers to extract per tile.
+        compute_esd: bool, if True also computes the Height-Based Effective
+                     Spectral Dimensionality (HESD) per tile.
+        compute_sii: bool, if True also computes the Spectral Innovation Integral.
+        global_sigma_n: float, global scene-level noise standard deviation.
+        esd_kappa: float, confidence multiplier for noise threshold (default 3.0).
+    
+    Returns:
+        final_map: ndarray (height, width), spatially averaged volume metric. 
+                   If tile_size > 3, this spatial averaging is bypassed and 
+                   this returns a direct copy of neighborhood_map to preserve sharpness.
+        neighborhood_map: ndarray (height, width), center-pixel volume metric.
+        esd_map: (Only if compute_esd=True) ndarray (height, width) uint8,
+                 effective spectral dimensionality (k*) per tile center pixel.
+        sii_map: (Only if compute_sii=True) ndarray (height, width) float32,
+                 Spectral Innovation Integral per tile center pixel.
+    """
+    COMPUTE_DTYPE = torch.float32
+    BYTES_PER_ELEMENT = 4  # float32
+
+    bands, height, width = frame_data.shape
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    if device == 'cpu':
+        print("No GPU available. Using fallback CPU process.")
+    
+    # 1. Load data onto CPU only: system RAM absorbs the full unfold allocation
+    tensor_data = torch.from_numpy(frame_data).to('cpu', dtype=COMPUTE_DTYPE)
+    
+    # Filter out anomalous data outside surface reflectance range +/- 1.5
+    tensor_data[(tensor_data < -1.5) | (tensor_data > 1.5)] = float('nan')
+    
+    # 2. Calculate dynamic batch size and chunk size to maximize GPU utilization 
+    #    without exceeding 50% VRAM.
+    N_pixels = tile_size * tile_size
+    out_h = (height - tile_size) // stride + 1
+    out_w = (width - tile_size) // stride + 1
+    L = out_h * out_w
+
+    if device == 'cuda':
+        total_vram = torch.cuda.get_device_properties(device).total_memory
+        target_vram = total_vram * 0.50
+        # Cholesky uses float32 input (bands*N*4) and internal float64 for Gram K (N*N*8),
+        # localized data Y_loc (bands*N*8), and Cholesky factor L (N*k*8)
+        bytes_per_window = (bands * N_pixels * 4) + (bands * N_pixels * 8) + (N_pixels * N_pixels * 8) + (N_pixels * num_endmembers * 8)
+        if compute_esd or compute_sii:
+            bytes_per_window += num_endmembers * 8
+        # Add safety margin for PyTorch memory allocator overhead
+        bytes_per_window = int(bytes_per_window * 2.5)
+        batch_size = max(1, int(target_vram // max(1, bytes_per_window)))
+        
+        # Cap batch size to prevent Windows TDR (Timeout Detection and Recovery) timeouts.
+        batch_size = min(batch_size, 20000)
+        
+        bytes_per_row = out_w * bytes_per_window
+        chunk_rows = max(1, min(out_h, int(target_vram // max(1, bytes_per_row))))
+    else:
+        batch_size = 5000 
+        chunk_rows = 100
+    
+    # 3. Extract spatial sliding windows in memory-safe chunks
+    # Accumulators live on CPU to prevent VRAM growth across iterations
+    vol_vals = torch.zeros(L, dtype=COMPUTE_DTYPE, device='cpu')
+    valid_mask = torch.zeros(L, dtype=torch.bool, device='cpu')
+    if compute_esd:
+        esd_vals = torch.zeros(L, dtype=torch.uint8, device='cpu')
+    if compute_sii:
+        sii_vals = torch.zeros(L, dtype=torch.float32, device='cpu')
+    
+    # 4. Process windows in memory-safe batches: transfer chunk to GPU, compute, return to CPU
+    with torch.no_grad():
+        for y_start in range(0, out_h, chunk_rows):
+            y_end = min(y_start + chunk_rows, out_h)
+            
+            row_start = y_start * stride
+            row_end = (y_end - 1) * stride + tile_size
+            
+            chunk_data = tensor_data[:, row_start:row_end, :].unsqueeze(0)
+            
+            chunk_unfold = torch.nn.functional.unfold(chunk_data, kernel_size=tile_size, stride=stride)
+            chunk_windows = chunk_unfold.view(bands, N_pixels, -1).permute(2, 0, 1) # (L_chunk, C, N_pixels)
+            L_chunk = chunk_windows.shape[0]
+            
+            global_start_idx = y_start * out_w
+            
+            for i in range(0, L_chunk, batch_size):
+                batch_windows = chunk_windows[i:i+batch_size].to(device)  # (B, C, N)
+        
+                # Find windows that have enough valid pixels to extract endmembers
+                pixel_validity = ~torch.isnan(batch_windows).any(dim=1)  # (B, N)
+                valid_pixels_per_window = pixel_validity.sum(dim=1)  # (B)
+            
+                # Strict Validity: Window is only processed if ALL pixels are valid.
+                batch_valid = valid_pixels_per_window == N_pixels
+            
+                # Store validity on CPU
+                valid_mask[global_start_idx + i : global_start_idx + i + batch_windows.shape[0]] = batch_valid.cpu()
+            
+                if not batch_valid.any():
+                    continue
+                
+                valid_data = batch_windows[batch_valid].clone()
+                
+                # Zero out NaNs to prevent NaN propagation during tensor math
+                valid_data[torch.isnan(valid_data)] = 0.0
+            
+                # 4a. Combined extraction and volume calculation via Pivoted Cholesky
+                if compute_esd or compute_sii:
+                    endmembers, volume, heights = maximumDistance_cholesky_torch(
+                        valid_data, num_endmembers, return_heights=True
+                    )
+                else:
+                    endmembers, volume = maximumDistance_cholesky_torch(
+                        valid_data, num_endmembers, return_heights=False
+                    )
+                
+                # 4b. Extract target metric and immediately move result to CPU
+                if volume.shape[1] > 2:
+                    vol_val = torch.max(volume[:, 2:], dim=1)[0]
+                else:
+                    vol_val = torch.zeros(volume.shape[0], dtype=COMPUTE_DTYPE, device=device)
+                
+                vol_vals[global_start_idx + i : global_start_idx + i + batch_windows.shape[0]][batch_valid.cpu()] = vol_val.cpu()
+                
+                # 4c. Compute ESD / SII if requested using precomputed heights
+                if compute_esd or compute_sii:
+                    esd_batch, sii_batch, _ = estimate_effective_dimensionality_torch(
+                        valid_data, k_max=num_endmembers, sigma_n=global_sigma_n, kappa=esd_kappa, heights=heights
+                    )
+                    if compute_esd:
+                        esd_vals[global_start_idx + i : global_start_idx + i + batch_windows.shape[0]][batch_valid.cpu()] = esd_batch.to(torch.uint8).cpu()
+                    if compute_sii:
+                        sii_vals[global_start_idx + i : global_start_idx + i + batch_windows.shape[0]][batch_valid.cpu()] = sii_batch.cpu()
+                
+                # Explicitly synchronize to flush the GPU command queue.
+                if device == 'cuda':
+                    torch.cuda.synchronize()
+        
+    # 5. Neighborhood map: assign each tile's volume directly to its center pixel.
+    out_h = (height - tile_size) // stride + 1
+    out_w = (width - tile_size) // stride + 1
+    center_offset = tile_size // 2
+    
+    neighborhood_map = np.full((height, width), np.nan, dtype=np.float32)
+    vol_grid = vol_vals.numpy().reshape(out_h, out_w)
+    valid_grid = valid_mask.numpy().reshape(out_h, out_w)
+    
+    neighborhood_map[center_offset:center_offset + out_h,
+                     center_offset:center_offset + out_w] = vol_grid
+    neighborhood_map[center_offset:center_offset + out_h,
+                     center_offset:center_offset + out_w][~valid_grid] = np.nan
+                     
+    # 6. Final Map: Fast spatial averaging via 2D convolution (mean filter)
     if tile_size > 3:
         # Disable spatial averaging for 5x5, 7x7 etc to prevent excessive blurring
         final_map = neighborhood_map.copy()

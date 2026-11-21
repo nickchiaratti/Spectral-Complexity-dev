@@ -235,18 +235,19 @@ def generate_pca_vs_complexity_figure():
         # ---------------------------------------------------------------------
         B = len(res_1mat['wavelengths_nm'])
         h_crit = TAU_CRIT * np.sqrt(B)
-        ax_maxd.plot(r_idx, h1_curve, 'o-', color=COLOR_SINGLE, linewidth=2.0, markersize=7, alpha=0.9, 
+        ax_maxd.plot(r_idx[1:], h1_curve[1:], 'o-', color=COLOR_SINGLE, linewidth=2.0, markersize=7, alpha=0.9, 
                      label='Single Leaf (1-Mat Shading)')
-        ax_maxd.plot(r_idx, h2_curve, 'o-', color=COLOR_HEALTHY, linewidth=2.4, markersize=8, 
+        ax_maxd.plot(r_idx[1:], h2_curve[1:], 'o-', color=COLOR_HEALTHY, linewidth=2.4, markersize=8, 
                      label='Healthy Tile (2-Mat Species)')
-        ax_maxd.plot(r_idx, h4_curve, 's-', color=COLOR_PATHOLOGICAL, linewidth=2.4, markersize=8, 
+        ax_maxd.plot(r_idx[1:], h4_curve[1:], 's-', color=COLOR_PATHOLOGICAL, linewidth=2.4, markersize=8, 
                      label='Infected Tile (4-Mat Disease)')
         ax_maxd.axhline(h_crit, color='black', linestyle='--', linewidth=1.5,
                         label=f'1% Threshold ($h_{{crit}} = {h_crit:.3f}$)')
-        ax_maxd.axhline(NOISE_FLOOR, color=COLOR_NOISE, linestyle=':', linewidth=1.5, 
-                        label=f'Sensor Noise Floor (≈{NOISE_FLOOR})')
+        #ax_maxd.axhline(NOISE_FLOOR, color=COLOR_NOISE, linestyle=':', linewidth=1.5, 
+        #                label=f'Sensor Noise Floor (≈{NOISE_FLOOR})')
 
-        ax_maxd.set_yscale('symlog', linthresh=SYMLOG_THRESHOLD)
+        #ax_maxd.set_yscale('symlog', linthresh=SYMLOG_THRESHOLD)
+        ax_maxd.set_yscale('log')
         ax_maxd.set_xlabel('Endmember Index ($k$)', fontsize=LABEL_FONT_SIZE, fontweight='bold')
         ax_maxd.set_ylabel('Orthogonal Residual Distance $h_k$', fontsize=LABEL_FONT_SIZE, fontweight='bold')
         ax_maxd.set_title('Spectral Complexity Orthogonal Subspace Distances', fontsize=TITLE_FONT_SIZE, fontweight='bold', pad=10)

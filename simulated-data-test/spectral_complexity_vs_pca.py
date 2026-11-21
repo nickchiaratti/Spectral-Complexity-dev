@@ -29,7 +29,10 @@ from sklearn.decomposition import PCA
 from kneed import KneeLocator
 from skimage.filters import threshold_triangle
 # Set Okabe-Ito accessible color palette
-plt.rcParams['axes.prop_cycle'] = plt.cycler(color=plt.colormaps['okabe_ito'].colors)
+try:
+    plt.rcParams['axes.prop_cycle'] = plt.cycler(color=plt.colormaps['okabe_ito'].colors)
+except Exception:
+    pass
 
 
 
