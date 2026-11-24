@@ -1,1017 +1,578 @@
-'''
-Calculates derivative metrics for HDFEOS compliant grids. Stores calculated values in a 
-combined HARMONIZED grid to produce virtual constellation results. 
-'''
-import os
-import shutil
-import platform
-# Monkeypatch platform._wmi_query to raise OSError immediately, bypassing Windows WMI hangs/KeyErrors in multiprocessing child processes
-def _dummy_wmi_query(*args, **kwargs):
-    raise OSError("WMI disabled to prevent hangs")
-platform._wmi_query = _dummy_wmi_query
+"""
+Calculates derivative spectral complexity metrics for HDFEOS compliant grids.
+Stores calculated values in-place directly inside the input HDF5 file.
+"""
 
+import os
+import sys
+import time
+import warnings
+from pathlib import Path
 import h5py
 import numpy as np
-import tkinter as tk
-from tkinter import filedialog
-import sys
-from pathlib import Path
+# Add parent folder to sys.path to find SpecComplexTorch / SpecComplex
 script_dir = Path(__file__).resolve().parent
 if str(script_dir.parent) not in sys.path:
     sys.path.insert(0, str(script_dir.parent))
-import SpecComplex as sc
-import SpecComplexTorch as scTorch
-import warnings
-import time
-from datetime import datetime, timezone
-import concurrent.futures
-import multiprocessing
+
+import SpecComplexTorch as sc
 
 
-# ==========================================
-# WORKER FUNCTION (PARALLEL EXECUTION WITH TELEMETRY)
-# ==========================================
-def compute_frame_metrics(payload):
-    orig_filepath = payload['orig_filepath']
-    grid_name = payload['grid_name']
-    t_local = payload['t_local']
-    sensor_type = payload['sensor_type']
-    red_idx = payload['red_idx']
-    nir_idx = payload['nir_idx']
-    swir_idx = payload['swir_idx']
-    num_bands = payload['num_bands']
-    height = payload['height']
-    width = payload['width']
-    flags = payload['calc_flags']
+def scale_to_int16(raw_floats, scale_factor=10000, nodata_val=-9999, nodata_value=None):
+    """Quantizes float32 array to int16, mapping NaNs to nodata value."""
+    if nodata_value is not None:
+        nodata_val = nodata_value
+    raw_floats = np.asarray(raw_floats)
+    out = np.full(raw_floats.shape, nodata_val, dtype=np.int16)
+    valid = ~np.isnan(raw_floats)
+    scaled = np.round(raw_floats[valid] * float(scale_factor))
+    clipped = np.clip(scaled, -32768, 32767)
+    out[valid] = clipped.astype(np.int16)
+    return out
+
+
+def read_scaled_int16(dataset, scale_factor=10000, nodata_val=-9999, slice_obj=np.s_[...]):
+    """Invert int16 quantized array or HDF5 dataset back to float32 reflectance."""
+    if hasattr(dataset, 'attrs'):
+        sf = dataset.attrs.get("scale_factor")
+        if sf is not None:
+            scale_factor = float(sf)
+        fv = dataset.attrs.get("_FillValue", dataset.attrs.get("fill_value", dataset.attrs.get("fillvalue")))
+        if fv is not None:
+            nodata_val = fv
+        data = dataset[slice_obj] if hasattr(dataset, '__getitem__') else dataset
+    else:
+        data = np.asarray(dataset)
+
+    out = np.full(data.shape, np.nan, dtype=np.float32)
+    valid = (data != nodata_val)
+    out[valid] = data[valid].astype(np.float32) / float(scale_factor)
+    return out
+
+
+def load_enmap_sr(dataset, frame_idx, spatial_slice=np.s_[:, :]):
+    """
+    Consistent method to load EnMAP surface reflectance from source .h5 files.
+    Correctly handles int to float conversion, converts EnMAP specific bad pixels (-32767) 
+    to NaN, and strips water absorption/defective bands.
+    """
+    if isinstance(spatial_slice, tuple):
+        raw_slice = (frame_idx, slice(None)) + spatial_slice
+    else:
+        raw_slice = (frame_idx, slice(None), spatial_slice)
+        
+    float_data = load_scaled_reflectance(dataset, raw_slice)
+    scale = dataset.attrs.get("scale_to_float", 1.0)
+    enmap_bad_pixel_scaled = -32767 * scale
+    float_data[np.isclose(float_data, enmap_bad_pixel_scaled, atol=1e-6)] = np.nan
     
-    MASKING = payload['MASKING']
-    NUM_ENDMEMBERS = payload['NUM_ENDMEMBERS']
-    NORM_PARAM = payload['NORM_PARAM']
-    TILE_SIZE = payload['TILE_SIZE']
-    SLIDING_STRIDE = payload['SLIDING_STRIDE']
-
-    telemetry = {}
-    t_start_total = time.perf_counter()
-
-    with warnings.catch_warnings(), np.errstate(all='ignore'):
-        warnings.simplefilter("ignore")
-        
-        # --- 1. Data Ingestion ---
-        t0 = time.perf_counter()
-        with h5py.File(orig_filepath, 'r') as h5_in:
-            data_grp = h5_in[payload['data_grp_path']]
-            
-            r_s = payload['row_offset']
-            r_e = r_s + height
-            c_s = payload['col_offset']
-            c_e = c_s + width
-            
-            spatial_slice = np.s_[r_s:r_e, c_s:c_e]
-            
-            sr_name = payload.get('sr_dataset_name', 'surface_reflectance')
-            if sensor_type == "ENMAP":
-                frame_sr, valid_wavelengths = sc.load_enmap_sr(data_grp[sr_name], t_local, spatial_slice)
-                gw_mask = data_grp[sr_name].attrs.get("all_good_wavelengths")[t_local].astype(bool)
-            elif sensor_type == "TANAGER":
-                frame_sr, valid_wavelengths = sc.load_tanager_sr(data_grp[sr_name], t_local, spatial_slice)
-                gw_mask = data_grp[sr_name].attrs.get("all_good_wavelengths")[t_local].astype(bool)
-            else:
-                frame_sr = sc.load_scaled_reflectance(data_grp[sr_name], np.s_[t_local, :, r_s:r_e, c_s:c_e])
-                gw_mask = None
-                
-            if gw_mask is not None:
-                # Since frame_sr is now pruned of bad bands, we must remap the band indices
-                # to their new positions in the pruned array for spectral indices (NDVI/NDBI)
-                valid_indices_map = np.cumsum(gw_mask) - 1
-                red_idx = valid_indices_map[red_idx] if gw_mask[red_idx] else red_idx
-                nir_idx = valid_indices_map[nir_idx] if gw_mask[nir_idx] else nir_idx
-                swir_idx = valid_indices_map[swir_idx] if gw_mask[swir_idx] else swir_idx
-
-            frame_mask = data_grp["common_mask"][t_local, r_s:r_e, c_s:c_e]
-            raw_frame_ortho = data_grp["ortho_visual"][t_local, :, r_s:r_e, c_s:c_e]
-
-            persistent_water_mask = payload.get('persistent_water_mask', None)
-            if persistent_water_mask is not None:
-                # Flag persistent open water as masked/invalid in the frame's common_mask
-                frame_mask[persistent_water_mask] = 1
-            
-            # Dependency Resolution: Read existing volume map if Z-Score requires it but we aren't calculating it
-            if flags['z_score'] and not flags['volume'] and not flags['neighborhood_volume']:
-                with h5py.File(payload['constellation_filepath'], 'r') as h5_const:
-                    slide_map = sc.read_scaled_int16(h5_const["/HDFEOS/GRIDS/HARMONIZED/Data Fields/sliding_volume_map"], np.s_[payload['global_idx'], ...])
-            else:
-                slide_map = None
-                
-            if flags['neighborhood_z_score'] and not flags['neighborhood_volume']:
-                try:
-                    with h5py.File(payload['constellation_filepath'], 'r') as h5_const:
-                        neighborhood_map = sc.read_scaled_int16(h5_const["/HDFEOS/GRIDS/HARMONIZED/Data Fields/neighborhood_volume_map"], np.s_[payload['global_idx'], ...])
-                except KeyError:
-                    neighborhood_map = None
-            else:
-                neighborhood_map = None
-
-            if flags.get('smacc_zscore', False) and not flags.get('smacc_volume', False):
-                try:
-                    with h5py.File(payload['constellation_filepath'], 'r') as h5_const:
-                        smacc_slide_map = h5_const["/HDFEOS/GRIDS/HARMONIZED/Data Fields/smacc_sliding_volume_map"][payload['global_idx'], ...]
-                except KeyError:
-                    smacc_slide_map = None
-            else:
-                smacc_slide_map = None
-            
-        telemetry['I/O_Read'] = time.perf_counter() - t0
-        valid_mask = frame_mask == 0 if MASKING else np.ones((height, width), dtype=bool)
-
-        # --- 2. Spectral Indices ---
-        ndvi, ndbi = None, None
-        if flags['ndvi'] or flags['ndbi']:
-            t0 = time.perf_counter()
-            if flags['ndvi']: ndvi = sc.calc_ndvi_frame(frame_sr, red_idx=red_idx, nir_idx=nir_idx)
-            if flags['ndbi']: ndbi = sc.calc_ndbi_frame(frame_sr, swir_idx=swir_idx, nir_idx=nir_idx)
-            telemetry['Spectral_Indices'] = time.perf_counter() - t0
-
-        # --- 3. Global Endmembers ---
-        endmembers, endmember_idx, vol_curve, em_out = None, None, None, None
-        if flags['endmembers']:
-            t0 = time.perf_counter()
-            # frame_sr is already pre-pruned for hyperspectral sensors
-            endmembers, endmember_idx, vol_curve = sc.process_volume_frame(frame_sr, NUM_ENDMEMBERS, 'minEndmember', NORM_PARAM)
-        
-            if sensor_type in ["TANAGER", "ENMAP"]:
-                em_full = np.full((num_bands, NUM_ENDMEMBERS), np.nan, dtype=np.float32)
-                em_full[gw_mask==1, :] = endmembers
-                em_out = em_full
-            else:
-                em_out = endmembers
-            telemetry['Global_Endmembers'] = time.perf_counter() - t0
+    gw_attr = dataset.attrs.get("all_good_wavelengths")
+    wavelengths = dataset.attrs.get("wavelengths")[:]
     
-        # --- 3b. Global Scene-Level Noise Estimation (Block-DCT Method) ---
-        global_sigma_n = 0.0
-        if flags.get('esd', False):
-            t0 = time.perf_counter()
-            import scipy.fftpack as fftpack
-            
-            # 1. Define block size and extract valid dimensions
-            bh, bw = 8, 8
-            B, H_c, W_c = frame_sr.shape
-            num_blocks_h = H_c // bh
-            num_blocks_w = W_c // bw
-            
-            if num_blocks_h > 0 and num_blocks_w > 0:
-                # 2. Crop to perfectly fit blocks and reshape
-                cropped = frame_sr[:, :num_blocks_h*bh, :num_blocks_w*bw]
-                # Reshape to isolate 8x8 blocks
-                blocks = cropped.reshape(B, num_blocks_h, bh, num_blocks_w, bw)
-                # Transpose and flatten to shape (num_blocks, B, bh, bw)
-                blocks = blocks.transpose(1, 3, 0, 2, 4).reshape(-1, B, bh, bw)
-                
-                # 3. Filter out blocks containing NaNs, Infs, or fill values
-                block_valid_mask = ~np.isnan(blocks).any(axis=(1,2,3)) & np.isfinite(blocks).all(axis=(1,2,3)) & (blocks != -32768/10000.0).all(axis=(1,2,3))
-                valid_blocks = blocks[block_valid_mask]
-                
-                if len(valid_blocks) > 0:
-                    # 4. Apply 2D DCT on the spatial dimensions (last two axes)
-                    # norm='ortho' guarantees energy (variance) is preserved in the transform
-                    dct_blocks = fftpack.dctn(valid_blocks, axes=(2,3), norm='ortho')
-                    
-                    # 5. Extract high-frequency coefficients (bottom-right triangle where i+j >= 10)
-                    i, j = np.indices((bh, bw))
-                    hf_mask = (i + j) >= 10 
-                    
-                    # hf_coeffs shape: (num_valid_blocks, B, 15)
-                    hf_coeffs = dct_blocks[:, :, hf_mask]
-                    
-                    # 6. Compute robust variance (MAD) from high-frequency coefficients
-                    # This isolates the noise floor, mathematically independent of material diversity
-                    median_val = np.median(hf_coeffs)
-                    mad = np.median(np.abs(hf_coeffs - median_val))
-                    
-                    # Convert MAD to standard deviation (for normal distribution)
-                    global_sigma_n = mad / 0.6745
-            
-            # Fallback if image is extremely small or entirely masked
-            if global_sigma_n == 0.0:
-                global_sigma_n = 1e-4
-
-            telemetry['Global_Noise_Est'] = time.perf_counter() - t0
-
-        # --- 4. Sliding Window Complexity ---
-        esd_map, sii_map = None, None
+    if gw_attr is not None:
+        gw_mask = gw_attr[frame_idx].astype(bool)
+        float_data_pruned = float_data[gw_mask, ...]
+        valid_wavelengths = wavelengths[gw_mask]
+    else:
+        float_data_pruned = float_data
+        valid_wavelengths = wavelengths
         
-        # frame_sr is already pre-pruned for hyperspectral sensors, so we can use it directly
+    return float_data_pruned, valid_wavelengths
 
-        if flags['volume'] or flags['neighborhood_volume'] or flags['neighborhood_z_score'] or flags.get('esd', False):
-            t0 = time.perf_counter()
-            # Note: process_volume_sliding_tile prunes invalid pixels internally
-            # Returns both the spatially-averaged map and the per-center-pixel neighborhood map
-            slide_result = scTorch.process_volume_sliding_tile(
-                frame_sr, TILE_SIZE, SLIDING_STRIDE, NUM_ENDMEMBERS,
-                compute_esd=flags.get('esd', False),
-                compute_sii=flags.get('esd', False),
-                global_sigma_n=global_sigma_n
+
+# ==============================================================================
+# INLINED DATA LOADERS, QUANTIZATION, AND PROCESSING HELPERS
+# ==============================================================================
+
+def load_scaled_reflectance(dataset, slice_obj=np.s_[...]):
+    """
+    Safely load a surface reflectance dataset from HDF5, detect if it is scaled integer,
+    and convert it to float32 reflectance. Converts nodata values into np.nan.
+    Fails explicitly if an integer dataset lacks a fillvalue or scale factor attribute.
+    """
+    data = dataset[slice_obj] if hasattr(dataset, '__getitem__') and hasattr(dataset, 'attrs') else dataset
+
+    if np.issubdtype(data.dtype, np.integer):
+        nodata = None
+        if hasattr(dataset, "attrs"):
+            if "_FillValue" in dataset.attrs:
+                nodata = dataset.attrs["_FillValue"]
+            elif "fillvalue" in dataset.attrs:
+                nodata = dataset.attrs["fillvalue"]
+            elif "fill_value" in dataset.attrs:
+                nodata = dataset.attrs["fill_value"]
+
+        if nodata is None and hasattr(dataset, "fillvalue") and dataset.fillvalue is not None:
+            if dataset.fillvalue != 0:
+                nodata = dataset.fillvalue
+
+        if nodata is None:
+            raise KeyError(
+                f"Dataset {getattr(dataset, 'name', 'dataset')} has integer datatype ({data.dtype}) "
+                "but has no '_FillValue' attribute or non-zero fillvalue defined."
             )
-            
-            slide_map = slide_result[0]
-            neighborhood_map = slide_result[1]
-            if flags.get('esd', False):
-                esd_map = slide_result[2]
-                sii_map = slide_result[3]
-                
-            telemetry['Sliding_Volume_Map'] = time.perf_counter() - t0
 
-        # --- 4b. SMACC Sliding Window Complexity ---
-        smacc_neighborhood_map = None
-        if flags.get('smacc_volume', False):
-            t0 = time.perf_counter()
-            smacc_slide_map, smacc_neighborhood_map = sc.SMACC_sliding_volume(frame_sr, TILE_SIZE, SLIDING_STRIDE, NUM_ENDMEMBERS)
-            telemetry['SMACC_Sliding_Volume_Map'] = time.perf_counter() - t0
-    
-        # --- 5. Mean Spectral Distance ---
-        msd_map = None
-        if flags['msd']:
-            t0 = time.perf_counter()
-            msd_map = scTorch.process_msd_sliding_tile(frame_sr, TILE_SIZE, SLIDING_STRIDE)
-            telemetry['MSD_Map'] = time.perf_counter() - t0
-    
-        # --- 6. Global Z-Score ---
-        z_map = None
-        global_mean = np.nan
-        global_std = np.nan
-        if flags['z_score']:
-            t0 = time.perf_counter()
-            z_map, global_mean, global_std = sc.calculate_global_z_score(slide_map, valid_mask)
-            telemetry['Z_Score'] = time.perf_counter() - t0
-            
-        neighborhood_z_map = None
-        neighborhood_global_mean = np.nan
-        neighborhood_global_std = np.nan
-        if flags['neighborhood_z_score']:
-            t0 = time.perf_counter()
-            neighborhood_z_map, neighborhood_global_mean, neighborhood_global_std = sc.calculate_global_z_score(neighborhood_map, valid_mask)
-            telemetry['Neighborhood_Z_Score'] = time.perf_counter() - t0
+        scale = None
+        if hasattr(dataset, "attrs"):
+            if "scale_to_float" in dataset.attrs:
+                scale = float(dataset.attrs["scale_to_float"])
+            elif "scale_factor" in dataset.attrs:
+                sf = float(dataset.attrs["scale_factor"])
+                scale = (1.0 / sf) if sf > 1.0 else sf
 
-        # --- 6d. SMACC Global Z-Score ---
-        smacc_z_map = None
-        smacc_global_mean = np.nan
-        smacc_global_std = np.nan
-        if flags.get('smacc_zscore', False):
-            t0 = time.perf_counter()
-            if smacc_slide_map is not None:
-                smacc_z_map, smacc_global_mean, smacc_global_std = sc.calculate_global_z_score(smacc_slide_map, valid_mask)
-            telemetry['SMACC_Z_Score'] = time.perf_counter() - t0
+        if scale is None:
+            raise KeyError(
+                f"Dataset {getattr(dataset, 'name', 'dataset')} has integer datatype ({data.dtype}) "
+                "but has no 'scale_to_float' or 'scale_factor' attribute defined."
+            )
 
-        # --- 6b. Global Robust Scale ---
-        robust_map = None
-        global_lambda = np.nan
-        global_median = np.nan
-        global_iqr = np.nan
-        if flags.get('robust_scale', False):
-            t0 = time.perf_counter()
-            robust_map, global_lambda, global_median, global_iqr = sc.calculate_global_robust_scaler(slide_map, valid_mask)
-            telemetry['Robust_Scale'] = time.perf_counter() - t0
+        float_data = data.astype(np.float32)
+        float_data[data == nodata] = np.nan
+        float_data *= scale
+        return float_data
 
-        # --- 6c. Global Box Cox ---
-        box_cox_map = None
-        bc_global_lambda = np.nan
-        bc_global_mean = np.nan
-        bc_global_std = np.nan
-        if flags.get('box_cox', False):
-            t0 = time.perf_counter()
-            box_cox_map, bc_global_lambda, bc_global_mean, bc_global_std = sc.calculate_global_box_cox(slide_map, valid_mask)
-            telemetry['Box_Cox'] = time.perf_counter() - t0
+    if np.issubdtype(data.dtype, np.floating):
+        nodata = None
+        if hasattr(dataset, "attrs"):
+            if "_FillValue" in dataset.attrs:
+                nodata = dataset.attrs["_FillValue"]
+            elif "fillvalue" in dataset.attrs:
+                nodata = dataset.attrs["fillvalue"]
+            elif "fill_value" in dataset.attrs:
+                nodata = dataset.attrs["fill_value"]
 
-        # --- 7. Ortho Visual Consolidation ---
-        t0 = time.perf_counter()
-        frame_ortho = raw_frame_ortho
-        
-        # Ensure channel-first format (Bands, Y, X)
-        if frame_ortho.shape[-1] in [3, 4]:
-            frame_ortho = np.transpose(frame_ortho, (2, 0, 1))
-            
-        # Ensure exactly 4 bands (RGBA)
-        if frame_ortho.shape[0] == 3:
-            if frame_ortho.dtype == np.uint8:
-                alpha = np.any(frame_ortho > 0, axis=0).astype(np.uint8) * 255
-            else:
-                alpha = np.any(frame_ortho > 0, axis=0).astype(frame_ortho.dtype)
-            frame_ortho = np.concatenate((frame_ortho, alpha[np.newaxis, ...]), axis=0)
-        elif frame_ortho.shape[0] > 4:
-            frame_ortho = frame_ortho[:4, :, :]
-        
-        if frame_ortho.dtype != np.uint8:
-            fo = frame_ortho.astype(np.float32)
-            fo_rgb = fo[:3]
-            valid = fo_rgb > -9000
-            if np.any(valid):
-                p1, p99 = np.percentile(fo_rgb[valid], (1, 99))
-                if p99 > p1:
-                    fo_rgb[valid] = (fo_rgb[valid] - p1) / (p99 - p1)
-            fo[:3] = fo_rgb
-            
-            if np.max(fo[3]) <= 1.0:
-                fo[3] = fo[3] * 255.0
-            frame_ortho = np.clip(fo, 0, 255).astype(np.uint8)
-        telemetry['Ortho_Visual'] = time.perf_counter() - t0
+        if nodata is None and hasattr(dataset, "fillvalue") and dataset.fillvalue is not None:
+            nodata = dataset.fillvalue
 
-        telemetry['Total_Worker_Time'] = time.perf_counter() - t_start_total
+        if nodata is not None and not np.isnan(nodata):
+            float_data = data.copy()
+            float_data[np.isclose(data, nodata, equal_nan=True)] = np.nan
+            return float_data
 
-        return {
-            'global_idx': payload['global_idx'],
-            'grid_name': grid_name,
-            't_local': t_local,
-            'mask': frame_mask,
-            'ortho': frame_ortho,
-            'ndvi': ndvi,
-            'ndbi': ndbi,
-            'slide': slide_map,
-            'neighborhood': neighborhood_map,
-            'esd_map': esd_map if flags.get('esd', False) else None,
-            'sii_map': sii_map if flags.get('esd', False) else None,
-            'smacc_slide': smacc_slide_map,
-            'msd': msd_map,
-            'z_map': z_map,
-            'neighborhood_z_map': neighborhood_z_map,
-            'smacc_z_map': smacc_z_map,
-            'robust_map': robust_map,
-            'box_cox_map': box_cox_map,
-            'global_lambda': global_lambda,
-            'global_median': global_median,
-            'global_iqr': global_iqr,
-            'bc_global_lambda': bc_global_lambda,
-            'bc_global_mean': bc_global_mean,
-            'bc_global_std': bc_global_std,
-            'global_mean': global_mean,
-            'global_std': global_std,
-            'smacc_global_mean': smacc_global_mean,
-            'smacc_global_std': smacc_global_std,
-            'neighborhood_global_mean': neighborhood_global_mean,
-            'neighborhood_global_std': neighborhood_global_std,
-            'em': em_out,
-            'em_idx': endmember_idx,
-            'vol': vol_curve,
-            'telemetry': telemetry
-        }
+    return data
 
-def main(target_location=None, tile_size=3, num_endmembers=7, norm_param=None, file_path=None, sr_dataset='surface_reflectance'):
 
-    # ==========================================
-    # 1. CONFIGURATION & FEATURE TOGGLES
-    # ==========================================
-    TILE_SIZE = tile_size        
-    SLIDING_STRIDE = 1      
-    #Z_SCORE_WINDOW_SIZE = 11
+def load_tanager_sr(dataset, frame_idx, spatial_slice=np.s_[:, :]):
+    """
+    Load Tanager surface reflectance from source H5 dataset.
+    Only invokes load_scaled_reflectance if the dataset has an integer datatype.
+    Strips defective or water absorption bands according to good wavelengths metadata.
+    """
+    if isinstance(spatial_slice, tuple):
+        raw_slice = (frame_idx, slice(None)) + spatial_slice
+    else:
+        raw_slice = (frame_idx, slice(None), spatial_slice)
 
-    NUM_ENDMEMBERS = num_endmembers
-    CUSTOM_SUFFIX = ''
-    NORM_PARAM = norm_param
-    MASKING = True 
-    SR_DATASET = sr_dataset
-    IS_INJECTED = (SR_DATASET == 'injected_surface_reflectance' or 'injected' in SR_DATASET)
-    SLIDE_DSET_NAME = 'injected_sliding_volume_map' if IS_INJECTED else 'sliding_volume_map'
-    Z_DSET_NAME = 'injected_sliding_volume_z_score' if IS_INJECTED else 'sliding_volume_z_score'
-    SMACC_SLIDE_DSET_NAME = 'injected_smacc_sliding_volume_map' if IS_INJECTED else 'smacc_sliding_volume_map'
-    SMACC_Z_DSET_NAME = 'injected_smacc_sliding_volume_z_score' if IS_INJECTED else 'smacc_sliding_volume_z_score'
-    NEIGHBORHOOD_DSET_NAME = 'injected_neighborhood_volume_map' if IS_INJECTED else 'neighborhood_volume_map'
-    NEIGHBORHOOD_Z_DSET_NAME = 'injected_neighborhood_volume_z_score' if IS_INJECTED else 'neighborhood_volume_z_score'
+    dataset_dtype = getattr(dataset, "dtype", np.asarray(dataset).dtype)
+    if np.issubdtype(dataset_dtype, np.integer):
+        float_data = load_scaled_reflectance(dataset, raw_slice)
+    else:
+        float_data = dataset[raw_slice]
 
-    # --- ANALYTICAL FEATURE TOGGLES ---
-    # Set to True to calculate and overwrite. Set to False to skip processing and 
-    # retain existing datasets in the ARD cube.
-    CALC_NDVI = False
-    CALC_NDBI = False
-    CALC_MSD = False
-    CALC_GLOBAL_ENDMEMBERS = True
-    CALC_SLIDING_VOLUME = True
-    CALC_NEIGHBORHOOD_VOLUME = False
-    CALC_SMACC_VOLUME = False
-    CALC_Z_SCORE = True
-    CALC_SMACC_ZSCORE = False
-    CALC_ROBUST_SCALE = False
-    CALC_BOX_COX = False
-    CALC_NEIGHBORHOOD_Z_SCORE = False
-    CALC_TEMPORAL_Z_SCORE = False
-    CALC_PIXEL_TEMPORAL_Z_SCORE = False
-    CALC_ESD = False  # Height-Based Effective Spectral Dimensionality
+    gw_attr = dataset.attrs.get("all_good_wavelengths") if hasattr(dataset, 'attrs') else None
+    wavelengths = dataset.attrs.get("wavelengths") if hasattr(dataset, 'attrs') else None
+    if wavelengths is not None:
+        wavelengths = np.asarray(wavelengths)
 
-    # ==========================================
-    # 3. FILE MANAGEMENT & I/O
-    # ==========================================
-    def process_ard_cube(filepath):
-        print(f"\nEvaluating Initialization Directives for: {filepath}")
-        suffix = f"_SC_EM-{NUM_ENDMEMBERS}_Norm-{NORM_PARAM}{CUSTOM_SUFFIX}"
-    
-        # OS Thread-Lock Isolation: If updating an existing file, create a strictly 
-        # read-only cache for the parallel workers to prevent Windows SWMR crashes.
-        worker_cache_path = None
-    
-        if suffix in filepath:
-            out_path = filepath
-            worker_cache_path = filepath.replace(".h5", "_worker_read_cache.h5")
-            print(f"Modifying Existing Pipeline Output.")
-            print(f"Cloning read-only cache for parallel workers: {worker_cache_path}")
-            shutil.copy2(filepath, worker_cache_path)
-            mode = 'r+'
-        else:
-            out_path = filepath.replace(".h5", f"{suffix}.h5")
-            worker_cache_path = filepath
-            print(f"New Pipeline Run. Creating Target Output File: {out_path}")
-            mode = 'w'
+    if gw_attr is not None:
+        gw_mask = gw_attr[frame_idx].astype(bool)
+        float_data_pruned = float_data[gw_mask, ...]
+        valid_wavelengths = wavelengths[gw_mask] if wavelengths is not None else None
+    else:
+        float_data_pruned = float_data
+        valid_wavelengths = wavelengths
 
-        with h5py.File(out_path, mode) as h5_out:
-            if mode == 'w':
-                with h5py.File(worker_cache_path, 'r') as h5_in:
-                    grids_grp = h5_in['/HDFEOS/GRIDS']
-                    for g in grids_grp.keys():
-                        if g == 'HARMONIZED': continue
-                        grp_out = h5_out.create_group(f'/HDFEOS/GRIDS/{g}/Data Fields')
-                        link = grids_grp.get(g, getlink=True)
-                        if isinstance(link, h5py.ExternalLink):
-                            with h5py.File(link.filename, 'r') as f_direct:
-                                sr = f_direct[f'{link.path}/Data Fields/surface_reflectance']
-                                if 'spatial_ref' in sr.attrs: grp_out.attrs['spatial_ref'] = sr.attrs['spatial_ref']
-                                if 'GeoTransform' in sr.attrs: grp_out.attrs['GeoTransform'] = sr.attrs['GeoTransform']
-                                if 'wavelengths' in sr.attrs: grp_out.attrs['wavelengths'] = sr.attrs['wavelengths']
-                        else:
-                            sr = h5_in[f'/HDFEOS/GRIDS/{g}/Data Fields/surface_reflectance']
-                            if 'spatial_ref' in sr.attrs: grp_out.attrs['spatial_ref'] = sr.attrs['spatial_ref']
-                            if 'GeoTransform' in sr.attrs: grp_out.attrs['GeoTransform'] = sr.attrs['GeoTransform']
-                            if 'wavelengths' in sr.attrs: grp_out.attrs['wavelengths'] = sr.attrs['wavelengths']
+    return float_data_pruned, valid_wavelengths
 
-            print("\n" + "="*50)
-            print("Initializing Chronological Multi-Sensor Fusion (Parallel)")
-            print("="*50)
-            process_global_timeline(h5_out, worker_cache_path)
 
-        # Cleanup the throwaway cache file
-        if suffix in filepath and worker_cache_path and os.path.exists(worker_cache_path):
-            os.remove(worker_cache_path)
-            print("\nCleaned up throwaway worker cache.")
 
-        print(f"Multi-Sensor Analytical Processing Complete.\nSaved to: {out_path}")
+def process_volume_frame(frame_data, num_endmembers=7, gram_type='minEndmember', norm_param=None):
+    """
+    Process image frame to extract global endmembers, indices, and local Gram volume curve.
+    Invokes sc.maximumDistance and sc.calcGramLocalVolumes.
+    """
+    bands, height, width = frame_data.shape
+    img = np.transpose(frame_data, (1, 2, 0))
+    image2D = np.reshape(img, (height * width, bands), order="F").copy()
 
-    def overwrite_dset(data_grp, name, shape, dtype='float32', spatial_ref=None, geo_transform=None, chunks=None, scale_factor=None, fill_value=None, **kwargs):
-        if name in data_grp:
-            del data_grp[name]
-    
-        if fill_value is not None:
-            kwargs['fillvalue'] = fill_value
-            
-        ds = data_grp.create_dataset(name, shape=shape, dtype=dtype, compression="gzip", compression_opts=5, chunks=chunks, shuffle=True, **kwargs)
-    
-        if spatial_ref is not None: ds.attrs['spatial_ref'] = spatial_ref
-        if geo_transform is not None: ds.attrs['GeoTransform'] = geo_transform
-        
-        if scale_factor is not None: ds.attrs['scale_factor'] = scale_factor
-        if fill_value is not None: ds.attrs['_FillValue'] = fill_value
-        
-        return ds
+    image2D = np.clip(image2D, 0.0, 1.0)
 
-    # ==========================================
-    # 4. MASTER THREAD DISPATCHER
-    # ==========================================
-    def process_global_timeline(h5_out, orig_filepath):
-        nonlocal CALC_SLIDING_VOLUME, CALC_NEIGHBORHOOD_VOLUME, CALC_SMACC_VOLUME
+    valid_mask = ~np.isnan(image2D).any(axis=1)
+    if np.sum(valid_mask) < num_endmembers:
+        return (
+            np.full((bands, num_endmembers), np.nan, dtype=np.float32),
+            np.full(num_endmembers, -1, dtype=np.int32),
+            np.full(num_endmembers, np.nan, dtype=np.float32)
+        )
 
-        with h5py.File(orig_filepath, 'r') as h5_orig:
-            grids_grp = h5_orig['/HDFEOS/GRIDS']
-            grids = [g for g in grids_grp.keys() if g != 'HARMONIZED']
-            if not grids:
-                raise ValueError("CRITICAL ERROR: No sensor grids found to process.")
+    valid_indices = np.where(valid_mask)[0]
+    valid_data = image2D[valid_mask].astype(np.float32).T
 
-            sensor_sources = {}
-            for grid in grids:
-                link = grids_grp.get(grid, getlink=True)
-                if isinstance(link, h5py.ExternalLink):
-                    sensor_sources[grid] = {
-                        'file': link.filename,
-                        'path': link.path
-                    }
-                else:
-                    sensor_sources[grid] = {
-                        'file': orig_filepath,
-                        'path': f"/HDFEOS/GRIDS/{grid}"
-                    }
+    endmembers = sc.maximumDistance(valid_data, num_endmembers)
 
-        # Open direct file handles for metadata discovery and processing
-        try:
-            timeline = []
-            grid_wavelengths = {}
-            grid_geotransforms = {}
-            direct_handles = {}
-            for grid in grids:
-                direct_handles[grid] = h5py.File(orig_filepath, 'r')
-                base_path = f"/HDFEOS/GRIDS/{grid}/Data Fields"
-                f_direct = direct_handles[grid]
-                if base_path not in f_direct:
-                    raise ValueError(f"CRITICAL ERROR: Data Fields missing for {grid} in {orig_filepath}")
-                
-                data_grp = f_direct[base_path]
-                grid_geotransforms[grid] = data_grp[SR_DATASET].attrs.get('GeoTransform')
-                if 'wavelengths' in data_grp[SR_DATASET].attrs:
-                    grid_wavelengths[grid] = data_grp[SR_DATASET].attrs['wavelengths'][:]
-            
-                for req_ds in [SR_DATASET, "common_mask"]:
-                    if req_ds not in data_grp:
-                        raise ValueError(f"CRITICAL ERROR: '{req_ds}' missing in {grid}. Ensure ARD Harmonizer ran successfully.")
-                    
-                acq_times = data_grp[SR_DATASET].attrs['acquisition_time']
-                spacecraft_ids = data_grp[SR_DATASET].attrs['spacecraft_id']
-            
-                for i, ts in enumerate(acq_times):
-                    sp_id = spacecraft_ids[i]
-                    sp_str = sp_id.decode('utf-8') if isinstance(sp_id, bytes) else str(sp_id)
-                    timeline.append({'time': ts, 'grid': grid, 'local_idx': i, 'spacecraft': sp_str})
+    endmember_indices = np.zeros(num_endmembers, dtype=np.int32)
+    for k in range(num_endmembers):
+        diffs = np.sum(np.abs(valid_data - endmembers[:, k:k + 1]), axis=0)
+        match_k = np.argmin(diffs)
+        endmember_indices[k] = valid_indices[match_k]
 
-            timeline.sort(key=lambda x: x['time'])
-            total_frames = len(timeline)
-            print(f"Global Timeline Established: {total_frames} frames across {len(grids)} sensors.")
+    mean_vector = np.nanmean(img, axis=(0, 1))
+    localization_vec = endmembers[:, 1]
 
-            # Mathematical Dependency Resolution
-            harm_path = '/HDFEOS/GRIDS/HARMONIZED/Data Fields'
-            if CALC_Z_SCORE and not CALC_SLIDING_VOLUME and not CALC_NEIGHBORHOOD_VOLUME:
-                print("  -> Dependency Warning: Z-score requested but 'sliding_volume_map' not found in file. Forcing CALC_SLIDING_VOLUME = True.")
-                CALC_SLIDING_VOLUME = True
-                
-            if CALC_ROBUST_SCALE and not CALC_SLIDING_VOLUME:
-                print("  -> Dependency Warning: Robust scale requested but 'sliding_volume_map' not found in file. Forcing CALC_SLIDING_VOLUME = True.")
-                CALC_SLIDING_VOLUME = True
-                
-            if CALC_NEIGHBORHOOD_Z_SCORE and not CALC_NEIGHBORHOOD_VOLUME:
-                print("  -> Dependency Warning: Neighborhood Z-score requested but 'neighborhood_volume_map' not found in file. Forcing CALC_NEIGHBORHOOD_VOLUME = True.")
-                CALC_NEIGHBORHOOD_VOLUME = True
+    remaining_endmembers = np.delete(endmembers, 1, axis=1)
+    volume = sc.calcGramLocalVolumes(remaining_endmembers, localization_vector=localization_vec, divide_by_factorial=False, axis=1)
+    volume = np.insert(volume, 0, 0.0)
 
-            if CALC_SMACC_ZSCORE and not CALC_SMACC_VOLUME:
-                has_smacc_vol = (harm_path in h5_out and 'smacc_sliding_volume_map' in h5_out[harm_path])
-                if not has_smacc_vol:
-                    print("  -> Dependency Warning: SMACC Z-score requested but 'smacc_sliding_volume_map' not found in file. Forcing CALC_SMACC_VOLUME = True.")
-                    CALC_SMACC_VOLUME = True
+    return endmembers.astype(np.float32), endmember_indices.astype(np.int32), volume.astype(np.float32)
 
-            ref_f = direct_handles[grids[0]]
-            ref_sr = ref_f[f"/HDFEOS/GRIDS/{grids[0]}/Data Fields/{SR_DATASET}"]
-            _, _, height, width = ref_sr.shape
-            spatial_ref = ref_sr.attrs.get('spatial_ref')
-            master_gt = ref_sr.attrs.get('GeoTransform')
-            master_x = master_gt[0]
-            master_y = master_gt[3]
 
-            print("Pre-calculating global persistent water mask from Fmask history...")
-            water_sum = np.zeros((height, width), dtype=np.int32)
-            valid_sum = np.zeros((height, width), dtype=np.int32)
-        
-            for meta in timeline:
-                g_name = meta['grid']
-                l_idx = meta['local_idx']
-                f_direct = direct_handles[g_name]
-                fmask_path = f"/HDFEOS/GRIDS/{g_name}/Data Fields/Fmask"
-                
-                if fmask_path in f_direct:
-                    grid_gt = grid_geotransforms[g_name]
-                    col_offset = int(round((master_x - grid_gt[0]) / 30.0))
-                    row_offset = int(round((grid_gt[3] - master_y) / 30.0))
-                    
-                    fmask_frame = f_direct[fmask_path][l_idx, row_offset:row_offset+height, col_offset:col_offset+width]
-                    valid_pixels = (fmask_frame != 255)
-                    water_pixels = ((fmask_frame & 32) > 0)
-                    water_sum[valid_pixels] += water_pixels[valid_pixels]
-                    valid_sum[valid_pixels] += 1
-                
+# ==============================================================================
+# DATASET CREATION AND MANAGEMENT HELPERS
+# ==============================================================================
+
+def overwrite_dset(data_grp, name, shape, dtype, fillvalue=None, spatial_ref=None, geo_transform=None, chunks=None, **kwargs):
+    """Creates or overwrites a dataset in an HDF5 group with gzip level 6 compression."""
+    if name in data_grp:
+        del data_grp[name]
+
+    create_kwargs = {
+        "shuffle": True,
+        "compression": "gzip",
+        "compression_opts": 6,
+        "chunks": chunks,
+        **kwargs
+    }
+    if fillvalue is not None:
+        create_kwargs["fillvalue"] = fillvalue
+
+    ds = data_grp.create_dataset(
+        name,
+        shape=shape,
+        dtype=dtype,
+        **create_kwargs
+    )
+
+    if spatial_ref is not None:
+        ds.attrs['spatial_ref'] = spatial_ref
+    if geo_transform is not None:
+        ds.attrs['GeoTransform'] = geo_transform
+    if fillvalue is not None:
+        ds.attrs['_FillValue'] = fillvalue
+
+    return ds
+
+
+# ==============================================================================
+# PIPELINE EXECUTION ENGINE
+# ==============================================================================
+
+def process_ard_cube(filepath, tile_size=3, num_endmembers=7, norm_param=None):
+    """
+    Processes the multi-sensor ARD cube in-place, appending the three required metrics:
+      1. CALC_GLOBAL_ENDMEMBERS
+      2. CALC_SLIDING_VOLUME
+      3. CALC_Z_SCORE
+    directly back into the source HDF5 file.
+    """
+    print(f"\nProcessing in-place spectral complexity calculations for: {filepath}")
+
+    with h5py.File(filepath, 'r+') as h5_file:
+        grids = [g for g in h5_file['/HDFEOS/GRIDS'].keys() if g != 'HARMONIZED']
+        if not grids:
+            raise ValueError("No sensor grids found to process in input HDF5 file.")
+
+        timeline = []
+        for grid in grids:
+            base_path = f"/HDFEOS/GRIDS/{grid}/Data Fields"
+            if base_path not in h5_file:
+                raise ValueError(f"Data Fields missing for {grid}")
+
+            data_grp = h5_file[base_path]
+            for req_ds in ["surface_reflectance", "common_mask"]:
+                if req_ds not in data_grp:
+                    raise ValueError(f"'{req_ds}' missing in {grid}.")
+
+            acq_times = data_grp["surface_reflectance"].attrs['acquisition_time']
+            spacecraft_ids = data_grp["surface_reflectance"].attrs['spacecraft_id']
+
+            for i, ts in enumerate(acq_times):
+                sp_id = spacecraft_ids[i]
+                sp_str = sp_id.decode('utf-8') if isinstance(sp_id, bytes) else str(sp_id)
+                timeline.append({'time': ts, 'grid': grid, 'local_idx': i, 'spacecraft': sp_str})
+
+        timeline.sort(key=lambda x: x['time'])
+        total_frames = len(timeline)
+        print(f"Global Timeline Established: {total_frames} frames across {len(grids)} sensors.")
+
+        ref_sr = h5_file[f"/HDFEOS/GRIDS/{grids[0]}/Data Fields/surface_reflectance"]
+        ref_grid = h5_file[f"/HDFEOS/GRIDS/{grids[0]}/Data Fields/common_mask"]
+        height, width = ref_grid.shape[-2:]
+        spatial_ref = ref_grid.attrs.get('spatial_ref') or ref_sr.attrs.get('spatial_ref')
+        geo_transform = ref_grid.attrs.get('GeoTransform') if 'GeoTransform' in ref_grid.attrs else ref_sr.attrs.get('GeoTransform')
+
+        print("Pre-calculating global persistent water mask from Fmask history...")
+        water_sum = np.zeros((height, width), dtype=np.int32)
+        valid_sum = np.zeros((height, width), dtype=np.int32)
+
+        for meta in timeline:
+            g_name = meta['grid']
+            l_idx = meta['local_idx']
+            fmask_path = f"/HDFEOS/GRIDS/{g_name}/Data Fields/Fmask"
+            if fmask_path in h5_file:
+                fmask_frame = h5_file[fmask_path][l_idx, :, :]
+                valid_pixels = (fmask_frame != 255)
+                water_pixels = ((fmask_frame & 32) > 0)
+                water_sum[valid_pixels] += water_pixels[valid_pixels]
+                valid_sum[valid_pixels] += 1
+
+        if np.max(water_sum) > 0:
             water_sum_masked = np.ma.masked_where(valid_sum == 0, water_sum)
-            binary_mask_masked = water_sum_masked >= (1/3 * np.max(water_sum))
+            binary_mask_masked = water_sum_masked >= (1.0 / 3.0 * np.max(water_sum))
             persistent_water_mask = binary_mask_masked.filled(False)
-            print(f"Persistent water mask computed. Marked {np.sum(persistent_water_mask)} pixels as persistent water.")
+        else:
+            persistent_water_mask = np.zeros((height, width), dtype=bool)
 
-            chunk_h, chunk_w = min(height, 256), min(width, 256)
-            chunks_3d = (1, chunk_h, chunk_w)
+        print(f"Persistent water mask computed. Marked {np.sum(persistent_water_mask)} pixels as persistent water.")
 
-            if harm_path in h5_out:
-                harm_grp = h5_out[harm_path]
-            else:
-                h5_out.create_group('/HDFEOS/GRIDS/HARMONIZED')
-                harm_grp = h5_out.create_group(harm_path)
+        chunk_h, chunk_w = min(height, 256), min(width, 256)
+        chunks_3d = (1, chunk_h, chunk_w)
 
-            scale_fac_indices = 10000.0   # For [-1.0, 1.0] bounded indices & surface reflectance (range: [-3.27, +3.27], precision: 0.0001)
-            scale_fac_z = 1000.0         # For standardized statistical scores (range: [-32.767, +32.767], precision: 0.001)
-            fill_val = -32768
-            # Pre-allocate ONLY requested datasets
-            ds_harm_mask = overwrite_dset(harm_grp, 'common_mask', (total_frames, height, width), dtype='uint8', spatial_ref=spatial_ref, geo_transform=master_gt, chunks=chunks_3d)
-            ds_harm_ortho = overwrite_dset(harm_grp, 'ortho_visual', (total_frames, 4, height, width), dtype='uint8', spatial_ref=spatial_ref, geo_transform=master_gt, chunks=(1, 4, chunk_h, chunk_w))
-            ds_harm_slide = overwrite_dset(harm_grp, SLIDE_DSET_NAME, (total_frames, height, width), spatial_ref=spatial_ref, geo_transform=master_gt, chunks=chunks_3d) if CALC_SLIDING_VOLUME else None
-            ds_harm_neighborhood = overwrite_dset(harm_grp, NEIGHBORHOOD_DSET_NAME, (total_frames, height, width), spatial_ref=spatial_ref, geo_transform=master_gt, chunks=chunks_3d) if CALC_NEIGHBORHOOD_VOLUME else None
-            ds_harm_smacc_slide = overwrite_dset(harm_grp, SMACC_SLIDE_DSET_NAME, (total_frames, height, width), spatial_ref=spatial_ref, geo_transform=master_gt, chunks=chunks_3d) if CALC_SMACC_VOLUME else None
-            ds_harm_ndvi = overwrite_dset(harm_grp, 'ndvi_map', (total_frames, height, width), dtype='int16', scale_factor=scale_fac_indices, fill_value=fill_val, spatial_ref=spatial_ref, geo_transform=master_gt, chunks=chunks_3d) if CALC_NDVI else None
-            ds_harm_ndbi = overwrite_dset(harm_grp, 'ndbi_map', (total_frames, height, width), dtype='int16', scale_factor=scale_fac_indices, fill_value=fill_val, spatial_ref=spatial_ref, geo_transform=master_gt, chunks=chunks_3d) if CALC_NDBI else None
-            ds_harm_msd = overwrite_dset(harm_grp, 'msd_map', (total_frames, height, width), dtype='int16', scale_factor=scale_fac_indices, fill_value=fill_val, spatial_ref=spatial_ref, geo_transform=master_gt, chunks=chunks_3d) if CALC_MSD else None
-            ds_harm_z = overwrite_dset(harm_grp, Z_DSET_NAME, (total_frames, height, width), dtype='int16', scale_factor=scale_fac_z, fill_value=fill_val, spatial_ref=spatial_ref, geo_transform=master_gt, chunks=chunks_3d) if CALC_Z_SCORE else None
-            ds_harm_smacc_z = overwrite_dset(harm_grp, SMACC_Z_DSET_NAME, (total_frames, height, width), dtype='int16', scale_factor=scale_fac_z, fill_value=fill_val, spatial_ref=spatial_ref, geo_transform=master_gt, chunks=chunks_3d) if CALC_SMACC_ZSCORE else None
-            ds_harm_robust = overwrite_dset(harm_grp, 'sliding_volume_robust_scale', (total_frames, height, width), dtype='int16', scale_factor=scale_fac_z, fill_value=fill_val, spatial_ref=spatial_ref, geo_transform=master_gt, chunks=chunks_3d) if CALC_ROBUST_SCALE else None
-            ds_harm_box_cox = overwrite_dset(harm_grp, 'sliding_volume_box_cox', (total_frames, height, width), dtype='int16', scale_factor=scale_fac_z, fill_value=fill_val, spatial_ref=spatial_ref, geo_transform=master_gt, chunks=chunks_3d) if CALC_BOX_COX else None
-            ds_harm_neighborhood_z = overwrite_dset(harm_grp, NEIGHBORHOOD_Z_DSET_NAME, (total_frames, height, width), dtype='int16', scale_factor=scale_fac_z, fill_value=fill_val, spatial_ref=spatial_ref, geo_transform=master_gt, chunks=chunks_3d) if CALC_NEIGHBORHOOD_Z_SCORE else None
-            ds_harm_temp_z = overwrite_dset(harm_grp, 'temporal_z_score', (total_frames, height, width), dtype='int16', scale_factor=scale_fac_z, fill_value=fill_val, spatial_ref=spatial_ref, geo_transform=master_gt, chunks=chunks_3d) if CALC_TEMPORAL_Z_SCORE else None
-            ds_harm_pixel_temp_z = overwrite_dset(harm_grp, 'pixel_temporal_z_score', (total_frames, height, width), dtype='int16', scale_factor=scale_fac_z, fill_value=fill_val, spatial_ref=spatial_ref, geo_transform=master_gt, chunks=chunks_3d) if CALC_PIXEL_TEMPORAL_Z_SCORE else None
-            ds_harm_esd = overwrite_dset(harm_grp, 'effective_spectral_dimensionality', (total_frames, height, width), dtype='uint8', spatial_ref=spatial_ref, geo_transform=master_gt, chunks=chunks_3d) if CALC_ESD else None
-            ds_harm_sii = overwrite_dset(harm_grp, 'spectral_innovation_integral', (total_frames, height, width), dtype='float32', spatial_ref=spatial_ref, geo_transform=master_gt, chunks=chunks_3d) if CALC_ESD else None
+        harm_base = '/HDFEOS/GRIDS/HARMONIZED'
+        harm_path = f"{harm_base}/Data Fields"
+        if harm_path in h5_file:
+            harm_grp = h5_file[harm_path]
+        else:
+            if harm_base not in h5_file:
+                h5_file.create_group(harm_base)
+            harm_grp = h5_file.create_group(harm_path)
 
-            sensor_dsets = {}
-            import os
-            for grid in grids:
-                data_grp = h5_out.require_group(f"/HDFEOS/GRIDS/{grid}/Data Fields")
-                if SR_DATASET not in data_grp:
-                    data_grp[SR_DATASET] = h5py.ExternalLink(os.path.basename(orig_filepath), f"/HDFEOS/GRIDS/{grid}/Data Fields/{SR_DATASET}")
-                if 'common_mask' not in data_grp:
-                    data_grp['common_mask'] = h5py.ExternalLink(os.path.basename(orig_filepath), f"/HDFEOS/GRIDS/{grid}/Data Fields/common_mask")
+        ds_harm_mask = overwrite_dset(harm_grp, 'common_mask', (total_frames, height, width), dtype='uint8', fillvalue=255, spatial_ref=spatial_ref, geo_transform=geo_transform, chunks=chunks_3d)
+        ds_harm_ortho = overwrite_dset(harm_grp, 'ortho_visual', (total_frames, 3, height, width), dtype='uint8', fillvalue=0, spatial_ref=spatial_ref, geo_transform=geo_transform, chunks=(1, 3, chunk_h, chunk_w))
+        ds_harm_slide = overwrite_dset(harm_grp, 'sliding_volume_map', (total_frames, height, width), dtype='float32', fillvalue=np.nan, spatial_ref=spatial_ref, geo_transform=geo_transform, chunks=chunks_3d)
+        ds_harm_z = overwrite_dset(harm_grp, 'sliding_volume_z_score', (total_frames, height, width), dtype='float32', fillvalue=np.nan, spatial_ref=spatial_ref, geo_transform=geo_transform, chunks=chunks_3d)
+        ds_harm_ndvi = overwrite_dset(harm_grp, 'ndvi', (total_frames, height, width), dtype='float32', fillvalue=np.nan, spatial_ref=spatial_ref, geo_transform=geo_transform, chunks=chunks_3d)
 
-            if CALC_GLOBAL_ENDMEMBERS:
-                for grid in grids:
-                    f_direct = direct_handles[grid]
-                    orig_data_grp = f_direct[f"/HDFEOS/GRIDS/{grid}/Data Fields"]
-                    sr_shape = orig_data_grp[SR_DATASET].shape
-                    n_frames, n_bands = sr_shape[0], sr_shape[1]
-                
-                    data_grp = h5_out[f"/HDFEOS/GRIDS/{grid}/Data Fields"]
-                    em_ds = overwrite_dset(data_grp, 'frame_endmembers', (n_frames, n_bands, NUM_ENDMEMBERS), dtype='int16', scale_factor=scale_fac_indices, fill_value=fill_val, spatial_ref=spatial_ref, geo_transform=master_gt, chunks=(1, n_bands, NUM_ENDMEMBERS))
-                    em_ds.attrs['wavelengths'] = orig_data_grp[SR_DATASET].attrs['wavelengths']
-                    idx_ds = overwrite_dset(data_grp, 'frame_endmember_indices', (n_frames, NUM_ENDMEMBERS), dtype='int32', chunks=(1, NUM_ENDMEMBERS))
-                    vol_ds = overwrite_dset(data_grp, 'frame_endmember_volumes', (n_frames, NUM_ENDMEMBERS), chunks=(1, NUM_ENDMEMBERS))
-                
-                    sensor_dsets[grid] = {'em': em_ds, 'idx': idx_ds, 'vol': vol_ds, 'num_bands': n_bands}
-        finally:
-            for f in direct_handles.values():
-                f.close()
 
-        payloads = []
-        for global_idx, meta in enumerate(timeline):
-            grid_name = meta['grid']
-        
-            if "HLSS30" in grid_name:
-                red_idx, nir_idx, swir_idx = 3, 7, 11
-                sensor_type = "HLS"
-            elif "HLSL30" in grid_name:
-                red_idx, nir_idx, swir_idx = 3, 4, 5
-                sensor_type = "HLS"
-            elif "TANAGER" in grid_name:
-                red_idx, nir_idx, swir_idx = 59, 97, 244
-                sensor_type = "TANAGER"
-            elif "ENMAP" in grid_name:
-                wl = grid_wavelengths.get(grid_name)
-                if wl is not None:
-                    red_idx = int(np.argmin(np.abs(wl - 650)))
-                    nir_idx = int(np.argmin(np.abs(wl - 850)))
-                    swir_idx = int(np.argmin(np.abs(wl - 1600)))
-                else:
-                    red_idx, nir_idx, swir_idx = 45, 73, 148
-                sensor_type = "ENMAP"
-            elif "DRAGONETTE" in grid_name:
-                wl = grid_wavelengths.get(grid_name)
-                if wl is not None:
-                    red_idx = int(np.argmin(np.abs(wl - 650)))
-                    nir_idx = int(np.argmin(np.abs(wl - 850)))
-                    swir_idx = int(np.argmin(np.abs(wl - 1600)))
-                else:
-                    red_idx, nir_idx, swir_idx = 10, 20, 30
-                sensor_type = "DRAGONETTE"
-            else:
-                raise ValueError(f"CRITICAL ERROR: Unrecognized Sensor Grid Architecture: {grid_name}")
+        sensor_dsets = {}
+        for grid in grids:
+            data_grp = h5_file[f"/HDFEOS/GRIDS/{grid}/Data Fields"]
+            sr_shape = data_grp["surface_reflectance"].shape
+            n_frames, n_bands = sr_shape[0], sr_shape[1]
 
-            payloads.append({
-                'orig_filepath': orig_filepath,
-                'data_grp_path': f"/HDFEOS/GRIDS/{grid_name}/Data Fields",
-                'constellation_filepath': orig_filepath,
-                'global_idx': global_idx,
-                'grid_name': grid_name,
-                't_local': meta['local_idx'],
-                'sensor_type': sensor_type,
-                'red_idx': red_idx,
-                'nir_idx': nir_idx,
-                'swir_idx': swir_idx,
-                'num_bands': sensor_dsets[grid_name]['num_bands'] if CALC_GLOBAL_ENDMEMBERS else 0,
-                'height': height,
-                'width': width,
-                'row_offset': int(round((grid_geotransforms[grid_name][3] - master_y) / 30.0)),
-                'col_offset': int(round((master_x - grid_geotransforms[grid_name][0]) / 30.0)),
-                'persistent_water_mask': persistent_water_mask,
-                'sr_dataset_name': SR_DATASET,
-                'calc_flags': {
-                    'ndvi': CALC_NDVI, 'ndbi': CALC_NDBI, 'msd': CALC_MSD,
-                    'endmembers': CALC_GLOBAL_ENDMEMBERS, 'volume': CALC_SLIDING_VOLUME,
-                    'neighborhood_volume': CALC_NEIGHBORHOOD_VOLUME, 'z_score': CALC_Z_SCORE,
-                    'neighborhood_z_score': CALC_NEIGHBORHOOD_Z_SCORE, 'robust_scale': CALC_ROBUST_SCALE,
-                    'box_cox': CALC_BOX_COX,
-                    'smacc_volume': CALC_SMACC_VOLUME,
-                    'smacc_zscore': CALC_SMACC_ZSCORE,
-                    'esd': CALC_ESD
-                },
-                'MASKING': MASKING,
-                'NUM_ENDMEMBERS': NUM_ENDMEMBERS,
-                'NORM_PARAM': NORM_PARAM,
-                'TILE_SIZE': TILE_SIZE,
-                'SLIDING_STRIDE': SLIDING_STRIDE
-            })
+            em_ds = overwrite_dset(data_grp, 'frame_endmembers', (n_frames, n_bands, num_endmembers), dtype='float32', fillvalue=np.nan, spatial_ref=spatial_ref, geo_transform=geo_transform, chunks=(1, n_bands, num_endmembers))
+            if 'wavelengths' in data_grp["surface_reflectance"].attrs:
+                em_ds.attrs['wavelengths'] = data_grp["surface_reflectance"].attrs['wavelengths']
 
-        agg_telemetry = {'Total_Worker_Time': []}
+            idx_ds = overwrite_dset(data_grp, 'frame_endmember_indices', (n_frames, num_endmembers), dtype='int32',fillvalue=-9999, chunks=(1, num_endmembers))
+            vol_ds = overwrite_dset(data_grp, 'frame_endmember_volumes', (n_frames, num_endmembers), dtype='float32',fillvalue=np.nan, chunks=(1, num_endmembers))
+
+            sensor_dsets[grid] = {'em': em_ds, 'idx': idx_ds, 'vol': vol_ds, 'num_bands': n_bands}
+
         global_means_list = []
         global_stds_list = []
-        smacc_global_means_list = []
-        smacc_global_stds_list = []
-        neighborhood_global_means_list = []
-        neighborhood_global_stds_list = []
-        global_lambdas_list = []
-        global_medians_list = []
-        global_iqrs_list = []
-        bc_global_lambdas_list = []
-        bc_global_means_list = []
-        bc_global_stds_list = []
 
-        completed_frames = 0
-        max_workers = 2
-    
-        print(f"Spooling {total_frames} frames into PyTorch Unified Compute Engine...")
+        print(f"Spooling {total_frames} frames into SpecComplexTorch Compute Engine...")
         t_start_pipeline = time.perf_counter()
-    
-        # Process Iteratively: PyTorch naturally handles highly-optimized SIMD multi-threading 
-        # on the CPU and parallel execution on the GPU. Wrapping PyTorch in Python's 
-        # ProcessPoolExecutor leads to massive lock contention and WMI OS deadlocks.
-        for global_idx, p in enumerate(payloads):
-            result = compute_frame_metrics(p)
-            
-            grid_name = result['grid_name']
-            t_local = result['t_local']
-        
-            # Dynamically aggregate telemetry
-            for key, val in result['telemetry'].items():
-                if key not in agg_telemetry: agg_telemetry[key] = []
-                agg_telemetry[key].append(val)
-        
-            # Write selectively based on configuration
-            ds_harm_mask[global_idx, ...] = result['mask']
-            ds_harm_ortho[global_idx, ...] = result['ortho']
-            if CALC_NDVI: 
-                ds_harm_ndvi[global_idx, ...] = sc.scale_to_int16(result['ndvi'], scale_factor=scale_fac_indices)
-            if CALC_NDBI: 
-                ds_harm_ndbi[global_idx, ...] = sc.scale_to_int16(result['ndbi'], scale_factor=scale_fac_indices)
-            if CALC_MSD: 
-                ds_harm_msd[global_idx, ...] = sc.scale_to_int16(result['msd'], scale_factor=scale_fac_indices)
-            if CALC_SLIDING_VOLUME: 
-                ds_harm_slide[global_idx, ...] = result['slide']
-            if CALC_SMACC_VOLUME: 
-                ds_harm_smacc_slide[global_idx, ...] = result['smacc_slide']
-            if CALC_NEIGHBORHOOD_VOLUME:
-                ds_harm_neighborhood[global_idx, ...] = result['neighborhood']
-            if CALC_Z_SCORE: 
-                ds_harm_z[global_idx, ...] = sc.scale_to_int16(result['z_map'], scale_factor=scale_fac_z)
-            if CALC_SMACC_ZSCORE: 
-                ds_harm_smacc_z[global_idx, ...] = sc.scale_to_int16(result['smacc_z_map'], scale_factor=scale_fac_z)
-            if CALC_ROBUST_SCALE:
-                ds_harm_robust[global_idx, ...] = sc.scale_to_int16(result['robust_map'], scale_factor=scale_fac_z)
-            if CALC_BOX_COX:
-                ds_harm_box_cox[global_idx, ...] = sc.scale_to_int16(result['box_cox_map'], scale_factor=scale_fac_z)
-            if CALC_NEIGHBORHOOD_Z_SCORE:
-                ds_harm_neighborhood_z[global_idx, ...] = sc.scale_to_int16(result['neighborhood_z_map'], scale_factor=scale_fac_z)
-            if CALC_ESD and 'esd_map' in result:
-                ds_harm_esd[global_idx, ...] = result['esd_map']
-                ds_harm_sii[global_idx, ...] = result['sii_map']
-        
-            if CALC_GLOBAL_ENDMEMBERS:
-                sensor_dsets[grid_name]['em'][t_local, ...] = sc.scale_to_int16(result['em'], scale_factor=scale_fac_indices) if result['em'] is not None else np.nan
-                sensor_dsets[grid_name]['idx'][t_local, ...] = result['em_idx']
-                sensor_dsets[grid_name]['vol'][t_local, ...] = result['vol']
-                
-            global_means_list.append(result['global_mean'])
-            global_stds_list.append(result['global_std'])
-            if CALC_SMACC_ZSCORE:
-                smacc_global_means_list.append(result['smacc_global_mean'])
-                smacc_global_stds_list.append(result['smacc_global_std'])
-            neighborhood_global_means_list.append(result['neighborhood_global_mean'])
-            neighborhood_global_stds_list.append(result['neighborhood_global_std'])
-            if CALC_ROBUST_SCALE:
-                global_lambdas_list.append(result['global_lambda'])
-                global_medians_list.append(result['global_median'])
-                global_iqrs_list.append(result['global_iqr'])
-            if CALC_BOX_COX:
-                bc_global_lambdas_list.append(result['bc_global_lambda'])
-                bc_global_means_list.append(result['bc_global_mean'])
-                bc_global_stds_list.append(result['bc_global_std'])
-        
-            completed_frames += 1
-            print(f"  [{completed_frames}/{total_frames}] {grid_name} (Global Index {global_idx}) processed in {result['telemetry']['Total_Worker_Time']:.2f}s")
 
-        t_end_pipeline = time.perf_counter()
+        for global_idx, meta in enumerate(timeline):
+            t_start_frame = time.perf_counter()
+            grid_name = meta['grid']
+            t_local = meta['local_idx']
 
-        # ==========================================
-        # PERFORMANCE METRICS (APM OUTPUT)
-        # ==========================================
-        print("\n" + "="*50)
-        print("ALGORITHMIC PERFORMANCE PROFILE (Mean per Frame)")
-        print("="*50)
-    
-        total_mean = np.mean(agg_telemetry['Total_Worker_Time'])
-        for key in agg_telemetry:
-            if key == 'Total_Worker_Time': continue
-            mean_time = np.mean(agg_telemetry[key])
-            pct = (mean_time / total_mean) * 100
-            print(f" {key.ljust(22)} : {mean_time:7.3f} sec  ({pct:5.1f}%)")
-        
-        print(f"\n Total Compute Time       : {(t_end_pipeline - t_start_pipeline)/60:.2f} minutes")
-        print(f" Equivalent Serial Time   : {(total_mean * total_frames)/60:.2f} minutes")
-        print("="*50)
+            data_grp = h5_file[f"/HDFEOS/GRIDS/{grid_name}/Data Fields"]
+            sr_dataset = data_grp["surface_reflectance"]
+            frame_sr = load_scaled_reflectance(sr_dataset, np.s_[t_local, ...])
+            frame_mask = data_grp["common_mask"][t_local, ...].copy()
+            raw_frame_ortho = data_grp["ortho_visual"][t_local, ...]
 
-        # ==========================================
-        # 7.5 CALCULATE TEMPORAL Z-SCORES PER SENSOR
-        # ==========================================
-        if (CALC_TEMPORAL_Z_SCORE or CALC_PIXEL_TEMPORAL_Z_SCORE) and ds_harm_slide is not None:
-            t0_temp_z = time.perf_counter()
-            print("\nCalculating Temporal Z-Scores per Sensor...")
-            
-            # Group frame indices by sensor
-            sensor_indices = {"Landsat": [], "Sentinel": [], "Tanager": [], "EnMAP": [], "Dragonette": []}
-            for idx, meta in enumerate(timeline):
-                grid = meta['grid']
-                if "HLSL30" in grid:
-                    sensor_indices["Landsat"].append(idx)
-                elif "HLSS30" in grid:
-                    sensor_indices["Sentinel"].append(idx)
-                elif "TANAGER" in grid:
-                    sensor_indices["Tanager"].append(idx)
-                elif "ENMAP" in grid:
-                    sensor_indices["EnMAP"].append(idx)
-                elif "DRAGONETTE" in grid:
-                    sensor_indices["Dragonette"].append(idx)
-                    
-            for sensor, indices in sensor_indices.items():
-                if len(indices) == 0: continue
-                print(f"  Processing {sensor} ({len(indices)} frames)...")
-                
-                # Load sliding volumes and masks for this sensor
-                sensor_volumes = np.empty((len(indices), height, width), dtype=np.float32)
-                sensor_masks = np.empty((len(indices), height, width), dtype=np.bool_)
-                for i, idx in enumerate(indices):
-                    sensor_volumes[i] = sc.read_scaled_int16(ds_harm_slide, np.s_[idx, :, :])
-                    # common_mask convention: 0 = Valid/Clear, 1 = Invalid/Masked.
-                    # SpecComplex temporal Z-score functions strictly expect True = Valid Pixel.
-                    sensor_masks[i] = (ds_harm_mask[idx, :, :] == 0)
-                
-                # Calculate temporal z-score using SpecComplex
-                if CALC_TEMPORAL_Z_SCORE:
-                    try:
-                        temp_z_cube = sc.calculate_temporal_z_score(sensor_volumes, sensor_masks)
-                        for i, idx in enumerate(indices):
-                            ds_harm_temp_z[idx, :, :] = sc.scale_to_int16(temp_z_cube[i], scale_factor=scale_fac_z)
-                    except ValueError as e:
-                        print(f"    -> Warning: Skipping {sensor} temporal Z-score: {e}")
-                        fill_val = ds_harm_temp_z.fillvalue if ds_harm_temp_z.fillvalue is not None else -32768
-                        for i, idx in enumerate(indices):
-                            ds_harm_temp_z[idx, :, :] = fill_val
-                        
-                if CALC_PIXEL_TEMPORAL_Z_SCORE:
-                    try:
-                        pixel_temp_z_cube = sc.calculate_pixel_temporal_z_score(sensor_volumes, sensor_masks)
-                        for i, idx in enumerate(indices):
-                            ds_harm_pixel_temp_z[idx, :, :] = sc.scale_to_int16(pixel_temp_z_cube[i], scale_factor=scale_fac_z)
-                    except ValueError as e:
-                        print(f"    -> Warning: Skipping {sensor} pixel temporal Z-score: {e}")
-                        fill_val = ds_harm_pixel_temp_z.fillvalue if ds_harm_pixel_temp_z.fillvalue is not None else -32768
-                        for i, idx in enumerate(indices):
-                            ds_harm_pixel_temp_z[idx, :, :] = fill_val
-            
-            print(f"Temporal Z-Scores completed in {time.perf_counter() - t0_temp_z:.2f}s")
+            if persistent_water_mask is not None:
+                frame_mask[persistent_water_mask] = 1
 
-        # ==========================================
-        # 8. APPLY STRICT DATA PROVENANCE ATTRIBUTES
-        # ==========================================
-        print("\nApplying Absolute Data Provenance Attributes...")
+            frame_ortho = raw_frame_ortho
+            if frame_ortho.shape[0] in [3, 4]:
+                frame_ortho = frame_ortho[:3, :, :]
+            else:
+                frame_ortho = np.transpose(frame_ortho[..., :3], (2, 0, 1))
+
+            if frame_ortho.dtype != np.uint8:
+                fo = frame_ortho.astype(np.float32)
+                ortho_ds = data_grp["ortho_visual"]
+                ortho_fill = ortho_ds.attrs.get("_FillValue", ortho_ds.attrs.get("fillvalue", getattr(ortho_ds, "fillvalue", None)))
+                if ortho_fill is not None and not np.isnan(ortho_fill):
+                    valid_ortho = ~np.isclose(fo, ortho_fill, equal_nan=True) & ~np.isnan(fo)
+                else:
+                    valid_ortho = ~np.isnan(fo)
+                if np.any(valid_ortho):
+                    p1, p99 = np.percentile(fo[valid_ortho], (1, 99))
+                    if p99 > p1:
+                        fo[valid_ortho] = (fo[valid_ortho] - p1) / (p99 - p1)
+                fo[~valid_ortho] = 0.0
+                frame_ortho = np.clip(fo * 255, 0, 255).astype(np.uint8)
+
+            gw_attr = data_grp["surface_reflectance"].attrs.get("all_good_wavelengths")
+            if gw_attr is not None:
+                gw_mask = gw_attr[t_local].astype(bool)
+                eval_sr = frame_sr[gw_mask]
+            else:
+                gw_mask = None
+                eval_sr = frame_sr
+
+            em, em_idx, vol_curve = process_volume_frame(eval_sr, num_endmembers)
+
+            if gw_mask is not None:
+                em_full = np.full((sensor_dsets[grid_name]['num_bands'], num_endmembers), np.nan, dtype=np.float32)
+                em_full[gw_mask, :] = em
+                em_out = em_full
+            else:
+                em_out = em
+
+            sensor_dsets[grid_name]['em'][t_local, ...] = em_out
+            sensor_dsets[grid_name]['idx'][t_local, ...] = em_idx
+            sensor_dsets[grid_name]['vol'][t_local, ...] = vol_curve
+
+            slide_map = sc.process_volume_sliding_tile(eval_sr, tile_size=tile_size, stride=1, num_endmembers=num_endmembers)
+            ds_harm_slide[global_idx, ...] = slide_map
+
+            valid_mask = (frame_mask == 0)
+            z_map, global_mean, global_std = sc.calculate_global_z_score(slide_map, valid_mask)
+            ds_harm_z[global_idx, ...] = z_map
+
+            global_means_list.append(global_mean)
+            global_stds_list.append(global_std)
+
+            ds_harm_mask[global_idx, ...] = frame_mask
+            ds_harm_ortho[global_idx, ...] = frame_ortho
+
+            wavelengths = data_grp["surface_reflectance"].attrs.get("wavelengths")
+            if wavelengths is not None:
+                wl = np.asarray(wavelengths)
+                # Account for nanometers vs micrometers
+                scale_wl = 1000.0 if np.nanmax(wl) < 10.0 else 1.0
+                red_target, nir_target = 665.0, 865.0
+                red_idx = int(np.nanargmin(np.abs(wl * scale_wl - red_target)))
+                nir_idx = int(np.nanargmin(np.abs(wl * scale_wl - nir_target)))
+            else:
+                if "HLSS30" in grid_name:
+                    red_idx, nir_idx = 3, 7
+                elif "HLSL30" in grid_name:
+                    red_idx, nir_idx = 3, 4
+                elif "TANAGER" in grid_name:
+                    red_idx, nir_idx = 59, 97
+                else:
+                    red_idx = min(3, frame_sr.shape[0] - 1)
+                    nir_idx = min(4, frame_sr.shape[0] - 1)
+
+            ndvi = sc.calc_ndvi_frame(frame_sr, red_idx, nir_idx)
+            ds_harm_ndvi[global_idx, ...] = ndvi
+
+            duration = time.perf_counter() - t_start_frame
+            print(f"  [{global_idx + 1}/{total_frames}] {grid_name} (Global Index {global_idx}) processed in {duration:.2f}s")
+
+        print("\nApplying Data Provenance Attributes...")
         dt_str = h5py.string_dtype(encoding='ascii')
-    
         prov_grid = np.array([m['grid'] for m in timeline], dtype=dt_str)
         prov_space = np.array([m['spacecraft'] for m in timeline], dtype=dt_str)
         prov_time = np.array([m['time'] for m in timeline], dtype='float64')
         prov_idx = np.array([m['local_idx'] for m in timeline], dtype='int32')
-    
-        # Only tag the datasets that were actually generated in this run
-        created_harm_dsets = [ds for ds in [ds_harm_mask, ds_harm_ortho, ds_harm_slide, ds_harm_neighborhood, ds_harm_smacc_slide, ds_harm_ndvi, ds_harm_ndbi, ds_harm_msd, ds_harm_z, ds_harm_smacc_z, ds_harm_robust, ds_harm_box_cox, ds_harm_neighborhood_z, ds_harm_temp_z, ds_harm_pixel_temp_z] if ds is not None]
-    
+
+        created_harm_dsets = [ds_harm_mask, ds_harm_ortho, ds_harm_slide, ds_harm_z, ds_harm_ndvi]
         for ds in created_harm_dsets:
             ds.attrs.create('source_grid', data=prov_grid)
             ds.attrs.create('source_spacecraft', data=prov_space)
             ds.attrs['acquisition_time'] = prov_time
             ds.attrs['source_frame_index'] = prov_idx
-        
+
             if ds.name.endswith('sliding_volume_map'):
-                ds.attrs['description'] = f"Volume of convex hull within sliding {TILE_SIZE}x{TILE_SIZE} tile"
-                ds.attrs['tile_size'] = TILE_SIZE
-                ds.attrs['sliding_stride'] = SLIDING_STRIDE
+                ds.attrs['description'] = f"Volume of convex hull within sliding {tile_size}x{tile_size} tile"
+                ds.attrs['tile_size'] = tile_size
+                ds.attrs['sliding_stride'] = 1
                 ds.attrs['gram_type'] = 'minEndmember'
-                ds.attrs['num_endmembers'] = NUM_ENDMEMBERS
-                ds.attrs['Normalization'] = NORM_PARAM if NORM_PARAM else "None"
-            elif ds.name.endswith('smacc_sliding_volume_map'):
-                ds.attrs['description'] = f"SMACC parallelotope volume within sliding {TILE_SIZE}x{TILE_SIZE} tile"
-                ds.attrs['tile_size'] = TILE_SIZE
-                ds.attrs['sliding_stride'] = SLIDING_STRIDE
-                ds.attrs['algorithm'] = 'SMACC'
-                ds.attrs['num_endmembers'] = NUM_ENDMEMBERS
-                ds.attrs['Normalization'] = NORM_PARAM if NORM_PARAM else "None"
-            elif ds.name.endswith('neighborhood_volume_map'):
-                ds.attrs['description'] = f"Neighborhood volume assigned to center pixel of {TILE_SIZE}x{TILE_SIZE} tile (no spatial averaging)"
-                ds.attrs['tile_size'] = TILE_SIZE
-                ds.attrs['gram_type'] = 'minEndmember'
-                ds.attrs['num_endmembers'] = NUM_ENDMEMBERS
-                ds.attrs['Normalization'] = NORM_PARAM if NORM_PARAM else "None"
-            elif ds.name.endswith('msd_map'):
-                ds.attrs['description'] = "Mean Spectral Distance (MSD) for each pixel"
-            elif ds.name.endswith('temporal_z_score'):
-                ds.attrs['description'] = "Temporal Z-score for sliding volume evaluated per-sensor against the global spatial time series"
-                ds.attrs['tile_size'] = TILE_SIZE
-                ds.attrs['sliding_stride'] = SLIDING_STRIDE
-            elif ds.name.endswith('pixel_temporal_z_score'):
-                ds.attrs['description'] = "Temporal Z-score for sliding volume evaluated exclusively against the pixel's own temporal history"
-                ds.attrs['tile_size'] = TILE_SIZE
-                ds.attrs['sliding_stride'] = SLIDING_STRIDE
+                ds.attrs['num_endmembers'] = num_endmembers
+                ds.attrs['Normalization'] = norm_param if norm_param else "None"
             elif ds.name.endswith('sliding_volume_z_score'):
                 ds.attrs['description'] = "Global Spectral Complexity Z-score. ARD Masked pixels excluded from background stats."
-                ds.attrs['MASKING_APPLIED'] = MASKING
+                ds.attrs['MASKING_APPLIED'] = True
                 ds.attrs['MASK_SOURCE'] = "HARMONIZED_common_mask"
                 ds.attrs['frame_global_means'] = np.array(global_means_list, dtype=np.float32)
                 ds.attrs['frame_global_stds'] = np.array(global_stds_list, dtype=np.float32)
-            elif ds.name.endswith('smacc_sliding_volume_z_score'):
-                ds.attrs['description'] = "Global SMACC Spectral Complexity Z-score. ARD Masked pixels excluded from background stats."
-                ds.attrs['MASKING_APPLIED'] = MASKING
-                ds.attrs['MASK_SOURCE'] = "HARMONIZED_common_mask"
-                ds.attrs['frame_global_means'] = np.array(smacc_global_means_list, dtype=np.float32)
-                ds.attrs['frame_global_stds'] = np.array(smacc_global_stds_list, dtype=np.float32)
-            elif ds.name.endswith('sliding_volume_robust_scale'):
-                ds.attrs['description'] = "Global Spectral Complexity Robust Scale (PowerTransformer + Median/IQR). ARD Masked pixels excluded from background stats."
-                ds.attrs['MASKING_APPLIED'] = MASKING
-                ds.attrs['MASK_SOURCE'] = "HARMONIZED_common_mask"
-                ds.attrs['frame_global_lambdas'] = np.array(global_lambdas_list, dtype=np.float32)
-                ds.attrs['frame_global_medians'] = np.array(global_medians_list, dtype=np.float32)
-                ds.attrs['frame_global_iqrs'] = np.array(global_iqrs_list, dtype=np.float32)
-            elif ds.name.endswith('sliding_volume_box_cox'):
-                ds.attrs['description'] = "Global Spectral Complexity Box Cox Scale (PowerTransformer with standardization). ARD Masked pixels excluded from background stats."
-                ds.attrs['MASKING_APPLIED'] = MASKING
-                ds.attrs['MASK_SOURCE'] = "HARMONIZED_common_mask"
-                ds.attrs['frame_global_lambdas'] = np.array(bc_global_lambdas_list, dtype=np.float32)
-                ds.attrs['frame_global_means'] = np.array(bc_global_means_list, dtype=np.float32)
-                ds.attrs['frame_global_stds'] = np.array(bc_global_stds_list, dtype=np.float32)
-            elif ds.name.endswith('neighborhood_volume_z_score'):
-                ds.attrs['description'] = "Global Spectral Complexity Neighborhood Z-score. ARD Masked pixels excluded from background stats."
-                ds.attrs['MASKING_APPLIED'] = MASKING
-                ds.attrs['MASK_SOURCE'] = "HARMONIZED_common_mask"
-                ds.attrs['frame_global_means'] = np.array(neighborhood_global_means_list, dtype=np.float32)
-                ds.attrs['frame_global_stds'] = np.array(neighborhood_global_stds_list, dtype=np.float32)
+            elif ds.name.endswith('ndvi'):
+                ds.attrs['description'] = "Harmonized Normalized Difference Vegetation Index (NDVI)" 
 
-        if CALC_GLOBAL_ENDMEMBERS:
-            for grid in grids:
-                dsets = sensor_dsets[grid]
-                dsets['vol'].attrs['description'] = "Full volume curve (Volume vs Endmember Count) for entire frame"
-                dsets['vol'].attrs['gram_type'] = 'minEndmember'
-                dsets['vol'].attrs['num_endmembers'] = NUM_ENDMEMBERS
-                dsets['vol'].attrs['Normalization'] = NORM_PARAM if NORM_PARAM else "None"
-            
-                dsets['em'].attrs['description'] = "Endmembers extracted for frame"
-                dsets['em'].attrs['num_endmembers'] = NUM_ENDMEMBERS
-                dsets['em'].attrs['Normalization'] = NORM_PARAM if NORM_PARAM else "None"
-                dsets['idx'].attrs['description'] = "Spatial 1D indices for extracted endmembers"
+        for grid in grids:
+            dsets = sensor_dsets[grid]
+            dsets['vol'].attrs['description'] = "Full volume curve (Volume vs Endmember Count) for entire frame"
+            dsets['vol'].attrs['gram_type'] = 'minEndmember'
+            dsets['vol'].attrs['num_endmembers'] = num_endmembers
+            dsets['vol'].attrs['Normalization'] = norm_param if norm_param else "None"
 
+            dsets['em'].attrs['description'] = "Endmembers extracted for frame"
+            dsets['em'].attrs['num_endmembers'] = num_endmembers
+            dsets['em'].attrs['Normalization'] = norm_param if norm_param else "None"
+            dsets['idx'].attrs['description'] = "Spatial 1D indices for extracted endmembers"
+
+        t_end_pipeline = time.perf_counter()
+        print(f"\nSpectral complexity in-place processing complete in {(t_end_pipeline - t_start_pipeline)/60:.2f} minutes.")
+
+
+def main(target_location=None, tile_size=3, num_endmembers=7, norm_param=None):
+    """CLI and top-level entry point."""
     import argparse
     import yaml
-    
+
+    file_path = None
     if __name__ == "__main__":
         parser = argparse.ArgumentParser(description="Calculate Spectral Complexity Metrics")
         parser.add_argument("--file", type=str, help="Path to HLST ARD Master Grid HDF5 Cube")
-        args = parser.parse_args()
-        if args.file:
-            file_path = args.file
+        parser.add_argument("--location", type=str, help="Target location identifier (e.g. Rochesterv2)")
+        parser.add_argument("--tile-size", type=int, default=3, help="Sliding window tile size")
+        parser.add_argument("--num-endmembers", type=int, default=7, help="Number of endmembers to extract")
+        parser.add_argument("--norm-param", type=str, default=None, help="Normalization parameter (default None)")
+        args, _ = parser.parse_known_args()
+        file_path = args.file
+        if args.location:
+            target_location = args.location
+        tile_size = args.tile_size
+        num_endmembers = args.num_endmembers
+        norm_param = args.norm_param
 
     if not file_path:
         if target_location is not None:
             location = target_location
         else:
-            from pathlib import Path
             script_dir = Path(__file__).resolve().parent
             config_path = os.path.join(script_dir, "locations_config.yaml")
             if not os.path.exists(config_path):
                 config_path = os.path.join(script_dir.parent, "locations_config.yaml")
-            with open(config_path, "r") as f:
-                config_data = yaml.safe_load(f)
-            location = config_data.get("current_run", {}).get("location")
-                
-        if location:
-            file_path = f"C:/satelliteImagery/HLST30/HLST_{location}_Harmonized.h5"
-        
-    if not file_path or not os.path.exists(file_path):
-        root = tk.Tk()
-        root.withdraw()
-    
-        print("Please select the HLST ARD Master Grid HDF5 Cube...")
-        file_path = tk.filedialog.askopenfilename(
-            title="Select HLST ARD Master Grid HDF5 Cube",
-            filetypes=[("HDF5 files", "*.h5")]
-        )
-        root.destroy()
+            if os.path.exists(config_path):
+                with open(config_path, "r") as f:
+                    config_data = yaml.safe_load(f)
+                location = config_data.get("current_run", {}).get("location")
+            else:
+                location = None
 
-    if file_path:
-        process_ard_cube(file_path)
+        if location:
+            file_path = f"C:/satelliteImagery/HLST30/HLST_{location}.h5"
+
+    if not file_path or not os.path.exists(file_path):
+        try:
+            import tkinter as tk
+            from tkinter import filedialog
+            root = tk.Tk()
+            root.withdraw()
+            print("Please select the HLST ARD Master Grid HDF5 Cube...")
+            file_path = filedialog.askopenfilename(
+                title="Select HLST ARD Master Grid HDF5 Cube",
+                filetypes=[("HDF5 files", "*.h5")]
+            )
+            root.destroy()
+        except Exception:
+            pass
+
+    if file_path and os.path.exists(file_path):
+        process_ard_cube(file_path, tile_size=tile_size, num_endmembers=num_endmembers, norm_param=norm_param)
     else:
-        print("No file selected. Exiting.")
+        print(f"Target file not found or no file selected: {file_path}. Exiting.")
+
 
 if __name__ == '__main__':
     main()

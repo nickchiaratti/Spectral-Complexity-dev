@@ -1,57 +1,101 @@
+'''
+Tanager STAC Imagery Downloader.
+Downloads Tanager-1 hyperspectral surface reflectance and radiance assets from Planet STAC catalogs.
+Organizes data into item directories for subsequent multi-sensor harmonization.
+'''
 import os
 import requests
 import json
 from pathlib import Path
 from urllib.parse import urljoin
 
-import yaml
-LOCATION = "SantaBarbara"  # Fallback location if not specified in YAML
+# Pre-defined Regions of Interest (Bounding Boxes: [min_lon, min_lat, max_lon, max_lat])
+REGIONS = {
+    "Southern_California": [-119.503784, 33.582591, -117.686920, 34.746126],
+    "Utah": [-114.05, 37.0, -109.0, 42.5],
+    "Rochester_NY": [-77.72, 43.04, -77.44, 43.28],
+    "BuenosAires": [-65.0, -70.0, -41.0, -30.0],
+    "Global": [-180.0, -90.0, 180.0, 90.0],
+    "CentralGreece": [21.0, 40.0, 22.0, 41.0],
+}
 
-# --- Dynamic Configuration Loading ---
-script_dir = Path(__file__).resolve().parent
-config_path = os.path.join(script_dir, "locations_config.yaml")
-if not os.path.exists(config_path):
-    config_path = os.path.join(script_dir.parent, "locations_config.yaml")
+DEFAULT_START_DATE = "2022-01-01"
+DEFAULT_END_DATE = "2026-12-31"
 
-with open(config_path, "r") as f:
-    config_data = yaml.safe_load(f)
-
-DOWNLOAD_JOBS = []
-target_location = config_data.get("current_run", {}).get("location", LOCATION)
-
-locations_to_run = config_data.get("locations", {})
-if target_location and target_location in locations_to_run:
-    locations_to_run = {target_location: locations_to_run[target_location]}
-
-for loc_name, loc_data in locations_to_run.items():
-    source_cache = loc_data.get("SOURCE_CACHE")
-    if source_cache is None:
-        source_cache = loc_name
-        
-    bbox = [
-        loc_data["ROI_LON_MIN"],
-        loc_data["ROI_LAT_MIN"],
-        loc_data["ROI_LON_MAX"],
-        loc_data["ROI_LAT_MAX"]
-    ]
-    
-    # Use the top-level catalog to recursively find all items across all sub-collections
-    url = "https://www.planet.com/data/stac/tanager-core-imagery/catalog.json"
-    
-    job = {
-        "job_name": loc_name,
-        "collection_url": url,
-        "output_dir": f"C:/satelliteImagery/Tanager/{source_cache}_SourceData",
-        "include_bboxes": [bbox],
+# Download Jobs Configuration
+# Points multiple jobs to the corresponding output_dir and include_bboxes.
+DOWNLOAD_JOBS = [
+    {
+        "job_name": "ROCX_Rochester",
+        "collection_url": "https://www.planet.com/data/stac/tanager-core-imagery/ROCX2025/collection.json",
+        "output_dir": r"C:\satelliteImagery\Tanager\Rochesterv2_SourceData",
+        "include_bboxes": [REGIONS["Rochester_NY"]],
         "exclude_bboxes": [],
-        "target_assets": ['basic_sr_hdf5'] 
+        "target_assets": ['basic_sr_hdf5']
     }
-    DOWNLOAD_JOBS.append(job)
+]
+
+
+def get_jobs_from_config(config_path=None, target_location=None):
+    """Loads download jobs dynamically from locations_config.yaml."""
+    if config_path is None:
+        script_dir = Path(__file__).resolve().parent
+        for cand in [script_dir / "locations_config.yaml", script_dir.parent / "locations_config.yaml"]:
+            if cand.exists():
+                config_path = str(cand)
+                break
+        if config_path is None and os.path.exists("locations_config.yaml"):
+            config_path = "locations_config.yaml"
+
+    if config_path and os.path.exists(config_path):
+        try:
+            import yaml
+            with open(config_path, "r") as f:
+                config_data = yaml.safe_load(f)
+
+            if not target_location:
+                target_location = config_data.get("current_run", {}).get("location")
+
+            locations_to_run = config_data.get("locations", {})
+            if target_location and target_location in locations_to_run:
+                locations_to_run = {target_location: locations_to_run[target_location]}
+
+            jobs = []
+            for loc_name, loc_data in locations_to_run.items():
+                source_cache = loc_data.get("SOURCE_CACHE")
+                if source_cache is None:
+                    source_cache = loc_name
+                bbox = [
+                    loc_data["ROI_LON_MIN"],
+                    loc_data["ROI_LAT_MIN"],
+                    loc_data["ROI_LON_MAX"],
+                    loc_data["ROI_LAT_MAX"]
+                ]
+                url = "https://www.planet.com/data/stac/tanager-core-imagery/catalog.json"
+                if loc_name.startswith("Rochester") or loc_name == "ROCX_Rochester":
+                    url = "https://www.planet.com/data/stac/tanager-core-imagery/ROCX2025/collection.json"
+
+                jobs.append({
+                    "job_name": loc_name,
+                    "collection_url": url,
+                    "output_dir": f"C:/satelliteImagery/Tanager/{source_cache}_SourceData",
+                    "include_bboxes": [bbox],
+                    "exclude_bboxes": [],
+                    "target_assets": ['basic_sr_hdf5']
+                })
+            if jobs:
+                return jobs
+        except Exception as e:
+            print(f"[Warning] Could not parse config for Tanager jobs: {e}")
+
+    return DOWNLOAD_JOBS
+
 
 def intersects(bbox1, bbox2):
     """Evaluates whether two [min_lon, min_lat, max_lon, max_lat] bounding boxes intersect."""
     return not (bbox1[2] < bbox2[0] or bbox1[0] > bbox2[2] or
                 bbox1[3] < bbox2[1] or bbox1[1] > bbox2[3])
+
 
 def passes_spatial_filters(item_bbox, include_bboxes, exclude_bboxes):
     """
@@ -67,7 +111,7 @@ def passes_spatial_filters(item_bbox, include_bboxes, exclude_bboxes):
 
     # 2. Inclusions
     if not include_bboxes:
-        return True # If no inclusion regions are specified, accept all non-excluded items
+        return True  # If no inclusion regions are specified, accept all non-excluded items
         
     for inc_box in include_bboxes:
         if intersects(item_bbox, inc_box):
@@ -75,16 +119,30 @@ def passes_spatial_filters(item_bbox, include_bboxes, exclude_bboxes):
 
     return False
 
+
+def passes_temporal_filter(item_data, start_date=DEFAULT_START_DATE, end_date=DEFAULT_END_DATE):
+    """
+    Verifies that the item falls within the 2022-2026 test period.
+    """
+    props = item_data.get('properties', {})
+    dt_str = props.get('datetime') or props.get('acquisition_time') or item_data.get('datetime')
+    if not dt_str:
+        return True
+    item_date = str(dt_str)[:10]
+    return start_date <= item_date <= end_date
+
+
 def download_file(url, destination_path):
     """Streams file download to disk to handle large multi-gigabyte HDF5 assets efficiently."""
-    if destination_path.exists():
-        print(f"    -> Skipping {destination_path.name} (Already exists)")
+    dest = Path(destination_path)
+    if dest.exists() and dest.stat().st_size > 0:
+        print(f"    -> Skipping {dest.name} (Already exists)")
         return True
 
     try:
         with requests.get(url, stream=True) as r:
             r.raise_for_status()
-            with open(destination_path, 'wb') as f:
+            with open(dest, 'wb') as f:
                 for chunk in r.iter_content(chunk_size=8192):
                     f.write(chunk)
         return True
@@ -92,65 +150,43 @@ def download_file(url, destination_path):
         print(f"    -> Failed to download {url}: {e}")
         return False
 
-def execute_job(job_config):
+
+def execute_job(job_config, start_date=DEFAULT_START_DATE, end_date=DEFAULT_END_DATE, session=None):
     """Processes a single download job dictionary."""
     job_name = job_config["job_name"]
     collection_url = job_config["collection_url"]
     out_dir = Path(job_config["output_dir"])
     includes = job_config.get("include_bboxes", [])
     excludes = job_config.get("exclude_bboxes", [])
-    target_assets = job_config.get("target_assets", ['ortho_sr_hdf5'])
+    target_assets = job_config.get("target_assets", ['basic_sr_hdf5'])
 
-    print(f"\n{'='*50}")
+    print(f"\n{'=' * 50}")
     print(f"Executing Job: {job_name}")
     print(f"Target Directory: {out_dir}")
-    print(f"{'='*50}")
+    print(f"{'=' * 50}")
 
     out_dir.mkdir(parents=True, exist_ok=True)
-    
-    def fetch_all_item_links(start_url, max_depth=3):
-        visited = set()
-        item_urls = []
-        
-        def crawl(url, depth):
-            if depth > max_depth or url in visited:
-                return
-            visited.add(url)
-            
-            try:
-                resp = requests.get(url)
-                resp.raise_for_status()
-                data = resp.json()
-            except Exception as e:
-                print(f"  [Warning] Failed to fetch {url}: {e}")
-                return
-                
-            links = data.get('links', [])
-            for link in links:
-                rel = link.get('rel')
-                href = link.get('href')
-                if not href:
-                    continue
-                
-                full_url = urljoin(url, href)
-                if rel == 'item':
-                    item_urls.append(full_url)
-                elif rel == 'child':
-                    crawl(full_url, depth + 1)
-                    
-        crawl(start_url, 0)
-        return list(set(item_urls)) # deduplicate
-        
-    print("Crawling STAC Catalog for items...")
-    item_urls = fetch_all_item_links(collection_url)
-    print(f"Discovered {len(item_urls)} items across the catalog.")
+
+    http_client = session if session is not None else requests
+
+    try:
+        response = http_client.get(collection_url)
+        response.raise_for_status()
+        collection_data = response.json()
+    except Exception as e:
+        print(f"Failed to fetch catalog at {collection_url}: {e}")
+        return 0
+
+    item_links = [link['href'] for link in collection_data.get('links', []) if link.get('rel') == 'item']
+    print(f"Discovered {len(item_links)} items in catalog.")
     
     matched_items = 0
 
-    for idx, item_url in enumerate(item_urls):
+    for idx, item_href in enumerate(item_links):
+        item_url = urljoin(collection_url, item_href)
         
         try:
-            item_resp = requests.get(item_url)
+            item_resp = http_client.get(item_url)
             item_resp.raise_for_status()
             item_data = item_resp.json()
         except Exception as e:
@@ -164,8 +200,12 @@ def execute_job(job_config):
         if not passes_spatial_filters(item_bbox, includes, excludes):
             continue
 
+        # Apply Temporal Filtering for the 2022-2026 test period
+        if not passes_temporal_filter(item_data, start_date, end_date):
+            continue
+
         matched_items += 1
-        print(f"\n  [{item_id}] Matched spatial criteria. Processing assets...")
+        print(f"\n  [{item_id}] Matched spatial and temporal criteria. Processing assets...")
         
         # Route to common folder structure to support the native stacker
         item_folder = out_dir / item_id
@@ -191,19 +231,28 @@ def execute_job(job_config):
             else:
                 print(f"    -> Asset '{asset_key}' not present in this item.")
 
-    print(f"\nJob '{job_name}' completed. Successfully downloaded {matched_items} scenes.")
+    print(f"\nJob '{job_name}' completed. Successfully processed {matched_items} scenes.")
+    return matched_items
 
-def main(target_location=None):
+
+def main(jobs=None, start_date=DEFAULT_START_DATE, end_date=DEFAULT_END_DATE, session=None, target_location=None):
     print("Initializing Tanager STAC Job Queue...\n")
-    
-    # Filter jobs if target_location is provided
-    jobs_to_run = DOWNLOAD_JOBS
+    if jobs is not None:
+        job_list = jobs
+    else:
+        job_list = get_jobs_from_config(target_location=target_location)
+        if not job_list:
+            job_list = DOWNLOAD_JOBS
+
     if target_location:
-        jobs_to_run = [job for job in DOWNLOAD_JOBS if job["job_name"] == target_location]
-        
-    for job in jobs_to_run:
-        execute_job(job)
-    print("\nAll download jobs finished.")
+        job_list = [j for j in job_list if j["job_name"] == target_location]
+
+    total_scenes = 0
+    for job in job_list:
+        total_scenes += execute_job(job, start_date=start_date, end_date=end_date, session=session)
+    print(f"\nAll download jobs finished. Total scenes processed: {total_scenes}")
+    return total_scenes
+
 
 if __name__ == "__main__":
     main()

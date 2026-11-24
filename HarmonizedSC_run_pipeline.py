@@ -1,24 +1,24 @@
 """
 HarmonizedSC_run_pipeline.py
 ============================
-Orchestrator for Spectral Complexity, Synthetic Target Injection, and Continuous Change Detection.
+Orchestrator for Spectral Complexity, Synthetic Target Injection, and Continuous Change Monitoring (SC-CCM).
 
 Serializes the multi-step processing chain with complete separation between baseline and injected workflows:
 
   [BASELINE PIPELINE: Steps 1 - 7]
-    Step 1: HLS30_earthAccess_to_hdf5 (NASA HLS30 STAC Ingestion)
-    Step 2: Tanager_STAC-imagery-downloader (Planet Tanager-1 STAC Ingestion)
-    Step 3: HLST_constellation_to_hdf5 (Albers Orthorectification & Harmonization)
-    Step 4: HLST_SC_calculations (Spectral Complexity & Harmonized NDVI Baseline)
-    Step 5: pyccd_landsat_main (USGS LCMAP Landsat Temporal Regression - Baseline)
-    Step 6: harmonized_CCD_main (Harmonized Continuous Change Detection - Baseline)
-    Step 7: harmonized_CCD_vis (Continuous Change Detection Spatial Visualization - Baseline)
+    Step 1: HLS30_earthAccess_to_hdf5 (NASA HLS30 STAC Ingestion) [HLS30/]
+    Step 2: Tanager_STAC-imagery-downloader (Planet Tanager-1 STAC Ingestion) [Tanager-1/]
+    Step 3: HLST_constellation_to_hdf5 (Albers Orthorectification & Harmonization) [Harmonized_SC/]
+    Step 4: HLST_SC_calculations (Spectral Complexity & Harmonized NDVI Baseline) [Harmonized_SC/]
+    Step 5: pyccd_landsat_main (USGS LCMAP Landsat Temporal Regression - Baseline) [change_detection/pyccd/]
+    Step 6: SC_CCM_main (Harmonized Continuous Change Monitoring - Baseline) [change_detection/SC-CCM/]
+    Step 7: SC_CCM_vis (Continuous Change Monitoring Spatial Visualization - Baseline) [change_detection/SC-CCM/]
 
   [SYNTHETIC TARGET INJECTION PIPELINE: Steps 8 - 11]
-    Step 8:  create_injected_dataset (Multi-Sensor Synthetic Target Injection Pipeline)
-    Step 9:  pyccd_landsat_main (USGS LCMAP Landsat Temporal Regression - Injected)
-    Step 10: harmonized_CCD_main (Harmonized Continuous Change Detection - Injected)
-    Step 11: harmonized_CCD_vis (Continuous Change Detection Spatial Visualization - Injected)
+    Step 8:  create_injected_dataset (Multi-Sensor Synthetic Target Injection Pipeline) [root]
+    Step 9:  pyccd_landsat_main (USGS LCMAP Landsat Temporal Regression - Injected) [change_detection/pyccd/]
+    Step 10: SC_CCM_main (Harmonized Continuous Change Monitoring - Injected) [change_detection/SC-CCM/]
+    Step 11: SC_CCM_vis (Continuous Change Monitoring Spatial Visualization - Injected) [change_detection/SC-CCM/]
 
 CLI Usage Examples:
     # Run full end-to-end pipeline (Baseline + Injected):
@@ -49,6 +49,42 @@ from typing import Dict, Any, List, Optional, Union
 import yaml
 
 # ==============================================================================
+# Development Repository Subdirectory Environment Registration
+# ==============================================================================
+REPO_ROOT = Path(__file__).resolve().parent
+
+SUBDIRS = [
+    REPO_ROOT,
+    REPO_ROOT / "HLS30",
+    REPO_ROOT / "Tanager-1",
+    REPO_ROOT / "Harmonized_SC",
+    REPO_ROOT / "change_detection" / "SC-CCM",
+    REPO_ROOT / "change_detection" / "pyccd",
+    REPO_ROOT / "simulated-data-test",
+]
+
+for p in SUBDIRS:
+    if p.exists() and str(p) not in sys.path:
+        sys.path.insert(0, str(p))
+
+
+def resolve_step_file(filename: str) -> Path:
+    """Locates a script file either at repository root or within segregated development folders."""
+    direct = REPO_ROOT / filename
+    if direct.exists():
+        return direct
+    for sub in SUBDIRS:
+        cand = sub / filename
+        if cand.exists():
+            return cand
+    matches = list(REPO_ROOT.glob(f"**/{filename}"))
+    for m in matches:
+        if ".git" not in m.parts:
+            return m
+    return direct
+
+
+# ==============================================================================
 # Step Definitions & Pipeline Registry
 # ==============================================================================
 STEP_DEFINITIONS = {
@@ -56,66 +92,88 @@ STEP_DEFINITIONS = {
         "name": "HLS30_earthAccess_to_hdf5",
         "description": "NASA HLS30 STAC Download and HDF5 Ingestion (Native HLS L30 & S30)",
         "module": "HLS30_earthAccess_to_hdf5",
+        "folder": "HLS30",
+        "rel_path": "HLS30/HLS30_earthAccess_to_hdf5.py",
         "pipeline": "baseline",
     },
     2: {
         "name": "Tanager_STAC-imagery-downloader",
         "description": "Planet Tanager-1 STAC Basic Reflectance Download",
         "module": "Tanager_STAC-imagery-downloader",
+        "folder": "Tanager-1",
+        "rel_path": "Tanager-1/Tanager_STAC-imagery-downloader.py",
         "pipeline": "baseline",
     },
     3: {
         "name": "HLST_constellation_to_hdf5",
         "description": "Albers Equal Area Constellation Orthorectification and Harmonization",
         "module": "HLST_constellation_to_hdf5",
+        "folder": "Harmonized_SC",
+        "rel_path": "Harmonized_SC/HLST_constellation_to_hdf5.py",
         "pipeline": "baseline",
     },
     4: {
         "name": "HLST_SC_calculations",
         "description": "Spectral Complexity & Harmonized NDVI Calculation (Baseline In-Place Storage)",
         "module": "HLST_SC_calculations",
+        "folder": "Harmonized_SC",
+        "rel_path": "Harmonized_SC/HLST_SC_calculations.py",
         "pipeline": "baseline",
     },
     5: {
         "name": "pyccd_landsat_main",
         "description": "USGS LCMAP PyCCD Full-Spectrum Landsat Temporal Regression (Baseline)",
         "module": "pyccd_landsat_main",
+        "folder": "change_detection/pyccd",
+        "rel_path": "change_detection/pyccd/pyccd_landsat_main.py",
         "pipeline": "baseline",
     },
     6: {
-        "name": "harmonized_CCD_main",
-        "description": "Harmonized Continuous Change Detection on SC Z-Score and Harmonized NDVI (Baseline)",
-        "module": "harmonized_CCD_main",
+        "name": "SC_CCM_main",
+        "description": "Harmonized Continuous Change Monitoring (SC-CCM) on SC Z-Score and Harmonized NDVI (Baseline)",
+        "module": "SC_CCM_main",
+        "folder": "change_detection/SC-CCM",
+        "rel_path": "change_detection/SC-CCM/SC_CCM_main.py",
         "pipeline": "baseline",
     },
     7: {
-        "name": "harmonized_CCD_vis",
-        "description": "Continuous Change Detection Spatial Visualization and Diagnostic Maps (Baseline)",
-        "module": "harmonized_CCD_vis",
+        "name": "SC_CCM_vis",
+        "description": "Continuous Change Monitoring Spatial Visualization and Diagnostic Maps (Baseline)",
+        "module": "SC_CCM_vis",
+        "folder": "change_detection/SC-CCM",
+        "rel_path": "change_detection/SC-CCM/SC_CCM_vis.py",
         "pipeline": "baseline",
     },
     8: {
         "name": "create_injected_dataset",
         "description": "Multi-Sensor Synthetic Target Injection Pipeline (Offset-Verified Clean Grid)",
         "module": "create_injected_dataset",
+        "folder": ".",
+        "rel_path": "create_injected_dataset.py",
         "pipeline": "injected",
     },
     9: {
         "name": "pyccd_landsat_main",
         "description": "USGS LCMAP PyCCD Full-Spectrum Landsat Temporal Regression (Injected)",
         "module": "pyccd_landsat_main",
+        "folder": "change_detection/pyccd",
+        "rel_path": "change_detection/pyccd/pyccd_landsat_main.py",
         "pipeline": "injected",
     },
     10: {
-        "name": "harmonized_CCD_main",
-        "description": "Harmonized Continuous Change Detection on SC Z-Score and Harmonized NDVI (Injected)",
-        "module": "harmonized_CCD_main",
+        "name": "SC_CCM_main",
+        "description": "Harmonized Continuous Change Monitoring (SC-CCM) on SC Z-Score and Harmonized NDVI (Injected)",
+        "module": "SC_CCM_main",
+        "folder": "change_detection/SC-CCM",
+        "rel_path": "change_detection/SC-CCM/SC_CCM_main.py",
         "pipeline": "injected",
     },
     11: {
-        "name": "harmonized_CCD_vis",
-        "description": "Continuous Change Detection Spatial Visualization and Diagnostic Maps (Injected)",
-        "module": "harmonized_CCD_vis",
+        "name": "SC_CCM_vis",
+        "description": "Continuous Change Monitoring Spatial Visualization and Diagnostic Maps (Injected)",
+        "module": "SC_CCM_vis",
+        "folder": "change_detection/SC-CCM",
+        "rel_path": "change_detection/SC-CCM/SC_CCM_vis.py",
         "pipeline": "injected",
     },
 }
@@ -449,16 +507,19 @@ def run_pipeline(
             pipeline_state["artifacts"]["pyccd_baseline_h5"] = pyccd_res_h5
             print(f"Step 5 Complete: Baseline PyCCD Landsat run complete ({pyccd_res_h5}).")
 
-        # Step 6: Harmonized Continuous Change Detection (Baseline SC Z-Score and NDVI)
+        # Step 6: Harmonized Continuous Change Monitoring (Baseline SC Z-Score and NDVI)
         elif step_num == 6:
             if master_h5 is None:
                 raise RuntimeError(
                     f"No master HDF5 container available for Step 6. "
                     f"Run Step 3 first or specify an existing container with --h5-path (checked: {candidate_paths})."
                 )
-            ccd_mod = importlib.import_module("harmonized_CCD_main")
+            try:
+                ccd_mod = importlib.import_module("SC_CCM_main")
+            except ImportError:
+                ccd_mod = importlib.import_module("harmonized_CCD_main")
 
-            print("  Running Harmonized CCD on baseline Spectral Complexity Z-Score...")
+            print("  Running SC-CCM on baseline Spectral Complexity Z-Score...")
             ccd_mod.main(
                 location=location,
                 h5_path=master_h5,
@@ -467,7 +528,7 @@ def run_pipeline(
                 launch_vis=False,
             )
 
-            print("  Running Harmonized CCD on baseline Harmonized NDVI...")
+            print("  Running SC-CCM on baseline Harmonized NDVI...")
             ccd_mod.main(
                 location=location,
                 h5_path=master_h5,
@@ -476,20 +537,23 @@ def run_pipeline(
                 launch_vis=False,
             )
             pipeline_state["artifacts"]["baseline_ccd_h5"] = master_h5
-            print("Step 6 Complete: Baseline Harmonized CCD runs saved.")
+            print("Step 6 Complete: Baseline SC-CCM runs saved.")
 
-        # Step 7: Continuous Change Detection Visualization (Baseline)
+        # Step 7: Continuous Change Monitoring Visualization (Baseline)
         elif step_num == 7:
             if master_h5 is None:
                 raise RuntimeError(
                     f"No master HDF5 container available for Step 7. "
                     f"Run Step 3 first or specify an existing container with --h5-path (checked: {candidate_paths})."
                 )
-            vis_mod = importlib.import_module("harmonized_CCD_vis")
+            try:
+                vis_mod = importlib.import_module("SC_CCM_vis")
+            except ImportError:
+                vis_mod = importlib.import_module("harmonized_CCD_vis")
             pyccd_vis_mod = importlib.import_module("pyccd_landsat_vis")
             diag_pngs = []
 
-            # Harmonized CCD baseline overlays (SC and NDVI)
+            # SC-CCM baseline overlays (SC and NDVI)
             for metric in ["SC", "NDVI"]:
                 out_png = vis_mod.get_default_png_name(location=location, target_metric=metric, injected=False)
                 try:
@@ -501,7 +565,7 @@ def run_pipeline(
                         interactive=False,
                     )
                     diag_pngs.append(out_png)
-                    print(f"  Exported Harmonized CCD baseline overlay: {out_png}")
+                    print(f"  Exported SC-CCM baseline overlay: {out_png}")
                 except Exception as e:
                     print(f"  Warning: Could not render baseline visualization for {metric}: {e}")
 
@@ -558,16 +622,19 @@ def run_pipeline(
             pipeline_state["artifacts"]["pyccd_injected_h5"] = pyccd_inj_h5
             print(f"Step 9 Complete: Injected PyCCD Landsat runs complete ({pyccd_inj_h5}).")
 
-        # Step 10: Harmonized Continuous Change Detection (Injected SC Z-Score and NDVI)
+        # Step 10: Harmonized Continuous Change Monitoring (Injected SC Z-Score and NDVI)
         elif step_num == 10:
             if master_h5 is None:
                 raise RuntimeError(
                     f"No master HDF5 container available for Step 10. "
                     f"Run Step 8 first or specify an existing container with --h5-path (checked: {candidate_paths})."
                 )
-            ccd_mod = importlib.import_module("harmonized_CCD_main")
+            try:
+                ccd_mod = importlib.import_module("SC_CCM_main")
+            except ImportError:
+                ccd_mod = importlib.import_module("harmonized_CCD_main")
 
-            print("  Running Harmonized CCD on injected Spectral Complexity Z-Score...")
+            print("  Running SC-CCM on injected Spectral Complexity Z-Score...")
             ccd_mod.main(
                 location=location,
                 h5_path=master_h5,
@@ -576,7 +643,7 @@ def run_pipeline(
                 launch_vis=False,
             )
 
-            print("  Running Harmonized CCD on injected Harmonized NDVI...")
+            print("  Running SC-CCM on injected Harmonized NDVI...")
             ccd_mod.main(
                 location=location,
                 h5_path=master_h5,
@@ -585,20 +652,23 @@ def run_pipeline(
                 launch_vis=False,
             )
             pipeline_state["artifacts"]["injected_ccd_h5"] = master_h5
-            print("Step 10 Complete: Injected Harmonized CCD runs saved.")
+            print("Step 10 Complete: Injected SC-CCM runs saved.")
 
-        # Step 11: Continuous Change Detection Visualization (Injected)
+        # Step 11: Continuous Change Monitoring Visualization (Injected)
         elif step_num == 11:
             if master_h5 is None:
                 raise RuntimeError(
                     f"No master HDF5 container available for Step 11. "
                     f"Run Step 8 first or specify an existing container with --h5-path (checked: {candidate_paths})."
                 )
-            vis_mod = importlib.import_module("harmonized_CCD_vis")
+            try:
+                vis_mod = importlib.import_module("SC_CCM_vis")
+            except ImportError:
+                vis_mod = importlib.import_module("harmonized_CCD_vis")
             pyccd_vis_mod = importlib.import_module("pyccd_landsat_vis")
             diag_pngs = []
 
-            # Harmonized CCD injected overlays (SC and NDVI)
+            # SC-CCM injected overlays (SC and NDVI)
             for metric in ["SC", "NDVI"]:
                 out_png = vis_mod.get_default_png_name(location=location, target_metric=metric, injected=True)
                 try:
@@ -610,7 +680,7 @@ def run_pipeline(
                         interactive=False,
                     )
                     diag_pngs.append(out_png)
-                    print(f"  Exported Harmonized CCD injected overlay: {out_png}")
+                    print(f"  Exported SC-CCM injected overlay: {out_png}")
                 except Exception as e:
                     print(f"  Warning: Could not render injected visualization for {metric}: {e}")
 
@@ -650,19 +720,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
         epilog="""
 Step Reference:
   Baseline:
-    1: HLS30_earthAccess_to_hdf5       NASA HLS30 STAC Ingestion
-    2: Tanager_STAC-imagery-downloader Planet Tanager-1 STAC Ingestion
-    3: HLST_constellation_to_hdf5      Albers Orthorectification & Harmonization
-    4: HLST_SC_calculations            Baseline Spectral Complexity & Harmonized NDVI
-    5: pyccd_landsat_main              Baseline USGS LCMAP Landsat Temporal Regression
-    6: harmonized_CCD_main             Baseline Harmonized Continuous Change Detection
-    7: harmonized_CCD_vis              Baseline Continuous Change Detection Visualizations
+    1: HLS30_earthAccess_to_hdf5       NASA HLS30 STAC Ingestion (HLS30/)
+    2: Tanager_STAC-imagery-downloader Planet Tanager-1 STAC Basic Reflectance (Tanager-1/)
+    3: HLST_constellation_to_hdf5      Albers Equal Area Orthorectification & Harmonization (Harmonized_SC/)
+    4: HLST_SC_calculations            Baseline Spectral Complexity & Harmonized NDVI (Harmonized_SC/)
+    5: pyccd_landsat_main              Baseline USGS LCMAP Landsat Temporal Regression (change_detection/pyccd/)
+    6: SC_CCM_main                     Baseline Harmonized Continuous Change Monitoring (change_detection/SC-CCM/)
+    7: SC_CCM_vis                      Baseline Continuous Change Monitoring Visualizations (change_detection/SC-CCM/)
 
   Injected:
-    8:  create_injected_dataset        Multi-Sensor Synthetic Target Injection Pipeline
-    9:  pyccd_landsat_main             Injected USGS LCMAP Landsat Temporal Regression
-    10: harmonized_CCD_main            Injected Harmonized Continuous Change Detection
-    11: harmonized_CCD_vis             Injected Continuous Change Detection Visualizations
+    8:  create_injected_dataset        Multi-Sensor Synthetic Target Injection Pipeline (root)
+    9:  pyccd_landsat_main             Injected USGS LCMAP Landsat Temporal Regression (change_detection/pyccd/)
+    10: SC_CCM_main                    Injected Harmonized Continuous Change Monitoring (change_detection/SC-CCM/)
+    11: SC_CCM_vis                     Injected Continuous Change Monitoring Visualizations (change_detection/SC-CCM/)
         """,
     )
     parser.add_argument(

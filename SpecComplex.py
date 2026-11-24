@@ -213,7 +213,7 @@ def get_hls_mask(data_grp, t, sun_elevation_threshold, cloud_dilation, qa_reject
         
     return invalid_mask
 
-def maximumDistance(data, num_endmembers, chunk_size=50000, strict_nan=False):
+def maximumDistance(data, num_endmembers, chunk_size=50000):
     '''
     Memory-optimized MaxD geometric simplex extraction.
     Utilizes strict float32 typing and chunked vector broadcasting to 
@@ -235,7 +235,7 @@ def maximumDistance(data, num_endmembers, chunk_size=50000, strict_nan=False):
     valid_mask = ~np.isnan(image2D).any(axis=1)
     
     # Strict NaN Enforcement: Reject entirely if ANY pixels are missing
-    if strict_nan and not valid_mask.all():
+    if not valid_mask.all():
         return np.full((image2D.shape[1], num_endmembers), np.nan), np.full((1, num_endmembers), np.nan)
         
     if np.sum(valid_mask) < num_endmembers:
@@ -271,9 +271,7 @@ def maximumDistance(data, num_endmembers, chunk_size=50000, strict_nan=False):
         pseudo = np.linalg.pinv(diff).astype(np.float32)
         proj_operator = (identity_matrix - np.matmul(diff, pseudo)).astype(np.float32)
 
-        # EVIDENCE-BASED FIX: Chunked In-Place Projection
-        # Applies the projection matrix in memory-safe chunks rather than generating 
-        # a new massive array across the entire image space simultaneously.
+        # Chunked In-Place Projection
         for c in range(0, num_pix, chunk_size):
             c_end = min(c + chunk_size, num_pix)
             data_proj[:, c:c_end] = np.matmul(proj_operator, data_proj[:, c:c_end])
@@ -281,8 +279,7 @@ def maximumDistance(data, num_endmembers, chunk_size=50000, strict_nan=False):
         idx1 = idx2
         vec = data_proj[:, idx2:idx2+1] 
             
-        # EVIDENCE-BASED FIX: Chunked Distance Calculation
-        # Prevents NumPy from allocating a massive intermediate array for np.square()
+        # Chunked Distance Calculation
         diff_new = np.zeros(num_pix, dtype=np.float32)
         for c in range(0, num_pix, chunk_size):
             c_end = min(c + chunk_size, num_pix)
@@ -296,6 +293,7 @@ def maximumDistance(data, num_endmembers, chunk_size=50000, strict_nan=False):
 
     return endmembers, endmembers_index
 
+
 def calcGramLocalVolumes(endmembers, localization_vector):
     """
     Calculates the Local Gram matrix.
@@ -304,38 +302,23 @@ def calcGramLocalVolumes(endmembers, localization_vector):
     3. Calculates the parallelotope volume estimate for 1 through N endmembers
     4. Returns volume values in an array of length N
     """
-    # Reduce to current number of endmembers
-    # Shape: (Bands, N)
     localized_vectors = endmembers - localization_vector[:, np.newaxis]
-
-    # Calculate Gram Matrix
-    # G = V^T * V (Shape: N x N)
     gram = np.matmul(localized_vectors.T, localized_vectors)
-    
-    # Initialize array to store the volume sequence
     N = gram.shape[0]
     volumes = np.zeros(N)
     
-    # Calculate the parallelotope volume estimate for 1 through N endmembers
     for i in range(1, N + 1):
-        # Extract the i x i top-left submatrix
         sub_gram = gram[:i, :i]
-        
-        # Calculate the Gramian determinant
         det = np.linalg.det(sub_gram)
-        
-        # Guard against floating-point inaccuracies that can cause tiny 
-        # negative determinants near the linear dependence threshold
         if det < 0:
             det = 0.0
-            
-    # Volume is the square root of the Gramian determinant
         volumes[i-1] = np.sqrt(det)
         
     return volumes
 
 
-def maximumDistance_volumes(pixels, num_endmembers):
+
+def maximumDistance_volumes(pixels, num_endmembers, return_heights=False):
     """
     Combined endmember extraction and Gram volume estimation using the maximum distance (MaxD) method with iterative orthogonal projection.
 
@@ -427,7 +410,9 @@ def maximumDistance_volumes(pixels, num_endmembers):
             heights[j] = -np.inf
             volumes[j] = -np.inf
 
-    return endmembers, volumes, heights, indices
+    if return_heights:
+        return endmembers, volumes, heights
+    return endmembers, volumes
 
 
 def maximumDistance_volumes_cholesky(pixels, num_endmembers=None):
@@ -583,25 +568,54 @@ def maximumDistance_volumes_cholesky(pixels, num_endmembers=None):
 
 def load_scaled_reflectance(dataset, slice_obj=np.s_[...]):
     """
-    Helper to safely load a hyperspectral surface reflectance dataset from HDF5,
-    detect if it's scaled int16, and convert it to true float32 reflectance.
-    Converts any nodata values into np.nan.
+    Safely load a surface reflectance dataset from HDF5, detect if it is scaled integer,
+    and convert it to float32 reflectance. Converts nodata values into np.nan.
+    Fails explicitly if an integer dataset lacks a fillvalue or scale factor attribute.
     """
-    data = dataset[slice_obj]
-    scale = dataset.attrs.get("scale_to_float")
-    
-    if data.dtype in (np.int16, np.uint16, np.int32, np.int8, np.uint8):
-        nodata = dataset.fillvalue if dataset.fillvalue is not None else -32768
+    data = dataset[slice_obj] if hasattr(dataset, '__getitem__') and hasattr(dataset, 'attrs') else dataset
+
+    if np.issubdtype(data.dtype, np.integer):
+        nodata = None
+        if hasattr(dataset, "attrs"):
+            if "_FillValue" in dataset.attrs:
+                nodata = dataset.attrs["_FillValue"]
+            elif "fillvalue" in dataset.attrs:
+                nodata = dataset.attrs["fillvalue"]
+            elif "fill_value" in dataset.attrs:
+                nodata = dataset.attrs["fill_value"]
+
+        if nodata is None and hasattr(dataset, "fillvalue") and dataset.fillvalue is not None:
+            if dataset.fillvalue != 0:
+                nodata = dataset.fillvalue
+
+        if nodata is None:
+            raise KeyError(
+                f"Dataset {getattr(dataset, 'name', 'dataset')} has integer datatype ({data.dtype}) "
+                "but has no '_FillValue' attribute or non-zero fillvalue defined."
+            )
+
+        scale = None
+        if hasattr(dataset, "attrs"):
+            if "scale_factor" in dataset.attrs:
+                scale = dataset.attrs["scale_factor"]
+            elif "scale_to_float" in dataset.attrs:
+                scale = dataset.attrs["scale_to_float"]
+            elif "scale" in dataset.attrs:
+                scale = dataset.attrs["scale"]
+
+        if scale is None:
+            raise KeyError(
+                f"Dataset {getattr(dataset, 'name', 'dataset')} has integer datatype ({data.dtype}) "
+                "but lacks a 'scale_factor' or 'scale_to_float' attribute."
+            )
+
         float_data = data.astype(np.float32)
         float_data[data == nodata] = np.nan
-        
-        if scale is not None:
-            float_data *= scale
+        float_data *= float(scale)
         return float_data
-        
-    # If it's already float, DO NOT apply scale to avoid double scaling
-    # (assuming float32 data is already in 0.0 - 1.0 range).
-    return data
+
+    return data.astype(np.float32)
+
 
 def load_enmap_sr(dataset, frame_idx, spatial_slice=np.s_[:, :]):
     """
@@ -684,26 +698,18 @@ def load_tanager_sr(dataset, frame_idx, spatial_slice=np.s_[:, :]):
     
     return float_data_pruned, valid_wavelengths
 
-def scale_to_int16(float_data, scale_factor=10000.0, nodata_value=-32768):
+def scale_to_int16(arr, scale_factor=10000.0, nodata_val=-32768, nodata_value=None):
     """
-    Scales a float32 array to int16 to reduce storage size.
-    NaNs are converted to the specified nodata_value.
+    Quantizes floating point array to signed int16 with scaling and nodata handling.
     """
-    if float_data is None:
-        return None
-        
-    # Create output array with nodata
-    int_data = np.full(float_data.shape, nodata_value, dtype=np.int16)
-    
-    # Valid mask
-    valid_mask = ~np.isnan(float_data)
-    
-    # Scale, round, and clip to int16 limits
-    scaled_valid = np.round(float_data[valid_mask] * scale_factor)
-    scaled_valid = np.clip(scaled_valid, -32767, 32767)
-    
-    int_data[valid_mask] = scaled_valid.astype(np.int16)
-    return int_data
+    if nodata_value is not None:
+        nodata_val = nodata_value
+    out = np.full(arr.shape, nodata_val, dtype=np.int16)
+    valid = ~np.isnan(arr) & (arr != nodata_val)
+    scaled = np.round(arr[valid] * scale_factor)
+    out[valid] = scaled.astype(np.int16)
+    return out
+
 
 def read_scaled_int16(dataset, slice_obj=np.s_[...]):
     """
@@ -1006,12 +1012,43 @@ def process_volume_tiles(frame_data, tile_size, num_endmembers, gram_type, norm_
     
     return output_map
 
+def process_volume_sliding_tile_batch(batch_data, tile_size, stride, num_endmembers):
+    """
+    Batched sliding window processing across multiple spatial patch tiles on CPU.
+
+    Args:
+        batch_data: ndarray of shape (B, bands, height, width) or (bands, height, width).
+        tile_size: int, spatial window size (e.g., 3).
+        stride: int, sliding window stride.
+        num_endmembers: int, maximum number of endmembers to extract per tile.
+
+    Returns:
+        final_maps: ndarray of shape (B, height, width) or (height, width).
+    """
+    is_3d = (batch_data.ndim == 3)
+    if is_3d:
+        batch_data = batch_data[np.newaxis, ...]
+
+    B, bands, height, width = batch_data.shape
+    final_maps = np.zeros((B, height, width), dtype=np.float32)
+
+    for b in range(B):
+        final_maps[b] = process_volume_sliding_tile(batch_data[b], tile_size, stride, num_endmembers)
+
+    if is_3d:
+        return final_maps[0]
+    return final_maps
+
+
 def process_volume_sliding_tile(frame_data, tile_size, stride, num_endmembers):
     """
     Sliding window processing.
     Strict Validity: Window is only processed if ALL pixels are valid.
     Output is masked with NaN for any pixel identified as invalid.
     """
+    if hasattr(frame_data, "ndim") and frame_data.ndim == 4:
+        return process_volume_sliding_tile_batch(frame_data, tile_size, stride, num_endmembers)
+
     bands, height, width = frame_data.shape
     img = np.transpose(frame_data, (1, 2, 0))
     
@@ -1027,13 +1064,16 @@ def process_volume_sliding_tile(frame_data, tile_size, stride, num_endmembers):
             
             tile = img[y_start:y_end, x_start:x_end, :]
             
-            # Pre-emptive validity check to prevent inpainting/smearing
             if np.isnan(tile).any():
                 continue
                 
-            tile_flat = np.reshape(tile, (tile_size * tile_size, bands), order="F").T
-            endmembers, volumes = maximumDistance_volumes(tile_flat, num_endmembers)
-            
+            endmembers, _ = maximumDistance(tile, num_endmembers)
+
+            minimum_endmember = endmembers[:, 1]
+            remaining_endmembers = np.delete(endmembers, 1, axis=1)
+            volumes = calcGramLocalVolumes(remaining_endmembers, minimum_endmember)
+            volumes = np.insert(volumes, 0, 0.0)
+
             if len(volumes) > 2:
                 vol_val = np.max(volumes[2:])
             else:
@@ -1053,7 +1093,8 @@ def process_volume_sliding_tile(frame_data, tile_size, stride, num_endmembers):
         warnings.simplefilter("ignore", category=RuntimeWarning)
         final_map = np.where(count_map > 0, sum_map / count_map, np.nan)
         
-    return final_map, neighborhood_map
+    return final_map
+
 
 
 def SMACC_sliding_volume(frame_data, tile_size, stride, num_endmembers):
@@ -1200,49 +1241,126 @@ Sandbox
 
 '''
 
-def calculate_global_z_score(volume_array, valid_pixel_mask):
+def calculate_global_z_score_batch(volume_array, valid_pixel_mask=None, array_mean=None, array_std=None):
+    """
+    Calculates global Z-scores across a batch of spectral complexity volume frames (B, H, W).
+    """
+    B, height, width = volume_array.shape
+    z_scores = np.full((B, height, width), np.nan, dtype=np.float32)
+    global_valid_mask = volume_array > 0.0
+
+    if array_mean is not None and array_std is not None:
+        mean_arr = np.asarray(array_mean, dtype=np.float32)
+        std_arr = np.asarray(array_std, dtype=np.float32)
+
+        if mean_arr.ndim == 0:
+            mean_arr = np.full((B, 1, 1), float(mean_arr), dtype=np.float32)
+            std_arr = np.full((B, 1, 1), float(std_arr), dtype=np.float32)
+        elif mean_arr.ndim == 1:
+            mean_arr = mean_arr[:, np.newaxis, np.newaxis]
+            std_arr = std_arr[:, np.newaxis, np.newaxis]
+
+        if valid_pixel_mask is not None:
+            mask_val = np.asarray(valid_pixel_mask, dtype=bool)
+            if mask_val.ndim == 2:
+                mask = global_valid_mask & mask_val[np.newaxis, :, :]
+            else:
+                mask = global_valid_mask & mask_val
+        else:
+            mask = global_valid_mask
+
+        valid_eval = mask & (std_arr > 0) & (~np.isnan(mean_arr))
+        with np.errstate(divide="ignore", invalid="ignore"):
+            z_scores = np.where(valid_eval, (np.log(volume_array) - mean_arr) / std_arr, np.nan)
+
+        return z_scores, array_mean, array_std
+    else:
+        for b in range(B):
+            vm = valid_pixel_mask[b] if (valid_pixel_mask is not None and valid_pixel_mask.ndim == 3) else valid_pixel_mask
+            z_scores[b], _, _ = calculate_global_z_score(volume_array[b], valid_pixel_mask=vm)
+        return z_scores, np.nan, np.nan
+
+
+def calculate_global_z_score(volume_array, valid_pixel_mask=None, array_mean=None, array_std=None):
     """
     Calculates the global Z-score for an entire frame of spectral complexity volumes.
     Decouples the evaluation space from the background statistics space by strictly 
     calculating the mean and standard deviation from radiometrically valid pixels, 
     preventing artifacts from skewing the background model.
+    Alternatively accepts a separately determined mean and standard deviation (array_mean, array_std).
     """
-    #print("Calculating global Z-score for frame")
+    if hasattr(volume_array, "ndim") and volume_array.ndim == 3:
+        return calculate_global_z_score_batch(volume_array, valid_pixel_mask=valid_pixel_mask, array_mean=array_mean, array_std=array_std)
+
     height, width = volume_array.shape
     z_scores = np.full((height, width), np.nan, dtype=np.float32)
-    
-    # Identify globally valid pixels (strictly positive for log transform)
     global_valid_mask = volume_array > 0.0
-    
-    # Intersect with radiometrically valid pixels for the statistical background model
-    stats_mask = global_valid_mask & valid_pixel_mask
-    
-    # Extract subset volumes strictly for statistical estimation
-    stats_vols = volume_array[stats_mask]
 
-    # Graceful fallback per user directive: Return NaNs for entire frame if no valid background exists.
-    if len(stats_vols) < 9 or len(np.unique(stats_vols)) <= 1:
-        warnings.warn("calculate_global_z_score warning: Insufficient valid pixels (< 9) or zero variance found. Returning NaNs.")
-        return z_scores, np.nan, np.nan
+    if array_mean is not None and array_std is not None:
+        if np.ndim(array_mean) == 0:
+            global_mean = float(array_mean)
+            global_std = float(array_std)
+            if np.isnan(global_mean) or np.isnan(global_std):
+                warnings.warn("calculate_global_z_score warning: NaN found in array_mean or array_std. Returning NaNs.")
+                return z_scores, np.nan, np.nan
+            if global_std <= 0:
+                raise ValueError(f"calculate_global_z_score failed: Global standard deviation must be positive, got {global_std}.")
+            mean_eval = global_mean
+            std_eval = global_std
+        else:
+            mean_arr = np.asarray(array_mean, dtype=np.float32)
+            std_arr = np.asarray(array_std, dtype=np.float32)
+            if mean_arr.size == 1:
+                global_mean = float(mean_arr.item())
+                global_std = float(std_arr.item())
+                if np.isnan(global_mean) or np.isnan(global_std):
+                    warnings.warn("calculate_global_z_score warning: NaN found in array_mean or array_std. Returning NaNs.")
+                    return z_scores, np.nan, np.nan
+                if global_std <= 0:
+                    raise ValueError(f"calculate_global_z_score failed: Global standard deviation must be positive, got {global_std}.")
+                mean_eval = global_mean
+                std_eval = global_std
+            else:
+                if mean_arr.shape != (height, width) or std_arr.shape != (height, width):
+                    raise ValueError(f"calculate_global_z_score failed: array_mean shape {mean_arr.shape} and array_std shape {std_arr.shape} must match volume_array shape ({height}, {width}).")
+                if np.any(std_arr[global_valid_mask] <= 0):
+                    raise ValueError("calculate_global_z_score failed: Global standard deviation must be positive.")
+                if np.any(np.isnan(mean_arr[global_valid_mask])) or np.any(np.isnan(std_arr[global_valid_mask])):
+                    warnings.warn("calculate_global_z_score warning: NaN found in array_mean or array_std. Returning NaNs.")
+                    return z_scores, np.nan, np.nan
+                global_mean = mean_arr
+                global_std = std_arr
+                mean_eval = mean_arr[global_valid_mask]
+                std_eval = std_arr[global_valid_mask]
+    elif (array_mean is not None) or (array_std is not None):
+        raise ValueError("calculate_global_z_score failed: Both array_mean and array_std must be provided together.")
+    else:
+        if valid_pixel_mask is None:
+            raise ValueError("calculate_global_z_score failed: valid_pixel_mask must be provided when array_mean and array_std are not specified.")
+            
+        stats_mask = global_valid_mask & valid_pixel_mask
+        stats_vols = volume_array[stats_mask]
+
+        if len(stats_vols) < 9 or len(np.unique(stats_vols)) <= 1:
+            warnings.warn("calculate_global_z_score warning: Insufficient valid pixels (< 9) or zero variance found. Returning NaNs.")
+            return z_scores, np.nan, np.nan
+            
+        log_stats_vols = np.log(stats_vols)
+        global_mean = float(np.mean(log_stats_vols))
+        global_std = float(np.std(log_stats_vols, ddof=1))
         
-    log_stats_vols = np.log(stats_vols)
-    
-    # Calculate global scene statistics (using ddof=1 for unbiased sample estimator)
-    global_mean = np.mean(log_stats_vols)
-    global_std = np.std(log_stats_vols, ddof=1)
-    
-    # Strict failure handling: Prevent training on synthetically flat frames
-    if global_std == 0:
-        raise ValueError("calculate_global_z_score failed: Global standard deviation of the radiometrically valid subset is exactly zero.")
+        if global_std == 0:
+            raise ValueError("calculate_global_z_score failed: Global standard deviation of the radiometrically valid subset is exactly zero.")
+        mean_eval = global_mean
+        std_eval = global_std
         
-    # Evaluate ALL geometrically valid pixels using the pure background model
     apply_vols = volume_array[global_valid_mask]
-    log_apply_vols = np.log(apply_vols)
-    
-    # Apply standard Z-score equation
-    z_scores[global_valid_mask] = (log_apply_vols - global_mean) / global_std
+    if len(apply_vols) > 0:
+        log_apply_vols = np.log(apply_vols)
+        z_scores[global_valid_mask] = (log_apply_vols - mean_eval) / std_eval
     
     return z_scores, global_mean, global_std
+
 
 def calculate_global_box_cox(volume_array, valid_pixel_mask):
     """
@@ -1802,3 +1920,15 @@ def calcGramLocalVolumes_original(endmembers, localization_vector):
         volumes[i-1] = np.sqrt(det)
         
     return volumes
+
+
+
+# =====================================================================
+# BACKWARD COMPATIBILITY ALIASES FOR DEV RESEARCH & UNIT TESTS
+# =====================================================================
+def maximumDistance_cholesky(pixels, num_endmembers=None):
+    res = maximumDistance_volumes_cholesky(pixels, num_endmembers)
+    return res[0], res[1], res[2]
+
+def maximumDistance_volumes_test(pixels, num_endmembers):
+    return maximumDistance_volumes(pixels, num_endmembers, return_heights=True)

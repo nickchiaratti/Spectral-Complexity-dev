@@ -1,0 +1,846 @@
+"""
+Harmonized Continuous Change Monitoring (SC-CCM) Pipeline.
+
+This module implements continuous change detection and monitoring for satellite 
+time-series observations (e.g., Harmonized Landsat Sentinel-2 and Tanager-1 
+spectral complexity and biophysical index cubes).
+
+Theoretical Framework:
+----------------------
+1. Harmonic Fourier Regression:
+   Models cyclical seasonal surface dynamics and long-term trends:
+       y(t) = a_0 + c_1*t + c_2*t^2 + sum_{k=1}^K [a_k*cos(2*pi*t / T_k) + b_k*sin(2*pi*t / T_k)]
+   where t is continuous time in fractional years and T_k represents temporal harmonic 
+   periods (e.g., annual, semi-annual, trimonthly cycles).
+
+2. Sparse Model Selection & Outlier Rejection:
+   A stable initialization window is selected spanning at least a minimum temporal 
+   baseline (e.g., >= 1.5 years). Least Absolute Shrinkage and Selection Operator 
+   (LASSO) via the LARS algorithm with Bayesian Information Criterion (BIC) performs 
+   sparse harmonic selection. Normalized squared residuals are tested against a 
+   Chi-squared distribution (df=3) to iteratively remove statistical outliers.
+
+3. Parameter & Covariance Initialization:
+   Ordinary Least Squares (OLS) estimates initial parameters on active features, 
+   initializing the parameter vector theta_0 and the parameter covariance matrix P_0.
+
+4. Online Recursive Least Squares (RLS) Tracking:
+   As new observations arrive sequentially:
+     - Step-ahead prediction: y_hat_t = x_t^T * theta_{t-1}
+     - Innovation residual: e_t = y_t - y_hat_t
+     - Chi-squared anomaly test: chi2_t = (abs(e_t) / RMSE)^2
+     - Structural break confirmation: If consecutive anomalies >= threshold, a break 
+       is confirmed at the first anomaly of the run, terminating the current segment.
+     - In-control parameter update (when chi2_t <= threshold):
+         K_t = (P_{t-1} * x_t) / (lambda + x_t^T * P_{t-1} * x_t)
+         theta_t = theta_{t-1} + K_t * e_t
+         P_t = (1 / lambda) * (P_{t-1} - K_t * x_t^T * P_{t-1})
+       where lambda is the exponential forgetting factor.
+"""
+
+
+import sys
+from pathlib import Path
+_script_dir = Path(__file__).resolve().parent
+_repo_root = _script_dir.parent.parent
+for _p in [_repo_root, _script_dir, _script_dir.parent / "pyccd"]:
+    if str(_p) not in sys.path:
+        sys.path.insert(0, str(_p))
+
+import os
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+
+import math
+import multiprocessing
+import contextlib
+import h5py
+import numpy as np
+import pandas as pd
+from scipy.stats import chi2
+from sklearn.linear_model import LassoLarsIC
+import joblib
+from joblib import Parallel, delayed
+from tqdm import tqdm
+
+
+@contextlib.contextmanager
+def tqdm_joblib(tqdm_object):
+    """Context manager to patch joblib to report into tqdm progress bar."""
+    class TqdmBatchCompletionCallback(joblib.parallel.BatchCompletionCallBack):
+        def __call__(self, *args, **kwargs):
+            tqdm_object.update(n=self.batch_size)
+            return super().__call__(*args, **kwargs)
+
+    old_batch_callback = joblib.parallel.BatchCompletionCallBack
+    joblib.parallel.BatchCompletionCallBack = TqdmBatchCompletionCallback
+    try:
+        yield tqdm_object
+    finally:
+        joblib.parallel.BatchCompletionCallBack = old_batch_callback
+        tqdm_object.close()
+
+
+def read_scaled_int16(arr, scale_factor=10000, nodata_val=-9999):
+    """
+    Invert int16 quantized array back to float32 reflectance.
+    Preserves nodata sentinels as NaN without injecting synthetic fill values.
+    """
+    arr = np.asarray(arr)
+    out = np.full(arr.shape, np.nan, dtype=np.float32)
+    valid = (arr != nodata_val)
+    out[valid] = arr[valid].astype(np.float32) / float(scale_factor)
+    return out
+
+
+def scale_to_int16(raw_floats, scale_factor=10000, nodata_val=-9999, nodata_value=None):
+    """
+    Quantizes float32 array to int16, mapping NaNs to nodata value.
+    """
+    if nodata_value is not None:
+        nodata_val = nodata_value
+    raw_floats = np.asarray(raw_floats)
+    out = np.full(raw_floats.shape, nodata_val, dtype=np.int16)
+    valid = ~np.isnan(raw_floats)
+    scaled = np.round(raw_floats[valid] * float(scale_factor))
+    clipped = np.clip(scaled, -32768, 32767)
+    out[valid] = clipped.astype(np.int16)
+    return out
+
+
+def resolve_metric_naming(metric_name, injected=False):
+    """Resolve display name, short prefix, and dataset key from target metric identifier."""
+    m_raw = str(metric_name).strip()
+    m_lower = m_raw.lower()
+    is_inj = injected or m_lower.startswith('injected_') or 'injected' in m_lower
+    base = m_lower.replace('injected_', '').replace('injected', '').strip('_')
+
+    if 'z_score' in base or base in ('sc', 'sliding_volume_z_score'):
+        disp = 'Spectral Complexity (Z-Score)'
+        short = 'SC'
+        ds_key = 'injected_sliding_volume_z_score' if is_inj else 'sliding_volume_z_score'
+    elif 'ndvi' in base:
+        disp = 'NDVI'
+        short = 'NDVI'
+        ds_key = 'injected_ndvi' if is_inj else 'ndvi'
+    else:
+        clean = base.replace(' ', '_').upper()
+        disp = metric_name
+        short = clean
+        ds_key = f"injected_{m_raw}" if (is_inj and not m_lower.startswith('injected_')) else m_raw
+
+    group_prefix = f"INJECTED_{short}" if is_inj else short
+    return disp, short, ds_key, group_prefix, is_inj
+
+
+def resolve_h5_input(location, h5_path=None):
+    """Resolve location or explicit container path to an existing HDF5 file."""
+    if h5_path and os.path.exists(h5_path):
+        return h5_path
+    candidate = f"C:/satelliteImagery/HLST30/HLST_{location}.h5"
+    if os.path.exists(candidate):
+        return candidate
+    return h5_path or candidate
+
+
+# ==========================================
+# CONFIGURATION & HYPERPARAMETERS
+# ==========================================
+LOCATION = "Rochesterv2"
+H5_PATH = f"C:/satelliteImagery/HLST30/HLST_{LOCATION}.h5"
+
+TARGET_METRIC = 'sliding_volume_z_score'
+TARGET_NAME, TARGET_SHORT_NAME, *_ = resolve_metric_naming(TARGET_METRIC)
+
+# Anomaly Detection Thresholds
+CHANGE_PROBABILITY = 0.99
+CONSECUTIVE_ANOMALIES = 4
+CHI2_DEGREES_OF_FREEDOM = 3
+
+# Segment Initialization & Stability Constraints
+MAX_RMSE = 1.0
+MIN_RMSE_CLAMP = 1e-5
+MIN_YEARS_FOR_INIT = 1.5
+MIN_SAMPLES = 16
+
+# Harmonic Regression Configurations
+ENABLE_CONSTANT = True
+ENABLE_LINEAR = False
+ENABLE_QUADRATIC = False
+TEMPORAL_PERIODS = [0.33, 0.5, 1]
+
+# Recursive Least Squares Tuning
+RLS_RIDGE_PENALTY = 1e-6
+RLS_FORGETTING_FACTOR = 0.999
+
+# ==========================================
+#  DATA INGESTION & SCALING
+# ==========================================
+def read_scaled_dataset(ds, r_slice=slice(None), c_slice=slice(None)):
+    """
+    Read HDF5 dataset slice, scaling raw values to float32 and masking fill values as NaN.
+    Extracts '_FillValue' and 'scale_factor' from dataset attributes without hardcoding.
+    """
+    fill_val = ds.attrs.get("_FillValue", ds.attrs.get("fillvalue", getattr(ds, "fillvalue", None)))
+    scale = float(ds.attrs.get("scale_factor", 1.0))
+    if "scale_to_float" in ds.attrs:
+        sf = float(ds.attrs["scale_to_float"])
+        scale = (1.0 / sf) if sf < 1.0 else sf
+
+    raw = ds[:, r_slice, c_slice]
+    out = raw.astype(np.float32) / scale
+    if fill_val is not None and not np.isnan(fill_val):
+        is_fill = np.isclose(raw, fill_val, equal_nan=True) if np.issubdtype(raw.dtype, np.floating) else (raw == fill_val)
+        out[is_fill] = np.nan
+    return out
+
+
+def _resolve_metric_dataset(data_grp, target_metric, metric_key, is_inj):
+    """Select the HDF5 dataset matching baseline or injected metric naming."""
+    candidates = [metric_key]
+    if is_inj:
+        if metric_key == 'injected_ndvi':
+            candidates.append('injected_ndvi_map')
+    else:
+        candidates.append(target_metric)
+        if target_metric == 'ndvi':
+            candidates.append('ndvi_map')
+
+    for key in dict.fromkeys(candidates):
+        if key in data_grp:
+            return data_grp[key]
+
+    kind = "Injected target metric" if is_inj else "Target metric"
+    raise KeyError(
+        f"{kind} '{metric_key}' not found in {data_grp.name}. "
+        f"Available datasets: {list(data_grp.keys())}"
+    )
+
+
+# ==========================================
+# 3. MATHEMATICAL CORE FORMULATIONS
+# ==========================================
+def extract_fractional_years(acq_times):
+    """
+    Convert UNIX timestamps or year floats into continuous fractional years (t).
+    Vectorized using pandas datetime and calendar day handling.
+    """
+    acq_arr = np.asarray(acq_times, dtype=np.float64)
+    if len(acq_arr) == 0 or np.all((acq_arr >= 1970.0) & (acq_arr <= 2100.0)):
+        return acq_arr
+
+    dt = pd.to_datetime(acq_arr, unit='s', utc=True)
+    start_year = pd.to_datetime(dt.year, format='%Y', utc=True)
+    next_year = pd.to_datetime(dt.year + 1, format='%Y', utc=True)
+    year_duration = (next_year - start_year).total_seconds()
+    elapsed = (dt - start_year).total_seconds()
+    return (dt.year + elapsed / year_duration).to_numpy(dtype=np.float64)
+
+
+def build_harmonic_matrix(t, temporal_periods=None,
+                          enable_const=ENABLE_CONSTANT,
+                          enable_lin=ENABLE_LINEAR,
+                          enable_quad=ENABLE_QUADRATIC):
+    """
+    Construct the Fourier harmonic design matrix X(t).
+
+    For each observation time t, the row vector consists of:
+      - Intercept: 1 (if enable_const)
+      - Linear trend: t (if enable_lin)
+      - Quadratic trend: t^2 (if enable_quad)
+      - Cosine and sine harmonic pairs: cos(2*pi*t / T_k), sin(2*pi*t / T_k)
+    """
+    if temporal_periods is None:
+        temporal_periods = TEMPORAL_PERIODS
+
+    cols = []
+    if enable_const:
+        cols.append(np.ones_like(t, dtype=np.float64))
+    if enable_lin:
+        cols.append(np.asarray(t, dtype=np.float64))
+    if enable_quad:
+        cols.append(np.asarray(t, dtype=np.float64)**2)
+
+    w = 2.0 * math.pi
+    for p in temporal_periods:
+        omega = w / float(p)
+        cols.append(np.cos(omega * t))
+        cols.append(np.sin(omega * t))
+
+    return np.column_stack(cols) if cols else np.zeros((len(t), 0), dtype=np.float64)
+
+
+def fit_lasso_inliers(X, y, min_samples, chi2_threshold, min_rmse=MIN_RMSE_CLAMP):
+    """
+    Fit LassoLarsIC with BIC model selection and iterative Chi-squared outlier rejection.
+
+    Iteratively estimates parameters and rejects observations exceeding the Chi-squared
+    residual threshold until an inlier subset is reached.
+    """
+    inliers = np.ones(len(y), dtype=bool)
+    while np.sum(inliers) >= min_samples:
+        try:
+            model = LassoLarsIC(criterion='bic', fit_intercept=True).fit(X[inliers], y[inliers])
+            residuals = np.abs(y[inliers] - model.predict(X[inliers]))
+            rmse = max(float(np.sqrt(np.mean(residuals**2))), min_rmse)
+        except Exception:
+            return None, None, None, None
+
+        outliers = (residuals / rmse)**2 > chi2_threshold
+        if not np.any(outliers):
+            return model, inliers, rmse, np.where(model.coef_ != 0)[0]
+
+        inlier_indices = np.where(inliers)[0]
+        inliers[inlier_indices[outliers]] = False
+
+    return None, None, None, None
+
+
+def rls_filter_step(theta, P, x_t, actual_y, forgetting_factor=RLS_FORGETTING_FACTOR):
+    """
+    Perform a single textbook Recursive Least Squares (RLS) parameter update.
+
+    Innovation residual:
+        e_t = y_t - x_t^T * theta_{t-1}
+    Kalman-like gain:
+        Px = P_{t-1} * x_t
+        gamma = lambda + x_t^T * Px
+        K_t = Px / gamma
+    State & covariance updates:
+        theta_t = theta_{t-1} + K_t * e_t
+        P_t = (P_{t-1} - K_t * Px^T) / lambda
+    """
+    y_pred = np.dot(x_t, theta)
+    innovation_error = actual_y - y_pred
+
+    Px = P @ x_t
+    denom = forgetting_factor + np.dot(x_t, Px)
+    K = Px / denom
+
+    theta_updated = theta + K * innovation_error
+    P_updated = (P - np.outer(K, Px)) / forgetting_factor
+
+    return theta_updated, P_updated, denom, innovation_error
+
+
+# ==========================================
+# 4. SINGLE PIXEL CONTINUOUS CHANGE DETECTION
+# ==========================================
+def detect_pixel_change(
+    y_series,
+    valid_indices,
+    frac_years,
+    X_full,
+    acq_times,
+    min_samples=MIN_SAMPLES,
+    change_prob=CHANGE_PROBABILITY,
+    consec_anom=CONSECUTIVE_ANOMALIES,
+    min_years_for_init=MIN_YEARS_FOR_INIT,
+    max_rmse=MAX_RMSE,
+    min_rmse_clamp=MIN_RMSE_CLAMP,
+    rls_forgetting_factor=RLS_FORGETTING_FACTOR,
+    rls_ridge_penalty=RLS_RIDGE_PENALTY,
+    enable_constant=ENABLE_CONSTANT,
+):
+    """
+    Continuous Change Detection for a single pixel time series.
+
+    Executes piecewise continuous monitoring through sequential stages:
+      Step 1: Baseline initialization window search satisfying minimum sample count 
+              and minimum temporal duration (>= 1.5 years).
+      Step 2: Sparse harmonic selection via LassoLarsIC (BIC criterion) and iterative 
+              Chi-squared outlier rejection.
+      Step 3: Ordinary Least Squares (OLS) estimation on active features and covariance initialization.
+      Step 4: Backfill model predictions across the initialization baseline.
+      Step 5: Sequential online Recursive Least Squares (RLS) forward tracking with 
+              Chi-squared anomaly hypothesis testing.
+      Step 6: Structural break confirmation upon consecutive anomaly threshold breach.
+    """
+    num_frames = len(y_series)
+    num_features = X_full.shape[1]
+
+    pred_out = np.full(num_frames, np.nan, dtype=np.float32)
+    rmse_out = np.full(num_frames, np.nan, dtype=np.float32)
+    coef_out = np.full((num_frames, num_features), np.nan, dtype=np.float32)
+    flags_out = np.zeros(num_frames, dtype=np.uint8)
+
+    first_break_date = np.nan
+    break_count = 0
+    pixel_segments = []
+
+    chi2_threshold = chi2.ppf(change_prob, df=CHI2_DEGREES_OF_FREEDOM)
+    n_valid = len(valid_indices)
+
+    seg_counter = 0
+    i = 0
+
+    while i < n_valid - min_samples:
+        # Step 1: Initialization Window Identification
+        segment_start_idx = i
+        train_end = segment_start_idx + min_samples
+
+        while train_end <= n_valid:
+            time_span = frac_years[valid_indices[train_end - 1]] - frac_years[valid_indices[segment_start_idx]]
+            if time_span >= min_years_for_init:
+                break
+            train_end += 1
+
+        if train_end > n_valid:
+            break
+
+        # Step 2: Sparse Harmonic Selection via LASSO-BIC & Outlier Pruning
+        window_indices = valid_indices[segment_start_idx:train_end]
+        X_window = X_full[window_indices]
+        y_window = y_series[window_indices]
+
+        lasso_model, inlier_mask, init_rmse, active_features = fit_lasso_inliers(
+            X=X_window,
+            y=y_window,
+            min_samples=max(num_features + 1, min_samples),
+            chi2_threshold=chi2_threshold,
+            min_rmse=min_rmse_clamp
+        )
+
+        if lasso_model is None:
+            i += 1
+            continue
+
+        # Step 3: OLS Parameter Estimation & Covariance Initialization
+        if enable_constant and (0 not in active_features):
+            active_features = np.insert(active_features, 0, 0)
+        if len(active_features) == 0:
+            active_features = np.array([0])
+
+        X_train_active = X_window[inlier_mask][:, active_features]
+        Y_train_active = y_window[inlier_mask]
+        X_train_all = X_window[inlier_mask]
+
+        try:
+            P_active = np.linalg.inv(X_train_active.T @ X_train_active + np.eye(len(active_features)) * rls_ridge_penalty)
+            theta_active = P_active @ X_train_active.T @ Y_train_active
+
+            theta = np.zeros(num_features, dtype=np.float64)
+            theta[active_features] = theta_active
+            P = np.linalg.inv(X_train_all.T @ X_train_all + np.eye(num_features) * rls_ridge_penalty)
+        except np.linalg.LinAlgError:
+            i += 1
+            continue
+
+        Y_pred_init = X_train_all @ theta
+        SSE = np.sum((Y_train_active - Y_pred_init)**2)
+        dof = len(active_features)
+        n_points = int(np.sum(inlier_mask))
+        rmse = max(float(np.sqrt(SSE / max(1, n_points - dof))), min_rmse_clamp)
+
+        # Transient Event Rejection: Slide forward if initialization window has high variance
+        if rmse > max_rmse:
+            i += 1
+            continue
+
+        # Step 4: Backfill Predictions Across Initialization Window
+        for k in range(segment_start_idx, train_end):
+            global_idx = valid_indices[k]
+            pred_out[global_idx] = np.dot(X_full[global_idx], theta)
+            rmse_out[global_idx] = rmse
+            coef_out[global_idx, :] = theta
+
+        seg_counter += 1
+        consecutive_count = 0
+        break_detected = False
+        first_anomaly_idx = -1
+        target_j = train_end - 1
+
+        # Step 5: Online Forward Tracking & Chi-Squared Anomaly Detection
+        for j in range(train_end, n_valid):
+            target_j = j
+            target_idx = valid_indices[j]
+            x_target = X_full[target_idx]
+            actual = y_series[target_idx]
+
+            y_pred = np.dot(x_target, theta)
+            error = abs(actual - y_pred)
+
+            pred_out[target_idx] = y_pred
+            rmse_out[target_idx] = rmse
+            coef_out[target_idx, :] = theta
+
+            chi2_val = (error / rmse)**2
+            is_anomaly = chi2_val > chi2_threshold
+
+            if is_anomaly:
+                flags_out[target_idx] = 1
+                consecutive_count += 1
+                if consecutive_count >= consec_anom:
+                    first_anomaly_idx = valid_indices[j - consec_anom + 1]
+                    break_detected = True
+                    break
+            else:
+                consecutive_count = 0
+                theta, P, denom, e = rls_filter_step(theta, P, x_target, actual, rls_forgetting_factor)
+                SSE += (e**2) / denom
+                n_points += 1
+                rmse = max(float(np.sqrt(SSE / max(1, n_points - dof))), min_rmse_clamp)
+
+        # Step 6: Segment Recording & Break Confirmation
+        if break_detected:
+            break_count += 1
+            if np.isnan(first_break_date):
+                first_break_date = acq_times[first_anomaly_idx]
+
+            pixel_segments.append({
+                "segment_idx": seg_counter,
+                "start_idx": int(valid_indices[segment_start_idx]),
+                "start_date": float(acq_times[valid_indices[segment_start_idx]]),
+                "end_idx": int(valid_indices[target_j]),
+                "end_date": float(acq_times[valid_indices[target_j]]),
+                "has_break": True,
+                "break_num": int(break_count),
+                "break_idx": int(first_anomaly_idx),
+                "break_date": float(acq_times[first_anomaly_idx]),
+                "confirm_idx": int(valid_indices[target_j]),
+                "confirm_date": float(acq_times[valid_indices[target_j]]),
+                "rmse": float(rmse),
+                "coef": theta.copy(),
+                "n_points": int(n_points),
+            })
+            i = target_j - consec_anom + 1
+        else:
+            pixel_segments.append({
+                "segment_idx": seg_counter,
+                "start_idx": int(valid_indices[segment_start_idx]),
+                "start_date": float(acq_times[valid_indices[segment_start_idx]]),
+                "end_idx": int(valid_indices[target_j]),
+                "end_date": float(acq_times[valid_indices[target_j]]),
+                "has_break": False,
+                "break_num": 0,
+                "break_idx": -1,
+                "break_date": np.nan,
+                "confirm_idx": -1,
+                "confirm_date": np.nan,
+                "rmse": float(rmse),
+                "coef": theta.copy(),
+                "n_points": int(n_points),
+            })
+            break
+
+    return (
+        pred_out,
+        rmse_out,
+        coef_out,
+        flags_out,
+        first_break_date,
+        break_count,
+        pixel_segments
+    )
+
+
+# ==========================================
+# 5. ROW CHUNK DISPATCH WORKER
+# ==========================================
+def _process_row_chunk(chunk_args):
+    """
+    Worker function for parallel processing across row chunks.
+    """
+    (y_start, y_end, width, y_data_chunk, valid_mask_chunk,
+     frac_years, X_full, acq_times, min_samples, change_prob, consec_anom) = chunk_args
+
+    num_frames = y_data_chunk.shape[0]
+    chunk_height = y_end - y_start
+    num_features = X_full.shape[1]
+
+    chunk_pred = np.full((num_frames, chunk_height, width), np.nan, dtype=np.float32)
+    chunk_rmse = np.full((num_frames, chunk_height, width), np.nan, dtype=np.float32)
+    chunk_coef = np.full((num_frames, chunk_height, width, num_features), np.nan, dtype=np.float32)
+    chunk_flags = np.zeros((num_frames, chunk_height, width), dtype=np.uint8)
+    chunk_date = np.full((chunk_height, width), np.nan, dtype=np.float64)
+    chunk_count = np.zeros((chunk_height, width), dtype=np.int32)
+    chunk_segments = {}
+
+    for y_local in range(chunk_height):
+        for x in range(width):
+            pixel_valid = valid_mask_chunk[:, y_local, x]
+            valid_indices = np.where(pixel_valid)[0]
+
+            if len(valid_indices) <= min_samples:
+                continue
+
+            (
+                p_pred,
+                p_rmse,
+                p_coef,
+                p_flags,
+                p_date,
+                p_count,
+                p_segs
+            ) = detect_pixel_change(
+                y_series=y_data_chunk[:, y_local, x],
+                valid_indices=valid_indices,
+                frac_years=frac_years,
+                X_full=X_full,
+                acq_times=acq_times,
+                min_samples=min_samples,
+                change_prob=change_prob,
+                consec_anom=consec_anom,
+                min_years_for_init=MIN_YEARS_FOR_INIT,
+                max_rmse=MAX_RMSE,
+                min_rmse_clamp=MIN_RMSE_CLAMP,
+                rls_forgetting_factor=RLS_FORGETTING_FACTOR,
+                rls_ridge_penalty=RLS_RIDGE_PENALTY,
+                enable_constant=ENABLE_CONSTANT
+            )
+
+            chunk_pred[:, y_local, x] = p_pred
+            chunk_rmse[:, y_local, x] = p_rmse
+            chunk_coef[:, y_local, x, :] = p_coef
+            chunk_flags[:, y_local, x] = p_flags
+            chunk_date[y_local, x] = p_date
+            chunk_count[y_local, x] = p_count
+
+            if p_segs:
+                chunk_segments[(y_local, x)] = p_segs
+
+    return (
+        y_start,
+        y_end,
+        chunk_pred,
+        chunk_rmse,
+        chunk_coef,
+        chunk_flags,
+        chunk_date,
+        chunk_count
+    )
+
+
+# ==========================================
+# 6. MAIN DRIVER & HDF5 STORAGE
+# ==========================================
+def main(enable_const=ENABLE_CONSTANT,
+         enable_lin=ENABLE_LINEAR,
+         enable_quad=ENABLE_QUADRATIC,
+         temporal_periods=None,
+         target_metric=TARGET_METRIC,
+         injected=False,
+         output_group=None,
+         location=LOCATION,
+         h5_path=None,
+         output_h5=None,
+         n_jobs=None,
+         chunk_size=1,
+         launch_vis=False,
+         row_start=0,
+         row_end=None,
+         col_start=0,
+         col_end=None,
+         **kwargs):
+    """
+    Main driver for continuous change detection regression analysis.
+    """
+    if temporal_periods is None:
+        temporal_periods = TEMPORAL_PERIODS
+
+    min_samples = MIN_SAMPLES
+
+    target_name, target_short_name, metric_key, group_prefix, is_inj = resolve_metric_naming(target_metric, injected=injected)
+    group_name = output_group if output_group is not None else f"{group_prefix}CCD_Results"
+
+    if h5_path is None:
+        h5_path = H5_PATH
+        if not os.path.exists(h5_path):
+            alt_path = f"C:/satelliteImagery/HLST30/HLST_{location}v2.h5"
+            if os.path.exists(alt_path):
+                h5_path = alt_path
+
+    if not os.path.exists(h5_path):
+        raise FileNotFoundError(f"Input HDF5 file not found: {h5_path}")
+
+    if output_h5 is None:
+        output_h5 = h5_path
+
+    print(f"Loading data from {h5_path}...")
+    with h5py.File(h5_path, 'r') as f:
+        data_grp = f['/HDFEOS/GRIDS/HARMONIZED/Data Fields']
+        metric_ds = _resolve_metric_dataset(data_grp, target_metric, metric_key, is_inj)
+        print(f"Selected dataset '{metric_ds.name}' -> output group '{group_name}'")
+
+        acq_times = metric_ds.attrs.get('acquisition_time')
+        if acq_times is None and 'acquisition_time' in data_grp.attrs:
+            acq_times = data_grp.attrs['acquisition_time']
+        elif acq_times is None and 'common_mask' in data_grp and 'acquisition_time' in data_grp['common_mask'].attrs:
+            acq_times = data_grp['common_mask'].attrs['acquisition_time']
+        elif acq_times is None and 'acquisition_time' in f.attrs:
+            acq_times = f.attrs['acquisition_time']
+
+        if acq_times is not None:
+            acq_times = np.array(acq_times[:], dtype=np.float64)
+
+        r_slice = slice(row_start, row_end)
+        c_slice = slice(col_start, col_end)
+
+        y_data = read_scaled_dataset(metric_ds, r_slice=r_slice, c_slice=c_slice)
+        common_mask = data_grp['common_mask'][:, r_slice, c_slice]
+        valid_mask = (common_mask == 0) & ~np.isnan(y_data)
+
+        geo_transform = metric_ds.attrs.get('GeoTransform', f.attrs.get('GeoTransform'))
+        spatial_ref = metric_ds.attrs.get('spatial_ref', f.attrs.get('spatial_ref'))
+
+    num_frames, height, width = y_data.shape
+
+    if acq_times is None:
+        raise KeyError(
+            f"Mandatory 'acquisition_time' attribute not found for dataset '{metric_ds.name}' "
+            "or parent container. Cannot construct harmonic temporal matrix without timestamps."
+        )
+
+    frac_years = extract_fractional_years(acq_times)
+
+    # Sort observations chronologically
+    sort_idx = np.argsort(acq_times)
+    acq_times = acq_times[sort_idx]
+    frac_years = frac_years[sort_idx]
+    y_data = y_data[sort_idx, ...]
+    valid_mask = valid_mask[sort_idx, ...]
+
+    print(f"Dataset shape: {num_frames} frames, {height}x{width} pixels")
+
+    change_date_map = np.full((height, width), np.nan, dtype=np.float64)
+    change_count_map = np.zeros((height, width), dtype=np.int32)
+    predicted_series = np.full((num_frames, height, width), np.nan, dtype=np.float32)
+    rmse_series = np.full((num_frames, height, width), np.nan, dtype=np.float32)
+    anomaly_flags = np.zeros((num_frames, height, width), dtype=np.uint8)
+
+    X_full = build_harmonic_matrix(
+        frac_years,
+        temporal_periods=temporal_periods,
+        enable_const=enable_const,
+        enable_lin=enable_lin,
+        enable_quad=enable_quad
+    )
+
+    num_features = X_full.shape[1]
+    coef_series = np.full((num_frames, height, width, num_features), np.nan, dtype=np.float32)
+
+    print("\nExecuting Sliding Window LASSO Harmonic Regression...")
+
+    if n_jobs is None:
+        n_jobs = min(8, multiprocessing.cpu_count())
+    print(f"Using {n_jobs} cores for parallel processing.")
+
+    num_chunks = max(1, math.ceil(height / chunk_size))
+    chunks = []
+    for y_start in range(0, height, chunk_size):
+        y_end = min(y_start + chunk_size, height)
+        chunk_args = (
+            y_start, y_end, width,
+            y_data[:, y_start:y_end, :], valid_mask[:, y_start:y_end, :],
+            frac_years, X_full, acq_times,
+            min_samples, CHANGE_PROBABILITY, CONSECUTIVE_ANOMALIES
+        )
+        chunks.append(chunk_args)
+
+    if n_jobs > 1 and len(chunks) > 1:
+        results = Parallel(n_jobs=n_jobs, backend='loky', return_as='generator')(
+            delayed(_process_row_chunk)(chunk) for chunk in chunks
+        )
+        for res in tqdm(results, total=len(chunks), desc="Processing row chunks"):
+            y_start, y_end, c_pred, c_rmse, c_coef, c_flags, c_date, c_count = res[:8]
+            predicted_series[:, y_start:y_end, :] = c_pred
+            rmse_series[:, y_start:y_end, :] = c_rmse
+            coef_series[:, y_start:y_end, :, :] = c_coef
+            anomaly_flags[:, y_start:y_end, :] = c_flags
+            change_date_map[y_start:y_end, :] = c_date
+            change_count_map[y_start:y_end, :] = c_count
+    else:
+        for chunk in tqdm(chunks, desc="Processing row chunks"):
+            res = _process_row_chunk(chunk)
+            y_start, y_end, c_pred, c_rmse, c_coef, c_flags, c_date, c_count = res[:8]
+            predicted_series[:, y_start:y_end, :] = c_pred
+            rmse_series[:, y_start:y_end, :] = c_rmse
+            coef_series[:, y_start:y_end, :, :] = c_coef
+            anomaly_flags[:, y_start:y_end, :] = c_flags
+            change_date_map[y_start:y_end, :] = c_date
+            change_count_map[y_start:y_end, :] = c_count
+
+    print(f"\nSaving Results directly to {output_h5} -> group '{group_name}'...")
+    with h5py.File(output_h5, 'a') as out_file:
+        if group_name in out_file:
+            del out_file[group_name]
+        ccd_grp = out_file.create_group(group_name)
+
+        if spatial_ref is not None:
+            ccd_grp.attrs['spatial_ref'] = spatial_ref
+            out_file.attrs['spatial_ref'] = spatial_ref
+        if geo_transform is not None:
+            ccd_grp.attrs['GeoTransform'] = geo_transform
+            out_file.attrs['GeoTransform'] = geo_transform
+
+        ccd_grp.attrs['CHANGE_PROBABILITY'] = CHANGE_PROBABILITY
+        ccd_grp.attrs['CONSECUTIVE_ANOMALIES'] = CONSECUTIVE_ANOMALIES
+        ccd_grp.attrs['CHI2_DEGREES_OF_FREEDOM'] = CHI2_DEGREES_OF_FREEDOM
+        ccd_grp.attrs['MAX_RMSE'] = MAX_RMSE
+        ccd_grp.attrs['MIN_RMSE_CLAMP'] = MIN_RMSE_CLAMP
+        ccd_grp.attrs['MIN_YEARS_FOR_INIT'] = MIN_YEARS_FOR_INIT
+        ccd_grp.attrs['MIN_SAMPLES'] = min_samples
+        ccd_grp.attrs['TEMPORAL_PERIODS'] = temporal_periods
+        ccd_grp.attrs['ENABLE_CONSTANT'] = enable_const
+        ccd_grp.attrs['ENABLE_LINEAR'] = enable_lin
+        ccd_grp.attrs['ENABLE_QUADRATIC'] = enable_quad
+        ccd_grp.attrs['TARGET_METRIC'] = metric_key
+        ccd_grp.attrs['TARGET_SHORT_NAME'] = target_short_name
+        ccd_grp.attrs['TARGET_NAME'] = target_name
+        ccd_grp.attrs['SOURCE_DATA'] = h5_path
+        ccd_grp.attrs['acquisition_time'] = acq_times
+
+        out_file.attrs['CHANGE_PROBABILITY'] = CHANGE_PROBABILITY
+        out_file.attrs['CONSECUTIVE_ANOMALIES'] = CONSECUTIVE_ANOMALIES
+        out_file.attrs['CHI2_DEGREES_OF_FREEDOM'] = CHI2_DEGREES_OF_FREEDOM
+        out_file.attrs['TARGET_METRIC'] = metric_key
+
+        for name, data, fill, dtype, opt in [
+            ('predicted_series', predicted_series, np.nan, np.float32, 1),
+            ('rmse_series', rmse_series, np.nan, np.float32, 1),
+            ('coef_series', coef_series, np.nan, np.float32, 1),
+            ('anomaly_flags', anomaly_flags, 0, np.uint8, 1),
+            ('change_date_timestamp', change_date_map, np.nan, np.float64, 1),
+            ('change_count', change_count_map, 0, np.int32, 1),
+        ]:
+            ds = ccd_grp.create_dataset(name, data=data, fillvalue=fill, shuffle=True, compression='gzip', compression_opts=opt)
+            ds.attrs['_FillValue'] = fill
+            if name not in out_file:
+                out_file[name] = ds
+
+    if launch_vis:
+        try:
+            import SC_CCM_vis
+            SC_CCM_vis.plot_spatial_anomaly_overlay(
+                source_h5_path=output_h5,
+                target_metric=target_short_name,
+                injected=is_inj,
+                interactive=True
+            )
+        except Exception as e:
+            print(f"Warning: Failed to launch visualization: {e}")
+
+    print("Harmonized CCD Pipeline Complete!")
+    return output_h5
+
+
+if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser(description="Run Harmonized CCD Main")
+    parser.add_argument('--location', type=str, default=LOCATION, help="Location name")
+    parser.add_argument('--h5-path', type=str, default=None, help="Input source HDF5 path")
+    parser.add_argument('--output-h5', type=str, default=None, help="Output CCD HDF5 path")
+    parser.add_argument('--metric', type=str, default=TARGET_METRIC, help="Target metric")
+    parser.add_argument('--injected', action='store_true', help="Run CCD on injected dataset")
+    parser.add_argument('--no-vis', action='store_true', help="Skip launching visualization")
+    args = parser.parse_args()
+
+    main(
+        location=args.location,
+        h5_path=args.h5_path,
+        output_h5=args.output_h5,
+        target_metric=args.metric,
+        injected=args.injected,
+        launch_vis=not args.no_vis
+    )
