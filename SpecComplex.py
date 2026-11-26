@@ -343,7 +343,7 @@ def maximumDistance_volumes(pixels, num_endmembers, return_heights=False):
 
     # Initialize Variables
     endmembers = np.zeros((num_bands, num_endmembers), dtype=pixels.dtype)
-    volumes = np.full(num_endmembers, -np.inf, dtype=pixels.dtype)
+    volumes = np.zeros(num_endmembers, dtype=pixels.dtype)
     heights = np.zeros(num_endmembers, dtype=pixels.dtype)
     indices = np.zeros(num_endmembers, dtype=int)
 
@@ -370,7 +370,7 @@ def maximumDistance_volumes(pixels, num_endmembers, return_heights=False):
     # 𝒒_1=𝒅_1/ℎ_1  
     d1 = residuals[:, idx_maxnorm].copy()              # (bands, )
     h1 = np.linalg.norm(d1)
-    volumes[1] = np.log(h1) if h1 > epsilon else -np.inf
+    volumes[1] = h1 if h1 > epsilon else 0.0
     heights[1] = h1
     if h1 > epsilon:
         q1 = d1 / h1  # (bands,1)
@@ -403,12 +403,12 @@ def maximumDistance_volumes(pixels, num_endmembers, return_heights=False):
         if h_j > epsilon:
             heights[j] = h_j
             q_j = (v_64 / h_j).astype(np.float32)
-            volumes[j] = volumes[j - 1] + np.log(h_j)
+            volumes[j] = volumes[j - 1] * h_j
             proj_component = np.outer(q_j, np.dot(q_j, residuals)) # equivalent to q_j*q_j.T*residuals in vector operations
             residuals -= proj_component
         else:
-            heights[j] = -np.inf
-            volumes[j] = -np.inf
+            heights[j] = 0.0
+            volumes[j] = 0.0
 
     if return_heights:
         return endmembers, volumes, heights
@@ -1012,7 +1012,7 @@ def process_volume_tiles(frame_data, tile_size, num_endmembers, gram_type, norm_
     
     return output_map
 
-def process_volume_sliding_tile_batch(batch_data, tile_size, stride, num_endmembers):
+def process_volume_sliding_tile_batch(batch_data, tile_size, stride, num_endmembers, apply_spatial_smoothing=True):
     """
     Batched sliding window processing across multiple spatial patch tiles on CPU.
 
@@ -1021,6 +1021,7 @@ def process_volume_sliding_tile_batch(batch_data, tile_size, stride, num_endmemb
         tile_size: int, spatial window size (e.g., 3).
         stride: int, sliding window stride.
         num_endmembers: int, maximum number of endmembers to extract per tile.
+        apply_spatial_smoothing: bool, default True. If False, returns raw neighborhood_map without spatial averaging.
 
     Returns:
         final_maps: ndarray of shape (B, height, width) or (height, width).
@@ -1033,21 +1034,21 @@ def process_volume_sliding_tile_batch(batch_data, tile_size, stride, num_endmemb
     final_maps = np.zeros((B, height, width), dtype=np.float32)
 
     for b in range(B):
-        final_maps[b] = process_volume_sliding_tile(batch_data[b], tile_size, stride, num_endmembers)
+        final_maps[b] = process_volume_sliding_tile(batch_data[b], tile_size, stride, num_endmembers, apply_spatial_smoothing=apply_spatial_smoothing)
 
     if is_3d:
         return final_maps[0]
     return final_maps
 
 
-def process_volume_sliding_tile(frame_data, tile_size, stride, num_endmembers):
+def process_volume_sliding_tile(frame_data, tile_size, stride, num_endmembers, apply_spatial_smoothing=True):
     """
     Sliding window processing.
     Strict Validity: Window is only processed if ALL pixels are valid.
     Output is masked with NaN for any pixel identified as invalid.
     """
     if hasattr(frame_data, "ndim") and frame_data.ndim == 4:
-        return process_volume_sliding_tile_batch(frame_data, tile_size, stride, num_endmembers)
+        return process_volume_sliding_tile_batch(frame_data, tile_size, stride, num_endmembers, apply_spatial_smoothing=apply_spatial_smoothing)
 
     bands, height, width = frame_data.shape
     img = np.transpose(frame_data, (1, 2, 0))
@@ -1083,21 +1084,24 @@ def process_volume_sliding_tile(frame_data, tile_size, stride, num_endmembers):
             cx = x_start + center_offset
             neighborhood_map[cy, cx] = vol_val
 
-    clean_neighborhood = np.nan_to_num(neighborhood_map, nan=0.0)
-    valid_binary = ~np.isnan(neighborhood_map)
-    
-    sum_map = uniform_filter(clean_neighborhood, size=tile_size, mode='constant', cval=0.0) 
-    count_map = uniform_filter(valid_binary.astype(np.float32), size=tile_size, mode='constant', cval=0.0)
-    
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", category=RuntimeWarning)
-        final_map = np.where(count_map > 0, sum_map / count_map, np.nan)
+    if apply_spatial_smoothing:
+        clean_neighborhood = np.nan_to_num(neighborhood_map, nan=0.0)
+        valid_binary = ~np.isnan(neighborhood_map)
+        
+        sum_map = uniform_filter(clean_neighborhood, size=tile_size, mode='constant', cval=0.0) 
+        count_map = uniform_filter(valid_binary.astype(np.float32), size=tile_size, mode='constant', cval=0.0)
+        
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", category=RuntimeWarning)
+            final_map = np.where(count_map > 0, sum_map / count_map, np.nan)
+    else:
+        final_map = neighborhood_map
         
     return final_map
 
 
 
-def SMACC_sliding_volume(frame_data, tile_size, stride, num_endmembers):
+def SMACC_sliding_volume(frame_data, tile_size, stride, num_endmembers, apply_spatial_smoothing=True):
     """
     Sliding window processing using SMACC endmember extraction and localized
     parallelotope volume estimation.
@@ -1109,9 +1113,10 @@ def SMACC_sliding_volume(frame_data, tile_size, stride, num_endmembers):
         tile_size (int): Size of the square sliding window tile.
         stride (int): Stride step size between window positions.
         num_endmembers (int): Number of endmembers to extract.
+        apply_spatial_smoothing (bool): default True. If False, returns raw neighborhood_map without spatial averaging.
 
     Returns:
-        final_map (np.ndarray): Uniform-filter smoothed complexity map [height, width].
+        final_map (np.ndarray): Uniform-filter smoothed complexity map [height, width] (or raw neighborhood_map if apply_spatial_smoothing=False).
         neighborhood_map (np.ndarray): Center-pixel complexity map [height, width].
     """
     bands, height, width = frame_data.shape
@@ -1147,15 +1152,18 @@ def SMACC_sliding_volume(frame_data, tile_size, stride, num_endmembers):
             cx = x_start + center_offset
             neighborhood_map[cy, cx] = vol_val
 
-    clean_neighborhood = np.nan_to_num(neighborhood_map, nan=0.0)
-    valid_binary = ~np.isnan(neighborhood_map)
-    
-    sum_map = uniform_filter(clean_neighborhood, size=tile_size, mode='constant', cval=0.0) 
-    count_map = uniform_filter(valid_binary.astype(np.float32), size=tile_size, mode='constant', cval=0.0)
-    
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", category=RuntimeWarning)
-        final_map = np.where(count_map > 0, sum_map / count_map, np.nan)
+    if apply_spatial_smoothing:
+        clean_neighborhood = np.nan_to_num(neighborhood_map, nan=0.0)
+        valid_binary = ~np.isnan(neighborhood_map)
+        
+        sum_map = uniform_filter(clean_neighborhood, size=tile_size, mode='constant', cval=0.0) 
+        count_map = uniform_filter(valid_binary.astype(np.float32), size=tile_size, mode='constant', cval=0.0)
+        
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", category=RuntimeWarning)
+            final_map = np.where(count_map > 0, sum_map / count_map, np.nan)
+    else:
+        final_map = neighborhood_map
         
     return final_map, neighborhood_map
 

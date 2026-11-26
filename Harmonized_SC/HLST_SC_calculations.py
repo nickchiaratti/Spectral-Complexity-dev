@@ -17,6 +17,12 @@ if str(script_dir.parent) not in sys.path:
 
 import SpecComplexTorch as sc
 
+# Spatial smoothing configuration:
+# When False (default for HLST pipeline), uses direct 3x3 center-pixel neighborhood_map without
+# secondary uniform_filter averaging. This prevents 5x5 spatial blurring and volume inflation
+# across wetland/forest boundaries.
+APPLY_SPATIAL_SMOOTHING = False
+
 
 def scale_to_int16(raw_floats, scale_factor=10000, nodata_val=-9999, nodata_value=None):
     """Quantizes float32 array to int16, mapping NaNs to nodata value."""
@@ -266,15 +272,18 @@ def overwrite_dset(data_grp, name, shape, dtype, fillvalue=None, spatial_ref=Non
 # PIPELINE EXECUTION ENGINE
 # ==============================================================================
 
-def process_ard_cube(filepath, tile_size=3, num_endmembers=7, norm_param=None):
+def process_ard_cube(filepath, tile_size=3, num_endmembers=7, norm_param=None, metric="all", apply_spatial_smoothing=APPLY_SPATIAL_SMOOTHING):
     """
-    Processes the multi-sensor ARD cube in-place, appending the three required metrics:
+    Processes the multi-sensor ARD cube in-place, appending the required metrics:
       1. CALC_GLOBAL_ENDMEMBERS
-      2. CALC_SLIDING_VOLUME
-      3. CALC_Z_SCORE
+      2. CALC_SLIDING_VOLUME (baseline sliding_volume_map / sliding_volume_z_score)
+      3. CALC_3D_VOLUME (OSDprodnormalized 3D-equivalent volume_map_3d / volume_map_3d_zscore)
     directly back into the source HDF5 file.
     """
-    print(f"\nProcessing in-place spectral complexity calculations for: {filepath}")
+    calc_baseline = metric.lower() in ["all", "both", "baseline"]
+    calc_3d = metric.lower() in ["all", "both", "3d"]
+    smoothing_str = "spatially averaged" if apply_spatial_smoothing else "direct neighborhood_map (no spatial averaging)"
+    print(f"\nProcessing in-place spectral complexity calculations (metric={metric}, smoothing={smoothing_str}) for: {filepath}")
 
     with h5py.File(filepath, 'r+') as h5_file:
         grids = [g for g in h5_file['/HDFEOS/GRIDS'].keys() if g != 'HARMONIZED']
@@ -346,30 +355,56 @@ def process_ard_cube(filepath, tile_size=3, num_endmembers=7, norm_param=None):
                 h5_file.create_group(harm_base)
             harm_grp = h5_file.create_group(harm_path)
 
-        ds_harm_mask = overwrite_dset(harm_grp, 'common_mask', (total_frames, height, width), dtype='uint8', fillvalue=255, spatial_ref=spatial_ref, geo_transform=geo_transform, chunks=chunks_3d)
-        ds_harm_ortho = overwrite_dset(harm_grp, 'ortho_visual', (total_frames, 3, height, width), dtype='uint8', fillvalue=0, spatial_ref=spatial_ref, geo_transform=geo_transform, chunks=(1, 3, chunk_h, chunk_w))
-        ds_harm_slide = overwrite_dset(harm_grp, 'sliding_volume_map', (total_frames, height, width), dtype='float32', fillvalue=np.nan, spatial_ref=spatial_ref, geo_transform=geo_transform, chunks=chunks_3d)
-        ds_harm_z = overwrite_dset(harm_grp, 'sliding_volume_z_score', (total_frames, height, width), dtype='float32', fillvalue=np.nan, spatial_ref=spatial_ref, geo_transform=geo_transform, chunks=chunks_3d)
-        ds_harm_ndvi = overwrite_dset(harm_grp, 'ndvi', (total_frames, height, width), dtype='float32', fillvalue=np.nan, spatial_ref=spatial_ref, geo_transform=geo_transform, chunks=chunks_3d)
+        if calc_baseline or "common_mask" not in harm_grp:
+            ds_harm_mask = overwrite_dset(harm_grp, 'common_mask', (total_frames, height, width), dtype='uint8', fillvalue=255, spatial_ref=spatial_ref, geo_transform=geo_transform, chunks=chunks_3d)
+            ds_harm_ortho = overwrite_dset(harm_grp, 'ortho_visual', (total_frames, 3, height, width), dtype='uint8', fillvalue=0, spatial_ref=spatial_ref, geo_transform=geo_transform, chunks=(1, 3, chunk_h, chunk_w))
+            ds_harm_ndvi = overwrite_dset(harm_grp, 'ndvi', (total_frames, height, width), dtype='float32', fillvalue=np.nan, spatial_ref=spatial_ref, geo_transform=geo_transform, chunks=chunks_3d)
+        else:
+            ds_harm_mask = harm_grp['common_mask']
+            ds_harm_ortho = harm_grp['ortho_visual']
+            ds_harm_ndvi = harm_grp['ndvi']
 
+        ds_harm_slide = None
+        ds_harm_z = None
+        if calc_baseline:
+            ds_harm_slide = overwrite_dset(harm_grp, 'sliding_volume_map', (total_frames, height, width), dtype='float32', fillvalue=np.nan, spatial_ref=spatial_ref, geo_transform=geo_transform, chunks=chunks_3d)
+            ds_harm_z = overwrite_dset(harm_grp, 'sliding_volume_z_score', (total_frames, height, width), dtype='float32', fillvalue=np.nan, spatial_ref=spatial_ref, geo_transform=geo_transform, chunks=chunks_3d)
+        elif 'sliding_volume_map' in harm_grp:
+            ds_harm_slide = harm_grp['sliding_volume_map']
+            ds_harm_z = harm_grp['sliding_volume_z_score']
+
+        ds_harm_3d = None
+        ds_harm_3d_z = None
+        if calc_3d:
+            ds_harm_3d = overwrite_dset(harm_grp, 'volume_map_3d', (total_frames, height, width), dtype='float32', fillvalue=np.nan, spatial_ref=spatial_ref, geo_transform=geo_transform, chunks=chunks_3d)
+            ds_harm_3d_z = overwrite_dset(harm_grp, 'volume_map_3d_zscore', (total_frames, height, width), dtype='float32', fillvalue=np.nan, spatial_ref=spatial_ref, geo_transform=geo_transform, chunks=chunks_3d)
 
         sensor_dsets = {}
-        for grid in grids:
-            data_grp = h5_file[f"/HDFEOS/GRIDS/{grid}/Data Fields"]
-            sr_shape = data_grp["surface_reflectance"].shape
-            n_frames, n_bands = sr_shape[0], sr_shape[1]
+        need_sensor_recompute = calc_baseline or ("frame_endmembers" not in h5_file[f"/HDFEOS/GRIDS/{grids[0]}/Data Fields"])
+        if need_sensor_recompute:
+            for grid in grids:
+                data_grp = h5_file[f"/HDFEOS/GRIDS/{grid}/Data Fields"]
+                sr_shape = data_grp["surface_reflectance"].shape
+                n_frames, n_bands = sr_shape[0], sr_shape[1]
 
-            em_ds = overwrite_dset(data_grp, 'frame_endmembers', (n_frames, n_bands, num_endmembers), dtype='float32', fillvalue=np.nan, spatial_ref=spatial_ref, geo_transform=geo_transform, chunks=(1, n_bands, num_endmembers))
-            if 'wavelengths' in data_grp["surface_reflectance"].attrs:
-                em_ds.attrs['wavelengths'] = data_grp["surface_reflectance"].attrs['wavelengths']
+                em_ds = overwrite_dset(data_grp, 'frame_endmembers', (n_frames, n_bands, num_endmembers), dtype='float32', fillvalue=np.nan, spatial_ref=spatial_ref, geo_transform=geo_transform, chunks=(1, n_bands, num_endmembers))
+                if 'wavelengths' in data_grp["surface_reflectance"].attrs:
+                    em_ds.attrs['wavelengths'] = data_grp["surface_reflectance"].attrs['wavelengths']
 
-            idx_ds = overwrite_dset(data_grp, 'frame_endmember_indices', (n_frames, num_endmembers), dtype='int32',fillvalue=-9999, chunks=(1, num_endmembers))
-            vol_ds = overwrite_dset(data_grp, 'frame_endmember_volumes', (n_frames, num_endmembers), dtype='float32',fillvalue=np.nan, chunks=(1, num_endmembers))
+                idx_ds = overwrite_dset(data_grp, 'frame_endmember_indices', (n_frames, num_endmembers), dtype='int32',fillvalue=-9999, chunks=(1, num_endmembers))
+                vol_ds = overwrite_dset(data_grp, 'frame_endmember_volumes', (n_frames, num_endmembers), dtype='float32',fillvalue=np.nan, chunks=(1, num_endmembers))
 
-            sensor_dsets[grid] = {'em': em_ds, 'idx': idx_ds, 'vol': vol_ds, 'num_bands': n_bands}
+                sensor_dsets[grid] = {'em': em_ds, 'idx': idx_ds, 'vol': vol_ds, 'num_bands': n_bands}
+        else:
+            for grid in grids:
+                data_grp = h5_file[f"/HDFEOS/GRIDS/{grid}/Data Fields"]
+                sr_shape = data_grp["surface_reflectance"].shape
+                sensor_dsets[grid] = {'em': data_grp.get('frame_endmembers'), 'idx': data_grp.get('frame_endmember_indices'), 'vol': data_grp.get('frame_endmember_volumes'), 'num_bands': sr_shape[1]}
 
         global_means_list = []
         global_stds_list = []
+        global_means_3d_list = []
+        global_stds_3d_list = []
 
         print(f"Spooling {total_frames} frames into SpecComplexTorch Compute Engine...")
         t_start_pipeline = time.perf_counter()
@@ -388,26 +423,7 @@ def process_ard_cube(filepath, tile_size=3, num_endmembers=7, norm_param=None):
             if persistent_water_mask is not None:
                 frame_mask[persistent_water_mask] = 1
 
-            frame_ortho = raw_frame_ortho
-            if frame_ortho.shape[0] in [3, 4]:
-                frame_ortho = frame_ortho[:3, :, :]
-            else:
-                frame_ortho = np.transpose(frame_ortho[..., :3], (2, 0, 1))
-
-            if frame_ortho.dtype != np.uint8:
-                fo = frame_ortho.astype(np.float32)
-                ortho_ds = data_grp["ortho_visual"]
-                ortho_fill = ortho_ds.attrs.get("_FillValue", ortho_ds.attrs.get("fillvalue", getattr(ortho_ds, "fillvalue", None)))
-                if ortho_fill is not None and not np.isnan(ortho_fill):
-                    valid_ortho = ~np.isclose(fo, ortho_fill, equal_nan=True) & ~np.isnan(fo)
-                else:
-                    valid_ortho = ~np.isnan(fo)
-                if np.any(valid_ortho):
-                    p1, p99 = np.percentile(fo[valid_ortho], (1, 99))
-                    if p99 > p1:
-                        fo[valid_ortho] = (fo[valid_ortho] - p1) / (p99 - p1)
-                fo[~valid_ortho] = 0.0
-                frame_ortho = np.clip(fo * 255, 0, 255).astype(np.uint8)
+            valid_mask = (frame_mask == 0)
 
             gw_attr = data_grp["surface_reflectance"].attrs.get("all_good_wavelengths")
             if gw_attr is not None:
@@ -417,53 +433,92 @@ def process_ard_cube(filepath, tile_size=3, num_endmembers=7, norm_param=None):
                 gw_mask = None
                 eval_sr = frame_sr
 
-            em, em_idx, vol_curve = process_volume_frame(eval_sr, num_endmembers)
-
-            if gw_mask is not None:
-                em_full = np.full((sensor_dsets[grid_name]['num_bands'], num_endmembers), np.nan, dtype=np.float32)
-                em_full[gw_mask, :] = em
-                em_out = em_full
-            else:
-                em_out = em
-
-            sensor_dsets[grid_name]['em'][t_local, ...] = em_out
-            sensor_dsets[grid_name]['idx'][t_local, ...] = em_idx
-            sensor_dsets[grid_name]['vol'][t_local, ...] = vol_curve
-
-            slide_map = sc.process_volume_sliding_tile(eval_sr, tile_size=tile_size, stride=1, num_endmembers=num_endmembers)
-            ds_harm_slide[global_idx, ...] = slide_map
-
-            valid_mask = (frame_mask == 0)
-            z_map, global_mean, global_std = sc.calculate_global_z_score(slide_map, valid_mask)
-            ds_harm_z[global_idx, ...] = z_map
-
-            global_means_list.append(global_mean)
-            global_stds_list.append(global_std)
-
-            ds_harm_mask[global_idx, ...] = frame_mask
-            ds_harm_ortho[global_idx, ...] = frame_ortho
-
-            wavelengths = data_grp["surface_reflectance"].attrs.get("wavelengths")
-            if wavelengths is not None:
-                wl = np.asarray(wavelengths)
-                # Account for nanometers vs micrometers
-                scale_wl = 1000.0 if np.nanmax(wl) < 10.0 else 1.0
-                red_target, nir_target = 665.0, 865.0
-                red_idx = int(np.nanargmin(np.abs(wl * scale_wl - red_target)))
-                nir_idx = int(np.nanargmin(np.abs(wl * scale_wl - nir_target)))
-            else:
-                if "HLSS30" in grid_name:
-                    red_idx, nir_idx = 3, 7
-                elif "HLSL30" in grid_name:
-                    red_idx, nir_idx = 3, 4
-                elif "TANAGER" in grid_name:
-                    red_idx, nir_idx = 59, 97
+            if calc_baseline or "common_mask" not in harm_grp:
+                frame_ortho = raw_frame_ortho
+                if frame_ortho.shape[0] in [3, 4]:
+                    frame_ortho = frame_ortho[:3, :, :]
                 else:
-                    red_idx = min(3, frame_sr.shape[0] - 1)
-                    nir_idx = min(4, frame_sr.shape[0] - 1)
+                    frame_ortho = np.transpose(frame_ortho[..., :3], (2, 0, 1))
 
-            ndvi = sc.calc_ndvi_frame(frame_sr, red_idx, nir_idx)
-            ds_harm_ndvi[global_idx, ...] = ndvi
+                if frame_ortho.dtype != np.uint8:
+                    fo = frame_ortho.astype(np.float32)
+                    ortho_ds = data_grp["ortho_visual"]
+                    ortho_fill = ortho_ds.attrs.get("_FillValue", ortho_ds.attrs.get("fillvalue", getattr(ortho_ds, "fillvalue", None)))
+                    if ortho_fill is not None and not np.isnan(ortho_fill):
+                        valid_ortho = ~np.isclose(fo, ortho_fill, equal_nan=True) & ~np.isnan(fo)
+                    else:
+                        valid_ortho = ~np.isnan(fo)
+                    if np.any(valid_ortho):
+                        p1, p99 = np.percentile(fo[valid_ortho], (1, 99))
+                        if p99 > p1:
+                            fo[valid_ortho] = (fo[valid_ortho] - p1) / (p99 - p1)
+                    fo[~valid_ortho] = 0.0
+                    frame_ortho = np.clip(fo * 255, 0, 255).astype(np.uint8)
+
+                ds_harm_mask[global_idx, ...] = frame_mask
+                ds_harm_ortho[global_idx, ...] = frame_ortho
+
+                wavelengths = data_grp["surface_reflectance"].attrs.get("wavelengths")
+                if wavelengths is not None:
+                    wl = np.asarray(wavelengths)
+                    # Account for nanometers vs micrometers
+                    scale_wl = 1000.0 if np.nanmax(wl) < 10.0 else 1.0
+                    red_target, nir_target = 665.0, 865.0
+                    red_idx = int(np.nanargmin(np.abs(wl * scale_wl - red_target)))
+                    nir_idx = int(np.nanargmin(np.abs(wl * scale_wl - nir_target)))
+                else:
+                    if "HLSS30" in grid_name:
+                        red_idx, nir_idx = 3, 7
+                    elif "HLSL30" in grid_name:
+                        red_idx, nir_idx = 3, 4
+                    elif "TANAGER" in grid_name:
+                        red_idx, nir_idx = 59, 97
+                    else:
+                        red_idx = min(3, frame_sr.shape[0] - 1)
+                        nir_idx = min(4, frame_sr.shape[0] - 1)
+
+                ndvi = sc.calc_ndvi_frame(frame_sr, red_idx, nir_idx)
+                ds_harm_ndvi[global_idx, ...] = ndvi
+
+            if calc_baseline:
+                em, em_idx, vol_curve = process_volume_frame(eval_sr, num_endmembers)
+
+                if gw_mask is not None:
+                    em_full = np.full((sensor_dsets[grid_name]['num_bands'], num_endmembers), np.nan, dtype=np.float32)
+                    em_full[gw_mask, :] = em
+                    em_out = em_full
+                else:
+                    em_out = em
+
+                sensor_dsets[grid_name]['em'][t_local, ...] = em_out
+                sensor_dsets[grid_name]['idx'][t_local, ...] = em_idx
+                sensor_dsets[grid_name]['vol'][t_local, ...] = vol_curve
+
+                slide_map = sc.process_volume_sliding_tile(
+                    eval_sr, tile_size=tile_size, stride=1, num_endmembers=num_endmembers,
+                    apply_spatial_smoothing=apply_spatial_smoothing
+                )
+                ds_harm_slide[global_idx, ...] = slide_map
+
+                z_map, global_mean, global_std = sc.calculate_global_z_score(slide_map, valid_mask)
+                ds_harm_z[global_idx, ...] = z_map
+
+                global_means_list.append(global_mean)
+                global_stds_list.append(global_std)
+
+            if calc_3d:
+                # 3D equivalent volume (OSDprodnormalized extracting 20 endmembers with 1% delta reflectance stopping rule)
+                slide_map_3d = sc.process_volume_3d_sliding_tile(
+                    eval_sr, tile_size=tile_size, stride=1, num_endmembers=20, separability_threshold=0.01,
+                    apply_spatial_smoothing=apply_spatial_smoothing
+                )
+                ds_harm_3d[global_idx, ...] = slide_map_3d
+
+                z_map_3d, global_mean_3d, global_std_3d = sc.calculate_global_z_score(slide_map_3d, valid_mask)
+                ds_harm_3d_z[global_idx, ...] = z_map_3d
+
+                global_means_3d_list.append(global_mean_3d)
+                global_stds_3d_list.append(global_std_3d)
 
             duration = time.perf_counter() - t_start_frame
             print(f"  [{global_idx + 1}/{total_frames}] {grid_name} (Global Index {global_idx}) processed in {duration:.2f}s")
@@ -475,7 +530,14 @@ def process_ard_cube(filepath, tile_size=3, num_endmembers=7, norm_param=None):
         prov_time = np.array([m['time'] for m in timeline], dtype='float64')
         prov_idx = np.array([m['local_idx'] for m in timeline], dtype='int32')
 
-        created_harm_dsets = [ds_harm_mask, ds_harm_ortho, ds_harm_slide, ds_harm_z, ds_harm_ndvi]
+        created_harm_dsets = []
+        if calc_baseline or "common_mask" not in harm_grp:
+            created_harm_dsets.extend([ds_harm_mask, ds_harm_ortho, ds_harm_ndvi])
+        if calc_baseline and ds_harm_slide is not None:
+            created_harm_dsets.extend([ds_harm_slide, ds_harm_z])
+        if calc_3d and ds_harm_3d is not None:
+            created_harm_dsets.extend([ds_harm_3d, ds_harm_3d_z])
+
         for ds in created_harm_dsets:
             ds.attrs.create('source_grid', data=prov_grid)
             ds.attrs.create('source_spacecraft', data=prov_space)
@@ -489,32 +551,54 @@ def process_ard_cube(filepath, tile_size=3, num_endmembers=7, norm_param=None):
                 ds.attrs['gram_type'] = 'minEndmember'
                 ds.attrs['num_endmembers'] = num_endmembers
                 ds.attrs['Normalization'] = norm_param if norm_param else "None"
+                ds.attrs['spatial_smoothing'] = apply_spatial_smoothing
+                ds.attrs['metric_type'] = 'spatially_averaged' if apply_spatial_smoothing else 'neighborhood_map_center'
             elif ds.name.endswith('sliding_volume_z_score'):
                 ds.attrs['description'] = "Global Spectral Complexity Z-score. ARD Masked pixels excluded from background stats."
                 ds.attrs['MASKING_APPLIED'] = True
                 ds.attrs['MASK_SOURCE'] = "HARMONIZED_common_mask"
+                ds.attrs['spatial_smoothing'] = apply_spatial_smoothing
+                ds.attrs['metric_type'] = 'spatially_averaged' if apply_spatial_smoothing else 'neighborhood_map_center'
                 ds.attrs['frame_global_means'] = np.array(global_means_list, dtype=np.float32)
                 ds.attrs['frame_global_stds'] = np.array(global_stds_list, dtype=np.float32)
+            elif ds.name.endswith('volume_map_3d'):
+                ds.attrs['description'] = f"3D-normalized equivalent volume (OSDprodnormalized) within sliding {tile_size}x{tile_size} tile"
+                ds.attrs['tile_size'] = tile_size
+                ds.attrs['sliding_stride'] = 1
+                ds.attrs['num_endmembers'] = 20
+                ds.attrs['stopping_rule'] = "1% delta reflectance (h_crit = 0.01 * sqrt(B))"
+                ds.attrs['separability_threshold'] = 0.01
+                ds.attrs['spatial_smoothing'] = apply_spatial_smoothing
+                ds.attrs['metric_type'] = 'spatially_averaged' if apply_spatial_smoothing else 'neighborhood_map_center'
+            elif ds.name.endswith('volume_map_3d_zscore'):
+                ds.attrs['description'] = "Global Z-score of 3D-normalized volume map. ARD Masked pixels excluded from background stats."
+                ds.attrs['MASKING_APPLIED'] = True
+                ds.attrs['MASK_SOURCE'] = "HARMONIZED_common_mask"
+                ds.attrs['spatial_smoothing'] = apply_spatial_smoothing
+                ds.attrs['metric_type'] = 'spatially_averaged' if apply_spatial_smoothing else 'neighborhood_map_center'
+                ds.attrs['frame_global_means'] = np.array(global_means_3d_list, dtype=np.float32)
+                ds.attrs['frame_global_stds'] = np.array(global_stds_3d_list, dtype=np.float32)
             elif ds.name.endswith('ndvi'):
                 ds.attrs['description'] = "Harmonized Normalized Difference Vegetation Index (NDVI)" 
 
-        for grid in grids:
-            dsets = sensor_dsets[grid]
-            dsets['vol'].attrs['description'] = "Full volume curve (Volume vs Endmember Count) for entire frame"
-            dsets['vol'].attrs['gram_type'] = 'minEndmember'
-            dsets['vol'].attrs['num_endmembers'] = num_endmembers
-            dsets['vol'].attrs['Normalization'] = norm_param if norm_param else "None"
+        if calc_baseline:
+            for grid in grids:
+                dsets = sensor_dsets[grid]
+                dsets['vol'].attrs['description'] = "Full volume curve (Volume vs Endmember Count) for entire frame"
+                dsets['vol'].attrs['gram_type'] = 'minEndmember'
+                dsets['vol'].attrs['num_endmembers'] = num_endmembers
+                dsets['vol'].attrs['Normalization'] = norm_param if norm_param else "None"
 
-            dsets['em'].attrs['description'] = "Endmembers extracted for frame"
-            dsets['em'].attrs['num_endmembers'] = num_endmembers
-            dsets['em'].attrs['Normalization'] = norm_param if norm_param else "None"
-            dsets['idx'].attrs['description'] = "Spatial 1D indices for extracted endmembers"
+                dsets['em'].attrs['description'] = "Endmembers extracted for frame"
+                dsets['em'].attrs['num_endmembers'] = num_endmembers
+                dsets['em'].attrs['Normalization'] = norm_param if norm_param else "None"
+                dsets['idx'].attrs['description'] = "Spatial 1D indices for extracted endmembers"
 
         t_end_pipeline = time.perf_counter()
         print(f"\nSpectral complexity in-place processing complete in {(t_end_pipeline - t_start_pipeline)/60:.2f} minutes.")
 
 
-def main(target_location=None, tile_size=3, num_endmembers=7, norm_param=None):
+def main(target_location=None, tile_size=3, num_endmembers=7, norm_param=None, metric="all", apply_spatial_smoothing=APPLY_SPATIAL_SMOOTHING):
     """CLI and top-level entry point."""
     import argparse
     import yaml
@@ -527,6 +611,9 @@ def main(target_location=None, tile_size=3, num_endmembers=7, norm_param=None):
         parser.add_argument("--tile-size", type=int, default=3, help="Sliding window tile size")
         parser.add_argument("--num-endmembers", type=int, default=7, help="Number of endmembers to extract")
         parser.add_argument("--norm-param", type=str, default=None, help="Normalization parameter (default None)")
+        parser.add_argument("--metric", type=str, default="all", choices=["all", "3d", "baseline"], help="Metric to calculate: all, 3d, or baseline")
+        parser.add_argument("--spatial-smoothing", dest="spatial_smoothing", action="store_true", default=None, help="Enable legacy 3x3 uniform filter spatial averaging")
+        parser.add_argument("--no-spatial-smoothing", dest="spatial_smoothing", action="store_false", help="Bypass spatial averaging and use direct neighborhood_map (default)")
         args, _ = parser.parse_known_args()
         file_path = args.file
         if args.location:
@@ -534,6 +621,10 @@ def main(target_location=None, tile_size=3, num_endmembers=7, norm_param=None):
         tile_size = args.tile_size
         num_endmembers = args.num_endmembers
         norm_param = args.norm_param
+        if args.metric:
+            metric = args.metric
+        if args.spatial_smoothing is not None:
+            apply_spatial_smoothing = args.spatial_smoothing
 
     if not file_path:
         if target_location is not None:
@@ -569,7 +660,7 @@ def main(target_location=None, tile_size=3, num_endmembers=7, norm_param=None):
             pass
 
     if file_path and os.path.exists(file_path):
-        process_ard_cube(file_path, tile_size=tile_size, num_endmembers=num_endmembers, norm_param=norm_param)
+        process_ard_cube(file_path, tile_size=tile_size, num_endmembers=num_endmembers, norm_param=norm_param, metric=metric, apply_spatial_smoothing=apply_spatial_smoothing)
     else:
         print(f"Target file not found or no file selected: {file_path}. Exiting.")
 

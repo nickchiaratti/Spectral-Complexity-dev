@@ -32,13 +32,15 @@ from pathlib import Path
 _script_dir = Path(__file__).resolve().parent
 _repo_root = _script_dir.parent
 for _p in [
-    _repo_root,
-    _repo_root / "change_detection" / "SC-CCM",
     _repo_root / "change_detection" / "pyccd",
+    _repo_root / "change_detection" / "SC-CCM",
+    _repo_root,
     _script_dir,
 ]:
-    if str(_p) not in sys.path:
-        sys.path.insert(0, str(_p))
+    p_str = str(_p)
+    while p_str in sys.path:
+        sys.path.remove(p_str)
+    sys.path.insert(0, p_str)
 
 import os
 import sys
@@ -46,6 +48,7 @@ import gc
 import math
 import time
 import datetime
+import argparse
 from pathlib import Path
 import h5py
 import numpy as np
@@ -86,6 +89,8 @@ BORDER_MARGIN = 2
 TILE_SIZE = 3
 SLIDING_STRIDE = 1
 NUM_ENDMEMBERS = 7
+NUM_ENDMEMBERS_3D = 20
+DEFAULT_TARGET_METRIC = "volume_map_3d_zscore"
 
 # Land-Cover Stratified Patches (13x13 chips with 100% clean baseline in inner 9x9 region)
 LAND_COVER_PATCHES = [
@@ -443,20 +448,34 @@ def get_dataset_metadata(ds):
     return fill_val, scale
 
 
-def extract_baseline_chips(h5_file):
+def extract_baseline_chips(h5_file, target_metric=None):
     """
     Extracts the unperturbed 9x9 time series for each of the 4 patches across sensors.
     Dynamically identifies scale_factor and _FillValue attributes from each dataset without assumed defaults.
     """
-    print(f"\n[Step 1] Extracting unperturbed {PATCH_SIZE}x{PATCH_SIZE} baseline chips from master scene...")
+    harm_field_path = "/HDFEOS/GRIDS/HARMONIZED/Data Fields"
+    if harm_field_path in h5_file:
+        harm_grp = h5_file[harm_field_path]
+        if target_metric is None:
+            if "volume_map_3d_zscore" in harm_grp:
+                target_metric = "volume_map_3d_zscore"
+            elif "sliding_volume_z_score" in harm_grp:
+                target_metric = "sliding_volume_z_score"
+            else:
+                target_metric = DEFAULT_TARGET_METRIC
+    else:
+        if target_metric is None:
+            target_metric = DEFAULT_TARGET_METRIC
+
+    print(f"\n[Step 1] Extracting unperturbed {PATCH_SIZE}x{PATCH_SIZE} baseline chips from master scene (metric: {target_metric})...")
 
     # 1. Verify presence of dataset produced by HLST_SC_calculations.py
-    harm_field_path = "/HDFEOS/GRIDS/HARMONIZED/Data Fields"
-    if harm_field_path not in h5_file or "sliding_volume_z_score" not in h5_file[harm_field_path]:
+    if harm_field_path not in h5_file or target_metric not in h5_file[harm_field_path]:
         raise RuntimeError(
-            f"Baseline Harmonized Spectral Complexity dataset '{harm_field_path}/sliding_volume_z_score' "
+            f"Harmonized Spectral Complexity dataset '{harm_field_path}/{target_metric}' "
+            f"(or 'sliding_volume_z_score') "
             f"not found in master container '{getattr(h5_file, 'filename', MASTER_H5_PATH)}'. "
-            f"Please run HLST_SC_calculations.py first to compute baseline spectral complexity metrics."
+            f"Please run HLST_SC_calculations.py first to compute spectral complexity metrics."
         )
 
     # 2. Verify presence of baseline SC-CCD dataset produced by harmonized_CCD_main.py
@@ -482,7 +501,7 @@ def extract_baseline_chips(h5_file):
     s30_grp = h5_file["/HDFEOS/GRIDS/HLSS30/Data Fields"]
     tan_grp = h5_file.get("/HDFEOS/GRIDS/TANAGER/Data Fields")
 
-    harm_z_ds = harm_grp["sliding_volume_z_score"]
+    harm_z_ds = harm_grp[target_metric]
     harm_cm_ds = harm_grp["common_mask"]
     l30_sr_ds = l30_grp["surface_reflectance"]
     l30_fm_ds = l30_grp["Fmask"]
@@ -579,6 +598,7 @@ def extract_baseline_chips(h5_file):
     chips["BASELINE_PYCCD"] = baseline_pyccd
 
     metadata = {
+        "target_metric": target_metric,
         "harm_acq_times": harm_z_ds.attrs["acquisition_time"][:],
         "harm_source_grid": np.array([g.decode() if isinstance(g, bytes) else str(g) for g in harm_z_ds.attrs["source_grid"]]),
         "harm_source_idx": harm_z_ds.attrs["source_frame_index"][:],
@@ -667,7 +687,7 @@ def load_all_target_spectra(splib_base=SPLIB_BASE, tanager_wavelengths=None):
 # ==============================================================================
 # STEP 2 & 3: SIMULATE SPECTRAL COMPLEXITY CUBES (BATCHED SLIDING VOLUME)
 # ==============================================================================
-def simulate_spectral_complexity_cubes(chips, metadata, target_spectra, onset_ts):
+def simulate_spectral_complexity_cubes(chips, metadata, target_spectra, onset_ts, target_metric=DEFAULT_TARGET_METRIC):
     """
     Computes 9x9 sliding volume Gramian complexity across all perturbation conditions.
     Utilizes high-throughput batched sliding-window volume unmixing via SpecComplexTorch (GPU)
@@ -677,7 +697,7 @@ def simulate_spectral_complexity_cubes(chips, metadata, target_spectra, onset_ts
     num_fractions = len(MIXTURE_FRACTIONS)
     num_conditions = num_materials * num_fractions
 
-    print(f"\n[Step 2 & 3] Simulating Spectral Complexity Z-scores across {num_conditions} conditions...")
+    print(f"\n[Step 2 & 3] Simulating Spectral Complexity Z-scores across {num_conditions} conditions (metric: {target_metric})...")
 
     harm_acq_times = metadata["harm_acq_times"]
     source_grid = metadata["harm_source_grid"]
@@ -735,9 +755,14 @@ def simulate_spectral_complexity_cubes(chips, metadata, target_spectra, onset_ts
             else:
                 eval_sr = flt_sr
 
-            vol_maps = sc.process_volume_sliding_tile_batch(
-                eval_sr, tile_size=TILE_SIZE, stride=SLIDING_STRIDE, num_endmembers=NUM_ENDMEMBERS
-            )
+            if target_metric == "volume_map_3d_zscore":
+                vol_maps = sc.process_volume_3d_sliding_tile_batch(
+                    eval_sr, tile_size=TILE_SIZE, stride=SLIDING_STRIDE, num_endmembers=NUM_ENDMEMBERS_3D, separability_threshold=0.01
+                )
+            else:
+                vol_maps = sc.process_volume_sliding_tile_batch(
+                    eval_sr, tile_size=TILE_SIZE, stride=SLIDING_STRIDE, num_endmembers=NUM_ENDMEMBERS
+                )
             valid_masks = (chips["HARMONIZED_common_mask"][:, t] == 0)
             z_maps, _, _ = sc.calculate_global_z_score_batch(
                 vol_maps,
@@ -828,9 +853,14 @@ def simulate_spectral_complexity_cubes(chips, metadata, target_spectra, onset_ts
 
                 n_p, n_l8, n_b, H, W = inj_l8.shape
                 b_l8 = inj_l8.reshape(n_p * n_l8, n_b, H, W)
-                v_l8 = sc.process_volume_sliding_tile_batch(
-                    b_l8, tile_size=TILE_SIZE, stride=SLIDING_STRIDE, num_endmembers=NUM_ENDMEMBERS
-                )
+                if target_metric == "volume_map_3d_zscore":
+                    v_l8 = sc.process_volume_3d_sliding_tile_batch(
+                        b_l8, tile_size=TILE_SIZE, stride=SLIDING_STRIDE, num_endmembers=NUM_ENDMEMBERS_3D, separability_threshold=0.01
+                    )
+                else:
+                    v_l8 = sc.process_volume_sliding_tile_batch(
+                        b_l8, tile_size=TILE_SIZE, stride=SLIDING_STRIDE, num_endmembers=NUM_ENDMEMBERS
+                    )
                 v_l8 = v_l8.reshape(n_p, n_l8, H, W)
 
                 m_exp = means_l8[np.newaxis, :, np.newaxis, np.newaxis]
@@ -852,9 +882,14 @@ def simulate_spectral_complexity_cubes(chips, metadata, target_spectra, onset_ts
 
                 n_p, n_s2, n_b, H, W = inj_s2.shape
                 b_s2 = inj_s2.reshape(n_p * n_s2, n_b, H, W)
-                v_s2 = sc.process_volume_sliding_tile_batch(
-                    b_s2, tile_size=TILE_SIZE, stride=SLIDING_STRIDE, num_endmembers=NUM_ENDMEMBERS
-                )
+                if target_metric == "volume_map_3d_zscore":
+                    v_s2 = sc.process_volume_3d_sliding_tile_batch(
+                        b_s2, tile_size=TILE_SIZE, stride=SLIDING_STRIDE, num_endmembers=NUM_ENDMEMBERS_3D, separability_threshold=0.01
+                    )
+                else:
+                    v_s2 = sc.process_volume_sliding_tile_batch(
+                        b_s2, tile_size=TILE_SIZE, stride=SLIDING_STRIDE, num_endmembers=NUM_ENDMEMBERS
+                    )
                 v_s2 = v_s2.reshape(n_p, n_s2, H, W)
 
                 m_exp = means_s2[np.newaxis, :, np.newaxis, np.newaxis]
@@ -876,9 +911,14 @@ def simulate_spectral_complexity_cubes(chips, metadata, target_spectra, onset_ts
 
                 n_p, n_tan, n_b, H, W = inj_tan.shape
                 b_tan = inj_tan.reshape(n_p * n_tan, n_b, H, W)
-                v_tan = sc.process_volume_sliding_tile_batch(
-                    b_tan, tile_size=TILE_SIZE, stride=SLIDING_STRIDE, num_endmembers=NUM_ENDMEMBERS
-                )
+                if target_metric == "volume_map_3d_zscore":
+                    v_tan = sc.process_volume_3d_sliding_tile_batch(
+                        b_tan, tile_size=TILE_SIZE, stride=SLIDING_STRIDE, num_endmembers=NUM_ENDMEMBERS_3D, separability_threshold=0.01
+                    )
+                else:
+                    v_tan = sc.process_volume_sliding_tile_batch(
+                        b_tan, tile_size=TILE_SIZE, stride=SLIDING_STRIDE, num_endmembers=NUM_ENDMEMBERS
+                    )
                 v_tan = v_tan.reshape(n_p, n_tan, H, W)
 
                 m_exp = means_tan[np.newaxis, :, np.newaxis, np.newaxis]
@@ -1437,18 +1477,21 @@ def run_pyccd_benchmark(chips, metadata, target_spectra, onset_ts, baseline_pycc
 # ==============================================================================
 def save_benchmark_to_hdf5(h5_file, chips, metadata, target_spectra, sim_z_cubes, scccd_table, pyccd_table,
                            scccd_spatial=None, pyccd_spatial=None,
-                           scccd_segments=None, pyccd_segments=None):
+                           scccd_segments=None, pyccd_segments=None,
+                           target_metric=DEFAULT_TARGET_METRIC, group_name=None):
     """
-    Writes the complete /STRATIFIED_CHIP_BENCHMARK/ hierarchy to the master HDF5 container.
+    Writes the complete benchmark hierarchy to the master HDF5 container.
     """
-    print("\n[Step 6] Saving /STRATIFIED_CHIP_BENCHMARK/ group to master HDF5 file...")
+    if group_name is None:
+        group_name = "/STRATIFIED_CHIP_BENCHMARK_3D" if target_metric == "volume_map_3d_zscore" else "/STRATIFIED_CHIP_BENCHMARK"
+    print(f"\n[Step 6] Saving '{group_name}' group to master HDF5 file (metric: {target_metric})...")
 
-    group_name = "/STRATIFIED_CHIP_BENCHMARK"
     if group_name in h5_file:
         print(f"Overwriting existing '{group_name}' group...")
         del h5_file[group_name]
 
     base_grp = h5_file.create_group(group_name)
+    base_grp.attrs["target_metric"] = target_metric
 
     # 1. METADATA Subgroup
     meta_grp = base_grp.create_group("METADATA")
@@ -1601,7 +1644,7 @@ def save_benchmark_to_hdf5(h5_file, chips, metadata, target_spectra, sim_z_cubes
     # 3. SIMULATED_CUBES Subgroup (Stored as native float32 with gzip level 6)
     sim_grp = base_grp.create_group("SIMULATED_CUBES")
     sim_ds = sim_grp.create_dataset(
-        "sliding_volume_z_score",
+        target_metric,
         data=sim_z_cubes,
         dtype=sim_z_cubes.dtype,
         fillvalue=np.nan,
@@ -1609,8 +1652,9 @@ def save_benchmark_to_hdf5(h5_file, chips, metadata, target_spectra, sim_z_cubes
         compression_opts=1,
         chunks=(1, 1, min(sim_z_cubes.shape[2], 128), PATCH_SIZE, PATCH_SIZE),
     )
+    metric_desc = "Simulated 3D Equivalent Spectral Complexity Z-scores" if target_metric == "volume_map_3d_zscore" else "Simulated Gramian Spectral Complexity Z-scores"
     sim_ds.attrs["_FillValue"] = np.nan
-    sim_ds.attrs["description"] = "Simulated Gramian Spectral Complexity Z-scores under 50 perturbation conditions"
+    sim_ds.attrs["description"] = f"{metric_desc} under 50 perturbation conditions"
 
     # 4. RESULTS Subgroup
     res_grp = base_grp.create_group("RESULTS")
@@ -1640,7 +1684,7 @@ def save_benchmark_to_hdf5(h5_file, chips, metadata, target_spectra, sim_z_cubes
                 chunks=(1, 1, PATCH_SIZE, PATCH_SIZE),
             )
 
-    print(f"Successfully committed /STRATIFIED_CHIP_BENCHMARK/ to {MASTER_H5_PATH}.")
+    print(f"Successfully committed {group_name} to {getattr(h5_file, 'filename', MASTER_H5_PATH)}.")
 
 
 # ==============================================================================
@@ -1737,10 +1781,20 @@ def print_performance_summary(scccd_table, pyccd_table):
 # MAIN PIPELINE ENTRY POINT
 # ==============================================================================
 def main():
+    parser = argparse.ArgumentParser(description="Land-cover stratified patches benchmark pipeline.")
+    parser.add_argument("--file", type=str, default=MASTER_H5_PATH, help="Path to master HDF5 container")
+    parser.add_argument("--metric", type=str, default=DEFAULT_TARGET_METRIC, choices=["volume_map_3d_zscore", "sliding_volume_z_score"], help="Spectral complexity metric to benchmark")
+    parser.add_argument("--group-name", type=str, default=None, help="HDF5 group name to save benchmark to")
+    args = parser.parse_args()
+
+    h5_path = args.file
+    target_metric = args.metric
+    group_name = args.group_name
+
     t_start_total = time.perf_counter()
     print("=" * 80)
     print("LAND-COVER STRATIFIED PATCHES BENCHMARK PIPELINE")
-    print("Multi-Sensor Semi-Empirical Target Injection (SC-CCD vs. USGS PyCCD)")
+    print(f"Multi-Sensor Semi-Empirical Target Injection (SC-CCD vs. USGS PyCCD) [metric: {target_metric}]")
     print("=" * 80)
 
     # 1. Parse onset timestamp
@@ -1749,8 +1803,8 @@ def main():
     print(f"Injection onset date: {INJECTION_ONSET_DATE} (timestamp: {onset_ts:.0f})")
 
     # 2. Open Master HDF5 Container
-    print(f"Opening master container: {MASTER_H5_PATH}")
-    with h5py.File(MASTER_H5_PATH, "r+", locking=False) as h5_file:
+    print(f"Opening master container: {h5_path}")
+    with h5py.File(h5_path, "r+", locking=False) as h5_file:
         # Load Tanager wavelengths if available
         tanager_wl = None
         if "/HDFEOS/GRIDS/TANAGER/Data Fields/surface_reflectance" in h5_file:
@@ -1762,10 +1816,10 @@ def main():
         print(f"Successfully prepared {len(target_spectra)} target spectra.")
 
         # Step 1: Extract baseline chips and metadata
-        chips, metadata = extract_baseline_chips(h5_file)
+        chips, metadata = extract_baseline_chips(h5_file, target_metric=target_metric)
 
         # Step 2 & 3: Simulate Spectral Complexity Z-scores on GPU
-        sim_z_cubes, unperturbed_z = simulate_spectral_complexity_cubes(chips, metadata, target_spectra, onset_ts)
+        sim_z_cubes, unperturbed_z = simulate_spectral_complexity_cubes(chips, metadata, target_spectra, onset_ts, target_metric=target_metric)
         chips["HARMONIZED_z_score"] = unperturbed_z
 
         # Step 4: Run Harmonized SC-CCD break detection (full 9x9 patch across time to evaluate neighbor effects)
@@ -1778,7 +1832,8 @@ def main():
         save_benchmark_to_hdf5(
             h5_file, chips, metadata, target_spectra, sim_z_cubes, scccd_table, pyccd_table,
             scccd_spatial=scccd_spatial, pyccd_spatial=pyccd_spatial,
-            scccd_segments=scccd_segments, pyccd_segments=pyccd_segments
+            scccd_segments=scccd_segments, pyccd_segments=pyccd_segments,
+            target_metric=target_metric, group_name=group_name
         )
 
     # Step 7: Print quantitative summary

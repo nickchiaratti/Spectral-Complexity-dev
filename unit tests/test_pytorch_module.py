@@ -345,6 +345,62 @@ def test_process_volume_sliding_tile_outliers_and_nans():
     assert final_map.shape == (height, width)
 
 
+def test_process_volume_sliding_tile_smoothing_toggle():
+    """Verify that apply_spatial_smoothing=False returns raw neighborhood_map directly."""
+    bands, height, width = 4, 15, 15
+    np.random.seed(42)
+    data = np.random.uniform(0.1, 0.8, size=(bands, height, width)).astype(np.float32)
+
+    # 1. Spatially smoothed (legacy behavior)
+    smoothed, neigh_ref = sct.process_volume_sliding_tile(
+        data, tile_size=3, stride=1, num_endmembers=3, device='cpu', return_neighborhood=True,
+        apply_spatial_smoothing=True
+    )
+
+    # 2. Unsmoothed direct neighborhood_map
+    unsmoothed = sct.process_volume_sliding_tile(
+        data, tile_size=3, stride=1, num_endmembers=3, device='cpu',
+        apply_spatial_smoothing=False
+    )
+
+    # Unsmoothed map must exactly match the raw neighborhood_map
+    np.testing.assert_allclose(unsmoothed, neigh_ref, rtol=1e-5, atol=1e-7,
+                               err_msg="Unsmoothed map does not match neighborhood_map")
+
+    # Smoothed map must differ from unsmoothed map (due to uniform filter averaging)
+    valid_inner = np.isfinite(unsmoothed[2:-2, 2:-2])
+    assert not np.allclose(smoothed[2:-2, 2:-2][valid_inner], unsmoothed[2:-2, 2:-2][valid_inner])
+
+    # 3. CPU Reference parity (SpecComplex)
+    import SpecComplex as sc_cpu
+    cpu_unsmoothed = sc_cpu.process_volume_sliding_tile(
+        data, tile_size=3, stride=1, num_endmembers=3,
+        apply_spatial_smoothing=False
+    )
+    np.testing.assert_allclose(unsmoothed, cpu_unsmoothed, rtol=1e-4, atol=1e-6,
+                               err_msg="CPU SpecComplex and SpecComplexTorch unsmoothed outputs differ")
+
+
+def test_process_volume_3d_sliding_tile_smoothing_toggle():
+    """Verify that process_volume_3d_sliding_tile respects apply_spatial_smoothing=False."""
+    bands, height, width = 6, 12, 12
+    np.random.seed(123)
+    data = np.random.uniform(0.05, 0.6, size=(bands, height, width)).astype(np.float32)
+
+    unsmoothed_3d = sct.process_volume_3d_sliding_tile(
+        data, tile_size=3, stride=1, num_endmembers=10, separability_threshold=0.01,
+        device='cpu', apply_spatial_smoothing=False
+    )
+    smoothed_3d, neigh_3d = sct.process_volume_3d_sliding_tile(
+        data, tile_size=3, stride=1, num_endmembers=10, separability_threshold=0.01,
+        device='cpu', return_neighborhood=True, apply_spatial_smoothing=True
+    )
+
+    assert unsmoothed_3d.shape == (height, width)
+    np.testing.assert_allclose(unsmoothed_3d, neigh_3d, rtol=1e-5, atol=1e-7,
+                               err_msg="3D unsmoothed map does not match neighborhood_map")
+
+
 # ==============================================================================
 # 7. calculate_global_z_score Function Tests
 # ==============================================================================
