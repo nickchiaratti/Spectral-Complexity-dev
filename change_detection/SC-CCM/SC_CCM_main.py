@@ -53,6 +53,8 @@ os.environ["OPENBLAS_NUM_THREADS"] = "1"
 os.environ["MKL_NUM_THREADS"] = "1"
 
 import math
+import time
+import gc
 import multiprocessing
 import contextlib
 import h5py
@@ -173,6 +175,10 @@ TEMPORAL_PERIODS = [0.33, 0.5, 1]
 # Recursive Least Squares Tuning
 RLS_RIDGE_PENALTY = 1e-6
 RLS_FORGETTING_FACTOR = 0.999
+
+# Streaming Block Execution Parameters
+BLOCK_SIZE_ROWS = 64    # Streaming block size (rows) written directly to HDF5
+WORKER_CHUNK_ROWS = 8   # Rows per parallel worker task
 
 # ==========================================
 #  DATA INGESTION & SCALING
@@ -608,7 +614,8 @@ def _process_row_chunk(chunk_args):
         chunk_coef,
         chunk_flags,
         chunk_date,
-        chunk_count
+        chunk_count,
+        chunk_segments
     )
 
 
@@ -626,20 +633,28 @@ def main(enable_const=ENABLE_CONSTANT,
          h5_path=None,
          output_h5=None,
          n_jobs=None,
-         chunk_size=1,
+         chunk_size=None,
+         block_size=BLOCK_SIZE_ROWS,
+         worker_chunk_rows=WORKER_CHUNK_ROWS,
+         resume=True,
+         overwrite=False,
          launch_vis=False,
-         row_start=0,
+         row_start=None,
          row_end=None,
-         col_start=0,
+         col_start=None,
          col_end=None,
          **kwargs):
     """
     Main driver for continuous change detection regression analysis.
+    Implements streaming block execution to keep system RAM footprint bounded.
     """
     if temporal_periods is None:
         temporal_periods = TEMPORAL_PERIODS
 
     min_samples = MIN_SAMPLES
+
+    if chunk_size is not None and chunk_size > 0:
+        worker_chunk_rows = chunk_size
 
     target_name, target_short_name, metric_key, group_prefix, is_inj = resolve_metric_naming(target_metric, injected=injected)
     group_name = output_group if output_group is not None else f"{group_prefix}CCD_Results"
@@ -657,7 +672,7 @@ def main(enable_const=ENABLE_CONSTANT,
     if output_h5 is None:
         output_h5 = h5_path
 
-    print(f"Loading data from {h5_path}...")
+    print(f"Inspecting metadata from {h5_path}...")
     with h5py.File(h5_path, 'r') as f:
         data_grp = f['/HDFEOS/GRIDS/HARMONIZED/Data Fields']
         metric_ds = _resolve_metric_dataset(data_grp, target_metric, metric_key, is_inj)
@@ -671,26 +686,35 @@ def main(enable_const=ENABLE_CONSTANT,
         elif acq_times is None and 'acquisition_time' in f.attrs:
             acq_times = f.attrs['acquisition_time']
 
-        if acq_times is not None:
-            acq_times = np.array(acq_times[:], dtype=np.float64)
+        if acq_times is None:
+            raise KeyError(
+                f"Mandatory 'acquisition_time' attribute not found for dataset '{metric_ds.name}' "
+                "or parent container. Cannot construct harmonic temporal matrix without timestamps."
+            )
 
-        r_slice = slice(row_start, row_end)
-        c_slice = slice(col_start, col_end)
-
-        y_data = read_scaled_dataset(metric_ds, r_slice=r_slice, c_slice=c_slice)
-        common_mask = data_grp['common_mask'][:, r_slice, c_slice]
-        valid_mask = (common_mask == 0) & ~np.isnan(y_data)
-
+        acq_times = np.array(acq_times[:], dtype=np.float64)
         geo_transform = metric_ds.attrs.get('GeoTransform', f.attrs.get('GeoTransform'))
         spatial_ref = metric_ds.attrs.get('spatial_ref', f.attrs.get('spatial_ref'))
 
-    num_frames, height, width = y_data.shape
+        full_num_frames, full_height, full_width = metric_ds.shape
 
-    if acq_times is None:
-        raise KeyError(
-            f"Mandatory 'acquisition_time' attribute not found for dataset '{metric_ds.name}' "
-            "or parent container. Cannot construct harmonic temporal matrix without timestamps."
-        )
+        y0 = 0 if row_start is None else max(0, row_start)
+        y1 = full_height if row_end is None else min(full_height, row_end)
+        x0 = 0 if col_start is None else max(0, col_start)
+        x1 = full_width if col_end is None else min(full_width, col_end)
+
+        height = y1 - y0
+        width = x1 - x0
+
+    if block_size is None or block_size <= 0:
+        block_size = BLOCK_SIZE_ROWS
+    if block_size > height:
+        block_size = max(1, height)
+
+    if worker_chunk_rows is None or worker_chunk_rows <= 0:
+        worker_chunk_rows = WORKER_CHUNK_ROWS
+    if worker_chunk_rows > block_size:
+        worker_chunk_rows = block_size
 
     frac_years = extract_fractional_years(acq_times)
 
@@ -698,16 +722,9 @@ def main(enable_const=ENABLE_CONSTANT,
     sort_idx = np.argsort(acq_times)
     acq_times = acq_times[sort_idx]
     frac_years = frac_years[sort_idx]
-    y_data = y_data[sort_idx, ...]
-    valid_mask = valid_mask[sort_idx, ...]
+    num_frames = len(acq_times)
 
-    print(f"Dataset shape: {num_frames} frames, {height}x{width} pixels")
-
-    change_date_map = np.full((height, width), np.nan, dtype=np.float64)
-    change_count_map = np.zeros((height, width), dtype=np.int32)
-    predicted_series = np.full((num_frames, height, width), np.nan, dtype=np.float32)
-    rmse_series = np.full((num_frames, height, width), np.nan, dtype=np.float32)
-    anomaly_flags = np.zeros((num_frames, height, width), dtype=np.uint8)
+    print(f"Target grid: {num_frames} frames, processing {height}x{width} pixels (rows {y0}:{y1}, cols {x0}:{x1})")
 
     X_full = build_harmonic_matrix(
         frac_years,
@@ -716,98 +733,211 @@ def main(enable_const=ENABLE_CONSTANT,
         enable_lin=enable_lin,
         enable_quad=enable_quad
     )
-
     num_features = X_full.shape[1]
-    coef_series = np.full((num_frames, height, width, num_features), np.nan, dtype=np.float32)
-
-    print("\nExecuting Sliding Window LASSO Harmonic Regression...")
 
     if n_jobs is None:
         n_jobs = min(8, multiprocessing.cpu_count())
-    print(f"Using {n_jobs} cores for parallel processing.")
+    print(f"Execution parameters: {n_jobs} cores | {block_size}-row streaming blocks | {worker_chunk_rows}-row worker chunks")
 
-    num_chunks = max(1, math.ceil(height / chunk_size))
-    chunks = []
-    for y_start in range(0, height, chunk_size):
-        y_end = min(y_start + chunk_size, height)
-        chunk_args = (
-            y_start, y_end, width,
-            y_data[:, y_start:y_end, :], valid_mask[:, y_start:y_end, :],
-            frac_years, X_full, acq_times,
-            min_samples, CHANGE_PROBABILITY, CONSECUTIVE_ANOMALIES
-        )
-        chunks.append(chunk_args)
-
-    if n_jobs > 1 and len(chunks) > 1:
-        results = Parallel(n_jobs=n_jobs, backend='loky', return_as='generator')(
-            delayed(_process_row_chunk)(chunk) for chunk in chunks
-        )
-        for res in tqdm(results, total=len(chunks), desc="Processing row chunks"):
-            y_start, y_end, c_pred, c_rmse, c_coef, c_flags, c_date, c_count = res[:8]
-            predicted_series[:, y_start:y_end, :] = c_pred
-            rmse_series[:, y_start:y_end, :] = c_rmse
-            coef_series[:, y_start:y_end, :, :] = c_coef
-            anomaly_flags[:, y_start:y_end, :] = c_flags
-            change_date_map[y_start:y_end, :] = c_date
-            change_count_map[y_start:y_end, :] = c_count
-    else:
-        for chunk in tqdm(chunks, desc="Processing row chunks"):
-            res = _process_row_chunk(chunk)
-            y_start, y_end, c_pred, c_rmse, c_coef, c_flags, c_date, c_count = res[:8]
-            predicted_series[:, y_start:y_end, :] = c_pred
-            rmse_series[:, y_start:y_end, :] = c_rmse
-            coef_series[:, y_start:y_end, :, :] = c_coef
-            anomaly_flags[:, y_start:y_end, :] = c_flags
-            change_date_map[y_start:y_end, :] = c_date
-            change_count_map[y_start:y_end, :] = c_count
-
-    print(f"\nSaving Results directly to {output_h5} -> group '{group_name}'...")
+    needs_creation = True
     with h5py.File(output_h5, 'a') as out_file:
         if group_name in out_file:
-            del out_file[group_name]
-        ccd_grp = out_file.create_group(group_name)
+            if overwrite or not resume:
+                del out_file[group_name]
+            else:
+                existing_grp = out_file[group_name]
+                exp_3d = (num_frames, height, width)
+                exp_2d = (height, width)
+                if ('predicted_series' in existing_grp and 'change_date_timestamp' in existing_grp and
+                        existing_grp['predicted_series'].shape == exp_3d and
+                        existing_grp['change_date_timestamp'].shape == exp_2d):
+                    needs_creation = False
+                    print(f"Target group '{group_name}' already exists with matching grid schema. Resuming existing progress...")
+                else:
+                    del out_file[group_name]
 
-        if spatial_ref is not None:
-            ccd_grp.attrs['spatial_ref'] = spatial_ref
-            out_file.attrs['spatial_ref'] = spatial_ref
-        if geo_transform is not None:
-            ccd_grp.attrs['GeoTransform'] = geo_transform
-            out_file.attrs['GeoTransform'] = geo_transform
+        if needs_creation:
+            print(f"Initializing chunked datasets in {output_h5} -> group '{group_name}'...")
+            ccd_grp = out_file.create_group(group_name)
 
-        ccd_grp.attrs['CHANGE_PROBABILITY'] = CHANGE_PROBABILITY
-        ccd_grp.attrs['CONSECUTIVE_ANOMALIES'] = CONSECUTIVE_ANOMALIES
-        ccd_grp.attrs['CHI2_DEGREES_OF_FREEDOM'] = CHI2_DEGREES_OF_FREEDOM
-        ccd_grp.attrs['MAX_RMSE'] = MAX_RMSE
-        ccd_grp.attrs['MIN_RMSE_CLAMP'] = MIN_RMSE_CLAMP
-        ccd_grp.attrs['MIN_YEARS_FOR_INIT'] = MIN_YEARS_FOR_INIT
-        ccd_grp.attrs['MIN_SAMPLES'] = min_samples
-        ccd_grp.attrs['TEMPORAL_PERIODS'] = temporal_periods
-        ccd_grp.attrs['ENABLE_CONSTANT'] = enable_const
-        ccd_grp.attrs['ENABLE_LINEAR'] = enable_lin
-        ccd_grp.attrs['ENABLE_QUADRATIC'] = enable_quad
-        ccd_grp.attrs['TARGET_METRIC'] = metric_key
-        ccd_grp.attrs['TARGET_SHORT_NAME'] = target_short_name
-        ccd_grp.attrs['TARGET_NAME'] = target_name
-        ccd_grp.attrs['SOURCE_DATA'] = h5_path
-        ccd_grp.attrs['acquisition_time'] = acq_times
+            if spatial_ref is not None:
+                ccd_grp.attrs['spatial_ref'] = spatial_ref
+                out_file.attrs['spatial_ref'] = spatial_ref
+            if geo_transform is not None:
+                gt = list(geo_transform)
+                if x0 > 0 or y0 > 0:
+                    gt[0] += x0 * gt[1]
+                    gt[3] += y0 * gt[5]
+                ccd_grp.attrs['GeoTransform'] = gt
+                out_file.attrs['GeoTransform'] = gt
 
-        out_file.attrs['CHANGE_PROBABILITY'] = CHANGE_PROBABILITY
-        out_file.attrs['CONSECUTIVE_ANOMALIES'] = CONSECUTIVE_ANOMALIES
-        out_file.attrs['CHI2_DEGREES_OF_FREEDOM'] = CHI2_DEGREES_OF_FREEDOM
-        out_file.attrs['TARGET_METRIC'] = metric_key
+            ccd_grp.attrs['CHANGE_PROBABILITY'] = CHANGE_PROBABILITY
+            ccd_grp.attrs['CONSECUTIVE_ANOMALIES'] = CONSECUTIVE_ANOMALIES
+            ccd_grp.attrs['CHI2_DEGREES_OF_FREEDOM'] = CHI2_DEGREES_OF_FREEDOM
+            ccd_grp.attrs['MAX_RMSE'] = MAX_RMSE
+            ccd_grp.attrs['MIN_RMSE_CLAMP'] = MIN_RMSE_CLAMP
+            ccd_grp.attrs['MIN_YEARS_FOR_INIT'] = MIN_YEARS_FOR_INIT
+            ccd_grp.attrs['MIN_SAMPLES'] = min_samples
+            ccd_grp.attrs['TEMPORAL_PERIODS'] = temporal_periods
+            ccd_grp.attrs['ENABLE_CONSTANT'] = enable_const
+            ccd_grp.attrs['ENABLE_LINEAR'] = enable_lin
+            ccd_grp.attrs['ENABLE_QUADRATIC'] = enable_quad
+            ccd_grp.attrs['TARGET_METRIC'] = metric_key
+            ccd_grp.attrs['TARGET_SHORT_NAME'] = target_short_name
+            ccd_grp.attrs['TARGET_NAME'] = target_name
+            ccd_grp.attrs['SOURCE_DATA'] = h5_path
+            ccd_grp.attrs['acquisition_time'] = acq_times
 
-        for name, data, fill, dtype, opt in [
-            ('predicted_series', predicted_series, np.nan, np.float32, 1),
-            ('rmse_series', rmse_series, np.nan, np.float32, 1),
-            ('coef_series', coef_series, np.nan, np.float32, 1),
-            ('anomaly_flags', anomaly_flags, 0, np.uint8, 1),
-            ('change_date_timestamp', change_date_map, np.nan, np.float64, 1),
-            ('change_count', change_count_map, 0, np.int32, 1),
-        ]:
-            ds = ccd_grp.create_dataset(name, data=data, fillvalue=fill, shuffle=True, compression='gzip', compression_opts=opt)
-            ds.attrs['_FillValue'] = fill
-            if name not in out_file:
-                out_file[name] = ds
+            out_file.attrs['CHANGE_PROBABILITY'] = CHANGE_PROBABILITY
+            out_file.attrs['CONSECUTIVE_ANOMALIES'] = CONSECUTIVE_ANOMALIES
+            out_file.attrs['CHI2_DEGREES_OF_FREEDOM'] = CHI2_DEGREES_OF_FREEDOM
+            out_file.attrs['TARGET_METRIC'] = metric_key
+
+            if (height, width) != (full_height, full_width):
+                ccd_grp.attrs['ROI_ROWS'] = [y0, y1]
+                ccd_grp.attrs['ROI_COLS'] = [x0, x1]
+
+            chunk_3d = (min(64, num_frames), min(16, height), min(64, width))
+            chunk_4d = (min(32, num_frames), min(8, height), min(32, width), num_features)
+
+            for name, shape, fill, dtype, opt, chunks in [
+                ('predicted_series', (num_frames, height, width), np.nan, np.float32, 1, chunk_3d),
+                ('rmse_series', (num_frames, height, width), np.nan, np.float32, 1, chunk_3d),
+                ('coef_series', (num_frames, height, width, num_features), np.nan, np.float32, 1, chunk_4d),
+                ('anomaly_flags', (num_frames, height, width), 0, np.uint8, 1, chunk_3d),
+                ('change_date_timestamp', (height, width), np.nan, np.float64, 1, True),
+                ('change_count', (height, width), 0, np.int32, 1, True),
+            ]:
+                ds = ccd_grp.create_dataset(name, shape=shape, dtype=dtype, fillvalue=fill,
+                                            shuffle=True, compression='gzip', compression_opts=opt,
+                                            chunks=chunks)
+                ds.attrs['_FillValue'] = fill
+                if name not in out_file:
+                    out_file[name] = ds
+
+    total_blocks = math.ceil(height / block_size)
+    print(f"Beginning streaming execution across {total_blocks} blocks ({block_size} rows per block)...")
+    t0 = time.time()
+    total_changed_pixels = 0
+
+    with h5py.File(output_h5, 'a') as out_file:
+        ccd_grp = out_file[group_name]
+        ds_pred = ccd_grp['predicted_series']
+        ds_rmse = ccd_grp['rmse_series']
+        ds_coef = ccd_grp['coef_series']
+        ds_flags = ccd_grp['anomaly_flags']
+        ds_date = ccd_grp['change_date_timestamp']
+        ds_count = ccd_grp['change_count']
+
+        same_file = os.path.abspath(output_h5) == os.path.abspath(h5_path)
+        f_in = out_file if same_file else h5py.File(h5_path, 'r')
+        try:
+            data_grp = f_in['/HDFEOS/GRIDS/HARMONIZED/Data Fields']
+            metric_ds = _resolve_metric_dataset(data_grp, target_metric, metric_key, is_inj)
+            common_mask_ds = data_grp['common_mask']
+
+            for b_idx in range(total_blocks):
+                b_y0 = b_idx * block_size
+                b_y1 = min(b_y0 + block_size, height)
+                b_height = b_y1 - b_y0
+
+                # Check if block was already computed in a previous run (resume)
+                if resume and not needs_creation:
+                    block_check = ds_date[b_y0:b_y1, :]
+                    is_completed = (np.count_nonzero(block_check == 0.0) == 0) and np.any(np.isnan(block_check) | (block_check > 0))
+                    if is_completed:
+                        b_changed = int(np.count_nonzero(~np.isnan(block_check)))
+                        total_changed_pixels += b_changed
+                        pct_complete = (b_y1 / height) * 100.0
+                        print(f"Block {b_idx + 1:2d}/{total_blocks} (rows {b_y0:4d}:{b_y1:4d}) already completed ({pct_complete:5.1f}%) | "
+                              f"Changed pixels in block: {b_changed:4d} (Skipping to resume)")
+                        continue
+
+                # Stream-load ONLY the current spatial block from disk
+                r_slice = slice(y0 + b_y0, y0 + b_y1)
+                c_slice = slice(x0, x1)
+                y_block = read_scaled_dataset(metric_ds, r_slice=r_slice, c_slice=c_slice)
+                cm_block = common_mask_ds[:, r_slice, c_slice]
+
+                # Sort observations chronologically along time axis
+                y_block = y_block[sort_idx, ...]
+                cm_block = cm_block[sort_idx, ...]
+                valid_mask_block = (cm_block == 0) & ~np.isnan(y_block)
+
+                # Allocate block buffers
+                block_pred = np.full((num_frames, b_height, width), np.nan, dtype=np.float32)
+                block_rmse = np.full((num_frames, b_height, width), np.nan, dtype=np.float32)
+                block_coef = np.full((num_frames, b_height, width, num_features), np.nan, dtype=np.float32)
+                block_flags = np.zeros((num_frames, b_height, width), dtype=np.uint8)
+                block_date = np.full((b_height, width), np.nan, dtype=np.float64)
+                block_count = np.zeros((b_height, width), dtype=np.int32)
+
+                # Partition block into worker subchunks
+                subchunks = []
+                for sub_y0 in range(0, b_height, worker_chunk_rows):
+                    sub_y1 = min(sub_y0 + worker_chunk_rows, b_height)
+                    chunk_args = (
+                        sub_y0, sub_y1, width,
+                        np.ascontiguousarray(y_block[:, sub_y0:sub_y1, :]),
+                        np.ascontiguousarray(valid_mask_block[:, sub_y0:sub_y1, :]),
+                        frac_years, X_full, acq_times,
+                        min_samples, CHANGE_PROBABILITY, CONSECUTIVE_ANOMALIES
+                    )
+                    subchunks.append(chunk_args)
+
+                # Process block subchunks in parallel
+                if n_jobs > 1 and len(subchunks) > 1:
+                    results = Parallel(n_jobs=n_jobs, backend='loky')(
+                        delayed(_process_row_chunk)(sc) for sc in subchunks
+                    )
+                else:
+                    results = [_process_row_chunk(sc) for sc in subchunks]
+
+                # Assemble subchunks into block buffers
+                for res in results:
+                    sub_y0, sub_y1, c_pred, c_rmse, c_coef, c_flags, c_date, c_count = res[:8]
+                    block_pred[:, sub_y0:sub_y1, :] = c_pred
+                    block_rmse[:, sub_y0:sub_y1, :] = c_rmse
+                    block_coef[:, sub_y0:sub_y1, :, :] = c_coef
+                    block_flags[:, sub_y0:sub_y1, :] = c_flags
+                    block_date[sub_y0:sub_y1, :] = c_date
+                    block_count[sub_y0:sub_y1, :] = c_count
+
+                # Stream write directly into HDF5 datasets
+                ds_pred[:, b_y0:b_y1, :] = block_pred
+                ds_rmse[:, b_y0:b_y1, :] = block_rmse
+                ds_coef[:, b_y0:b_y1, :, :] = block_coef
+                ds_flags[:, b_y0:b_y1, :] = block_flags
+                ds_date[b_y0:b_y1, :] = block_date
+                ds_count[b_y0:b_y1, :] = block_count
+
+                out_file.flush()
+
+                b_changed = int(np.count_nonzero(~np.isnan(block_date)))
+                total_changed_pixels += b_changed
+                elapsed_block = time.time() - t0
+                pct_complete = (b_y1 / height) * 100.0
+                print(f"Block {b_idx + 1:2d}/{total_blocks} (rows {b_y0:4d}:{b_y1:4d}) complete ({pct_complete:5.1f}%) | "
+                      f"Changed pixels in block: {b_changed:4d} | Elapsed: {elapsed_block/60:4.1f} min")
+
+                # Explicit memory release
+                del y_block, cm_block, valid_mask_block
+                del block_pred, block_rmse, block_coef, block_flags, block_date, block_count
+                del results, subchunks
+                gc.collect()
+
+                # Recycle worker processes between blocks to eliminate C-level memory corruption and fragmentation
+                try:
+                    from joblib.externals.loky import get_reusable_executor
+                    get_reusable_executor().shutdown(wait=True)
+                except Exception:
+                    pass
+
+            total_elapsed = time.time() - t0
+            ccd_grp.attrs['ELAPSED_SECONDS'] = total_elapsed
+        finally:
+            if not same_file:
+                f_in.close()
 
     if launch_vis:
         try:
@@ -834,6 +964,16 @@ if __name__ == "__main__":
     parser.add_argument('--metric', type=str, default=TARGET_METRIC, help="Target metric")
     parser.add_argument('--injected', action='store_true', help="Run CCD on injected dataset")
     parser.add_argument('--no-vis', action='store_true', help="Skip launching visualization")
+    parser.add_argument('--block-size', type=int, default=BLOCK_SIZE_ROWS, help="Rows per streaming block written to HDF5")
+    parser.add_argument('--worker-chunk-rows', type=int, default=WORKER_CHUNK_ROWS, help="Rows per worker task")
+    parser.add_argument('--chunk-size', type=int, default=None, help="Alias for worker-chunk-rows")
+    parser.add_argument('--n-jobs', type=int, default=None, help="Number of parallel worker processes")
+    parser.add_argument('--row-start', type=int, default=None, help="Start row for ROI")
+    parser.add_argument('--row-end', type=int, default=None, help="End row for ROI")
+    parser.add_argument('--col-start', type=int, default=None, help="Start col for ROI")
+    parser.add_argument('--col-end', type=int, default=None, help="End col for ROI")
+    parser.add_argument('--no-resume', action='store_false', dest='resume', default=True, help="Disable automatic block resumption")
+    parser.add_argument('--overwrite', action='store_true', default=False, help="Overwrite existing output group")
     args = parser.parse_args()
 
     main(
@@ -842,5 +982,15 @@ if __name__ == "__main__":
         output_h5=args.output_h5,
         target_metric=args.metric,
         injected=args.injected,
-        launch_vis=not args.no_vis
+        launch_vis=not args.no_vis,
+        block_size=args.block_size,
+        worker_chunk_rows=args.worker_chunk_rows,
+        chunk_size=args.chunk_size,
+        n_jobs=args.n_jobs,
+        row_start=args.row_start,
+        row_end=args.row_end,
+        col_start=args.col_start,
+        col_end=args.col_end,
+        resume=args.resume,
+        overwrite=args.overwrite
     )

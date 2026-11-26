@@ -14,23 +14,17 @@ Serializes the multi-step processing chain with complete separation between base
     Step 6: SC_CCM_main (Harmonized Continuous Change Monitoring - Baseline) [change_detection/SC-CCM/]
     Step 7: SC_CCM_vis (Continuous Change Monitoring Spatial Visualization - Baseline) [change_detection/SC-CCM/]
 
-  [SYNTHETIC TARGET INJECTION PIPELINE: Steps 8 - 11]
-    Step 8:  create_injected_dataset (Multi-Sensor Synthetic Target Injection Pipeline) [root]
-    Step 9:  pyccd_landsat_main (USGS LCMAP Landsat Temporal Regression - Injected) [change_detection/pyccd/]
-    Step 10: SC_CCM_main (Harmonized Continuous Change Monitoring - Injected) [change_detection/SC-CCM/]
-    Step 11: SC_CCM_vis (Continuous Change Monitoring Spatial Visualization - Injected) [change_detection/SC-CCM/]
+  [SYNTHETIC TARGET INJECTION PIPELINE: Step 8]
+    Step 8:  generate_stratified_patch_benchmark (Land-Cover Stratified Patch Benchmark Injection & Change Detection) [root]
 
 CLI Usage Examples:
     # Run full end-to-end pipeline (Baseline + Injected):
     python HarmonizedSC_run_pipeline.py
 
-    # Run ONLY injected pipeline (Steps 8-11) when iterating on injections:
+    # Run ONLY injected pipeline (Step 8) when iterating on injections:
     python HarmonizedSC_run_pipeline.py --injected-only
-    python HarmonizedSC_run_pipeline.py --steps 8-11
+    python HarmonizedSC_run_pipeline.py --steps 8
     python HarmonizedSC_run_pipeline.py --steps injected
-
-    # Re-run ONLY change detection models on existing injected datasets (Steps 9-11):
-    python HarmonizedSC_run_pipeline.py --steps 9-11
 
     # Run ONLY baseline pipeline (Steps 1-7):
     python HarmonizedSC_run_pipeline.py --baseline-only
@@ -145,42 +139,18 @@ STEP_DEFINITIONS = {
         "pipeline": "baseline",
     },
     8: {
-        "name": "create_injected_dataset",
-        "description": "Multi-Sensor Synthetic Target Injection Pipeline (Offset-Verified Clean Grid)",
-        "module": "create_injected_dataset",
+        "name": "generate_stratified_patch_benchmark",
+        "description": "Land-Cover Stratified Patch Benchmark Injection & Change Detection (SC-CCD & PyCCD)",
+        "module": "generate_stratified_patch_benchmark",
         "folder": ".",
-        "rel_path": "create_injected_dataset.py",
-        "pipeline": "injected",
-    },
-    9: {
-        "name": "pyccd_landsat_main",
-        "description": "USGS LCMAP PyCCD Full-Spectrum Landsat Temporal Regression (Injected)",
-        "module": "pyccd_landsat_main",
-        "folder": "change_detection/pyccd",
-        "rel_path": "change_detection/pyccd/pyccd_landsat_main.py",
-        "pipeline": "injected",
-    },
-    10: {
-        "name": "SC_CCM_main",
-        "description": "Harmonized Continuous Change Monitoring (SC-CCM) on SC Z-Score and Harmonized NDVI (Injected)",
-        "module": "SC_CCM_main",
-        "folder": "change_detection/SC-CCM",
-        "rel_path": "change_detection/SC-CCM/SC_CCM_main.py",
-        "pipeline": "injected",
-    },
-    11: {
-        "name": "SC_CCM_vis",
-        "description": "Continuous Change Monitoring Spatial Visualization and Diagnostic Maps (Injected)",
-        "module": "SC_CCM_vis",
-        "folder": "change_detection/SC-CCM",
-        "rel_path": "change_detection/SC-CCM/SC_CCM_vis.py",
+        "rel_path": "generate_stratified_patch_benchmark.py",
         "pipeline": "injected",
     },
 }
 
 BASELINE_STEPS: List[int] = [1, 2, 3, 4, 5, 6, 7]
-INJECTED_STEPS: List[int] = [8, 9, 10, 11]
-ALL_STEPS: List[int] = list(range(1, 12))
+INJECTED_STEPS: List[int] = [8]
+ALL_STEPS: List[int] = list(range(1, 9))
 
 
 def parse_steps(
@@ -194,10 +164,10 @@ def parse_steps(
     Parses step specification into a sorted list of unique integer step numbers.
 
     Parameters:
-        steps_arg: String range ('1-7', '8-11'), comma-separated ('1,2,3'),
+        steps_arg: String range ('1-7', '8'), comma-separated ('1,2,3'),
                    preset ('injected', 'baseline', 'all'), list of ints or strings, or None.
-        max_step: Maximum valid step integer (defaults to 11).
-        injected_only: If True, forces execution of injected pipeline steps [8, 9, 10, 11].
+        max_step: Maximum valid step integer (defaults to 8).
+        injected_only: If True, forces execution of injected pipeline step [8].
         baseline_only: If True, forces execution of baseline pipeline steps [1, 2, 3, 4, 5, 6, 7].
         run_injected: If False (and steps_arg is None), defaults to baseline steps only.
 
@@ -326,7 +296,7 @@ def run_pipeline(
 
     Supports complete decoupling of baseline and injected workflows:
       - Baseline steps (1 - 7): STAC ingestion, orthorectification, SC/NDVI, baseline PyCCD, baseline CCD, vis.
-      - Injected steps (8 - 11): Target injection, injected PyCCD, injected CCD, injected vis.
+      - Injected step (8): Stratified patch benchmark injection and change detection (SC-CCD & PyCCD).
 
     Parameters:
         location: Target location identifier (default 'Rochesterv2').
@@ -335,9 +305,9 @@ def run_pipeline(
         tile_size: Spatial sliding window size for spectral complexity calculation.
         num_endmembers: Number of endmembers for simplex extraction.
         active_steps: List or string of step numbers/ranges to execute (alias for 'steps').
-        steps: Step range string or list (e.g. '8-11', '8,9,10,11', 'injected', 'baseline').
-        run_injected: If False, omits synthetic injected steps (steps 8-11).
-        injected_only: If True, executes ONLY injected pipeline steps (steps 8-11).
+        steps: Step range string or list (e.g. '8', '1-7', 'injected', 'baseline').
+        run_injected: If False, omits synthetic injected step (step 8).
+        injected_only: If True, executes ONLY injected pipeline step (step 8).
         baseline_only: If True, executes ONLY baseline pipeline steps (steps 1-7).
         h5_path: Explicit path to master HDF5 container.
         dry_run: If True, validates configuration and step sequence without executing compute.
@@ -373,7 +343,7 @@ def run_pipeline(
     has_baseline = any(s in BASELINE_STEPS for s in resolved_steps)
     has_injected = any(s in INJECTED_STEPS for s in resolved_steps)
     if has_injected and not has_baseline:
-        pipeline_mode = "INJECTED PIPELINE ONLY (Steps 8-11)"
+        pipeline_mode = "INJECTED PIPELINE ONLY (Step 8)"
     elif has_baseline and not has_injected:
         pipeline_mode = "BASELINE PIPELINE ONLY (Steps 1-7)"
     else:
@@ -588,119 +558,22 @@ def run_pipeline(
             print("Step 7 Complete: Baseline diagnostic maps exported.")
 
         # ======================================================================
-        # SYNTHETIC TARGET INJECTION STEPS (8 - 11)
+        # SYNTHETIC TARGET INJECTION STEP (8)
         # ======================================================================
 
-        # Step 8: Multi-Sensor Synthetic Target Injection Pipeline
+        # Step 8: Land-Cover Stratified Patch Benchmark Injection & Change Detection
         elif step_num == 8:
             if master_h5 is None:
                 raise RuntimeError(
                     f"No master HDF5 container available for Step 8. "
                     f"Run Step 3 first or specify an existing container with --h5-path (checked: {candidate_paths})."
                 )
-            inj_mod = importlib.import_module("create_injected_dataset")
-            inj_mod.inject_master_h5(
-                master_h5_path=master_h5,
-            )
+            inj_mod = importlib.import_module("generate_stratified_patch_benchmark")
+            if hasattr(inj_mod, "MASTER_H5_PATH"):
+                inj_mod.MASTER_H5_PATH = master_h5
+            inj_mod.main()
             pipeline_state["artifacts"]["injected_h5"] = master_h5
-            print(f"Step 8 Complete: Injected datasets established in-place in {master_h5}")
-
-        # Step 9: USGS LCMAP PyCCD Full-Spectrum Landsat (Injected)
-        elif step_num == 9:
-            if master_h5 is None:
-                raise RuntimeError(
-                    f"No master HDF5 container available for Step 9. "
-                    f"Run Step 8 first or specify an existing container with --h5-path (checked: {candidate_paths})."
-                )
-            pyccd_mod = importlib.import_module("pyccd_landsat_main")
-            print("  Running PyCCD on injected Landsat surface reflectance...")
-            pyccd_inj_h5 = pyccd_mod.main(
-                location=location,
-                h5_path=master_h5,
-                injected=True,
-            )
-            pipeline_state["artifacts"]["pyccd_injected_h5"] = pyccd_inj_h5
-            print(f"Step 9 Complete: Injected PyCCD Landsat runs complete ({pyccd_inj_h5}).")
-
-        # Step 10: Harmonized Continuous Change Monitoring (Injected SC Z-Score and NDVI)
-        elif step_num == 10:
-            if master_h5 is None:
-                raise RuntimeError(
-                    f"No master HDF5 container available for Step 10. "
-                    f"Run Step 8 first or specify an existing container with --h5-path (checked: {candidate_paths})."
-                )
-            try:
-                ccd_mod = importlib.import_module("SC_CCM_main")
-            except ImportError:
-                ccd_mod = importlib.import_module("harmonized_CCD_main")
-
-            print("  Running SC-CCM on injected Spectral Complexity Z-Score...")
-            ccd_mod.main(
-                location=location,
-                h5_path=master_h5,
-                target_metric="sliding_volume_z_score",
-                injected=True,
-                launch_vis=False,
-            )
-
-            print("  Running SC-CCM on injected Harmonized NDVI...")
-            ccd_mod.main(
-                location=location,
-                h5_path=master_h5,
-                target_metric="ndvi",
-                injected=True,
-                launch_vis=False,
-            )
-            pipeline_state["artifacts"]["injected_ccd_h5"] = master_h5
-            print("Step 10 Complete: Injected SC-CCM runs saved.")
-
-        # Step 11: Continuous Change Monitoring Visualization (Injected)
-        elif step_num == 11:
-            if master_h5 is None:
-                raise RuntimeError(
-                    f"No master HDF5 container available for Step 11. "
-                    f"Run Step 8 first or specify an existing container with --h5-path (checked: {candidate_paths})."
-                )
-            try:
-                vis_mod = importlib.import_module("SC_CCM_vis")
-            except ImportError:
-                vis_mod = importlib.import_module("harmonized_CCD_vis")
-            pyccd_vis_mod = importlib.import_module("pyccd_landsat_vis")
-            diag_pngs = []
-
-            # SC-CCM injected overlays (SC and NDVI)
-            for metric in ["SC", "NDVI"]:
-                out_png = vis_mod.get_default_png_name(location=location, target_metric=metric, injected=True)
-                try:
-                    vis_mod.plot_spatial_anomaly_overlay(
-                        source_h5_path=master_h5,
-                        target_metric=metric,
-                        injected=True,
-                        output_png=out_png,
-                        interactive=False,
-                    )
-                    diag_pngs.append(out_png)
-                    print(f"  Exported SC-CCM injected overlay: {out_png}")
-                except Exception as e:
-                    print(f"  Warning: Could not render injected visualization for {metric}: {e}")
-
-            # PyCCD Landsat injected overlay
-            out_png = pyccd_vis_mod.get_default_png_name(location=location, injected=True)
-            try:
-                pyccd_vis_mod.plot_spatial_change_map(
-                    source_h5_path=master_h5,
-                    group_name="INJECTED_PYCCD_Results",
-                    injected=True,
-                    output_png=out_png,
-                    interactive=False,
-                )
-                diag_pngs.append(out_png)
-                print(f"  Exported PyCCD injected overlay: {out_png}")
-            except Exception as e:
-                print(f"  Warning: Could not render injected PyCCD visualization: {e}")
-
-            pipeline_state["artifacts"].setdefault("diagnostic_pngs", []).extend(diag_pngs)
-            print("Step 11 Complete: Injected diagnostic maps exported.")
+            print(f"Step 8 Complete: Stratified patch benchmark injection and change detection saved in-place in {master_h5}")
 
         pipeline_state["executed_steps"].append(step_num)
 
@@ -729,10 +602,7 @@ Step Reference:
     7: SC_CCM_vis                      Baseline Continuous Change Monitoring Visualizations (change_detection/SC-CCM/)
 
   Injected:
-    8:  create_injected_dataset        Multi-Sensor Synthetic Target Injection Pipeline (root)
-    9:  pyccd_landsat_main             Injected USGS LCMAP Landsat Temporal Regression (change_detection/pyccd/)
-    10: SC_CCM_main                    Injected Harmonized Continuous Change Monitoring (change_detection/SC-CCM/)
-    11: SC_CCM_vis                     Injected Continuous Change Monitoring Visualizations (change_detection/SC-CCM/)
+    8:  generate_stratified_patch_benchmark Land-Cover Stratified Patch Benchmark Injection & Change Detection (root)
         """,
     )
     parser.add_argument(
@@ -775,13 +645,13 @@ Step Reference:
         "--steps",
         nargs="+",
         default=None,
-        help="Step numbers, ranges, or preset ('8-11', '8 9 10 11', 'injected', 'baseline', 'all', '1-7')",
+        help="Step numbers, ranges, or preset ('8', 'injected', 'baseline', 'all', '1-7')",
     )
     parser.add_argument(
         "--injected-only",
         action="store_true",
         default=False,
-        help="Run ONLY the synthetic target injection pipeline steps (Steps 8-11)",
+        help="Run ONLY the synthetic target injection pipeline step (Step 8)",
     )
     parser.add_argument(
         "--baseline-only",

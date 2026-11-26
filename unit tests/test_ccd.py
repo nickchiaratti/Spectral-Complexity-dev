@@ -230,7 +230,8 @@ def test_process_row_chunk_stable_pixel():
         16, 0.99, 4
     )
 
-    y_start, y_end, pred, rmse, coef, flags, date, count = ccd_main._process_row_chunk(chunk_args)
+    res = ccd_main._process_row_chunk(chunk_args)
+    y_start, y_end, pred, rmse, coef, flags, date, count = res[:8]
 
     assert y_start == 0
     assert y_end == 1
@@ -265,7 +266,8 @@ def test_process_row_chunk_structural_break_detection():
         16, 0.99, 4
     )
 
-    y_start, y_end, pred, rmse, coef, flags, date, count = ccd_main._process_row_chunk(chunk_args)
+    res = ccd_main._process_row_chunk(chunk_args)
+    y_start, y_end, pred, rmse, coef, flags, date, count = res[:8]
 
     assert count[0, 0] >= 1
     assert not np.isnan(date[0, 0])
@@ -294,7 +296,8 @@ def test_process_row_chunk_insufficient_samples_skips():
         16, 0.99, 4
     )
 
-    y_start, y_end, pred, rmse, coef, flags, date, count = ccd_main._process_row_chunk(chunk_args)
+    res = ccd_main._process_row_chunk(chunk_args)
+    y_start, y_end, pred, rmse, coef, flags, date, count = res[:8]
 
     assert count[0, 0] == 0
     assert np.isnan(date[0, 0])
@@ -375,6 +378,67 @@ def test_ccd_main_pipeline_execution_and_h5_schema():
             assert out_f["change_date_timestamp"].dtype == np.float64
             assert out_f["change_count"].shape == (h, w)
             assert out_f["change_count"].dtype == np.int32
+
+
+def test_ccd_main_streaming_block_execution_and_resumption():
+    """Verify streaming block execution with multiple blocks and resume capability."""
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        input_h5 = Path(tmp_dir) / "HLST_Streaming_Test.h5"
+        output_h5 = Path(tmp_dir) / "CCD_Streaming_Test.h5"
+
+        n_frames = 20
+        h, w = 6, 4
+        start_ts = datetime(2022, 1, 1, tzinfo=timezone.utc).timestamp()
+        end_ts = datetime(2025, 1, 1, tzinfo=timezone.utc).timestamp()
+        acq_times = np.linspace(start_ts, end_ts, n_frames)
+        t_years = np.linspace(2022.0, 2025.0, n_frames)
+
+        cube = np.zeros((n_frames, h, w), dtype=np.float32)
+        for y in range(h):
+            for x in range(w):
+                cube[:, y, x] = 1.0 + 0.5 * np.cos(2.0 * np.pi * t_years) + 0.05 * np.random.randn(n_frames)
+
+        with h5py.File(input_h5, "w") as f:
+            f.attrs["GeoTransform"] = [-16048.67, 30.0, 0.0, 21147.15, 0.0, -30.0]
+            f.attrs["spatial_ref"] = "Albers Equal Area"
+            grp = f.create_group("/HDFEOS/GRIDS/HARMONIZED/Data Fields")
+            ds = grp.create_dataset("sliding_volume_z_score", data=cube)
+            ds.attrs["acquisition_time"] = acq_times
+            grp.create_dataset("common_mask", data=np.zeros((n_frames, h, w), dtype=np.uint8))
+
+        # First run: 6 rows with block_size=2 produces 3 blocks
+        res_path = ccd_main.main(
+            location="Rochester",
+            h5_path=str(input_h5),
+            output_h5=str(output_h5),
+            target_metric="sliding_volume_z_score",
+            launch_vis=False,
+            n_jobs=1,
+            block_size=2,
+            worker_chunk_rows=1,
+            resume=True
+        )
+
+        assert os.path.exists(res_path)
+
+        with h5py.File(output_h5, "r") as out_f:
+            assert out_f["predicted_series"].shape == (n_frames, h, w)
+            assert out_f["change_date_timestamp"].shape == (h, w)
+            assert out_f["coef_series"].shape[:3] == (n_frames, h, w)
+
+        # Second run with resume=True: should detect matching schema and resume without recreating
+        res_path2 = ccd_main.main(
+            location="Rochester",
+            h5_path=str(input_h5),
+            output_h5=str(output_h5),
+            target_metric="sliding_volume_z_score",
+            launch_vis=False,
+            n_jobs=1,
+            block_size=2,
+            worker_chunk_rows=1,
+            resume=True
+        )
+        assert res_path2 == res_path
 
 
 # =====================================================================

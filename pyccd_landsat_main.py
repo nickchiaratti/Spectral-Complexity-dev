@@ -6,6 +6,15 @@ using only Landsat observations from the harmonized multi-sensor HDF5 file.
 Configured for high-throughput streaming block execution with an in-memory budget up to 32 GB.
 """
 
+
+import sys
+from pathlib import Path
+_script_dir = Path(__file__).resolve().parent
+_repo_root = _script_dir.parent.parent
+for _p in [_repo_root, _script_dir]:
+    if str(_p) not in sys.path:
+        sys.path.insert(0, str(_p))
+
 import os
 import sys
 
@@ -100,6 +109,399 @@ def patch_pyccd():
 patch_pyccd()
 
 
+# ==============================================================================
+# Custom 7-Band Landsat 8 and 9 (OLI) Continuous Change Detection (pyccd)
+# ==============================================================================
+def results_to_changemodel_7band(
+    fitted_models, start_day, end_day, break_day,
+    magnitudes, observation_count, change_probability, curve_qa
+):
+    """Consolidate 7-band regression models for Landsat 8/9 into standardized dictionary."""
+    band_keys = ['coastal_aerosol', 'blue', 'green', 'red', 'nir', 'swir1', 'swir2']
+    spectral_models = []
+    for ix, model in enumerate(fitted_models):
+        spectral = {
+            'rmse': float(model.rmse),
+            'coefficients': tuple(float(c) for c in model.fitted_model.coef_),
+            'intercept': float(model.fitted_model.intercept_),
+            'magnitude': float(magnitudes[ix]) if ix < len(magnitudes) else 0.0
+        }
+        spectral_models.append(spectral)
+
+    model_dict = {
+        'start_day': int(start_day),
+        'end_day': int(end_day),
+        'break_day': int(break_day),
+        'observation_count': int(observation_count),
+        'change_probability': float(change_probability),
+        'curve_qa': int(curve_qa),
+    }
+    for k, sm in zip(band_keys, spectral_models):
+        model_dict[k] = sm
+    model_dict['coastal'] = spectral_models[0]
+    return model_dict
+
+
+def catch_7band(dates, observations, fitter_fn, processing_mask, model_window, curve_qa, proc_params):
+    """Fit general models on unmodeled observations for 7 bands."""
+    avg_days_yr = proc_params.AVG_DAYS_YR
+    fit_max_iter = proc_params.LASSO_MAX_ITER
+    num_coef = proc_params.COEFFICIENT_MIN
+
+    period = dates[processing_mask]
+    spectral_obs = observations[:, processing_mask]
+    model_period = period[model_window]
+    model_spectral = spectral_obs[:, model_window]
+
+    models = [fitter_fn(model_period, spectrum, fit_max_iter, avg_days_yr, num_coef)
+              for spectrum in model_spectral]
+
+    break_day = period[-1] if model_window.stop >= period.shape[0] else period[model_window.stop]
+    return results_to_changemodel_7band(
+        fitted_models=models,
+        start_day=period[model_window.start],
+        end_day=period[model_window.stop - 1],
+        break_day=break_day,
+        magnitudes=np.zeros(observations.shape[0]),
+        observation_count=(model_window.stop - model_window.start),
+        change_probability=0,
+        curve_qa=curve_qa
+    )
+
+
+def lookforward_7band(dates, observations, model_window, fitter_fn, processing_mask, variogram, proc_params):
+    """Expand model window across 7 bands until change is detected or observations exhausted."""
+    peek_size = proc_params.PEEK_SIZE
+    coef_min = proc_params.COEFFICIENT_MIN
+    coef_mid = proc_params.COEFFICIENT_MID
+    coef_max = proc_params.COEFFICIENT_MAX
+    num_obs_fact = proc_params.NUM_OBS_FACTOR
+    detection_bands = proc_params.DETECTION_BANDS
+    change_thresh = proc_params.CHANGE_THRESHOLD
+    outlier_thresh = proc_params.OUTLIER_THRESHOLD
+    avg_days_yr = proc_params.AVG_DAYS_YR
+    fit_max_iter = proc_params.LASSO_MAX_ITER
+
+    fit_window = model_window
+    models = None
+    change = 0
+
+    period = dates[processing_mask]
+    spectral_obs = observations[:, processing_mask]
+    fit_span = ccd.procedures.span(period, fit_window)
+
+    while model_window.stop + peek_size <= period.shape[0]:
+        num_coefs = ccd.procedures.determine_num_coefs(period[model_window], coef_min, coef_mid, coef_max, num_obs_fact)
+        peek_window = slice(model_window.stop, model_window.stop + peek_size)
+        model_span = ccd.procedures.span(period, model_window)
+
+        if not models or model_window.stop - model_window.start < 24 or model_span >= 1.33 * fit_span:
+            fit_window = model_window
+            fit_span = ccd.procedures.span(period, fit_window)
+            models = [fitter_fn(period[fit_window], spectrum, fit_max_iter, avg_days_yr, num_coefs)
+                      for spectrum in spectral_obs[:, fit_window]]
+
+        residuals = np.array([ccd.procedures.calc_residuals(period[peek_window],
+                                                            spectral_obs[idx, peek_window],
+                                                            models[idx], avg_days_yr)
+                              for idx in range(observations.shape[0])])
+
+        if model_window.stop - model_window.start <= 24:
+            comp_rmse = [models[idx].rmse for idx in detection_bands]
+        else:
+            closest_indexes = ccd.procedures.find_closest_doy(period, peek_window.stop - 1, fit_window, 24)
+            comp_rmse = [ccd.procedures.euclidean_norm(models[idx].residual[closest_indexes]) / 4
+                         for idx in detection_bands]
+
+        magnitude = ccd.procedures.change_magnitude(residuals[detection_bands, :],
+                                                    variogram[detection_bands],
+                                                    comp_rmse)
+
+        if ccd.procedures.detect_change(magnitude, change_thresh):
+            change = 1
+            break
+        elif ccd.procedures.detect_outlier(magnitude[0], outlier_thresh):
+            processing_mask = ccd.procedures.update_processing_mask(processing_mask, peek_window.start)
+            period = dates[processing_mask]
+            spectral_obs = observations[:, processing_mask]
+            continue
+
+        if model_window.stop + peek_size > period.shape[0]:
+            break
+        model_window = slice(model_window.start, model_window.stop + 1)
+
+    result = results_to_changemodel_7band(
+        fitted_models=models,
+        start_day=period[model_window.start],
+        end_day=period[model_window.stop - 1],
+        break_day=period[peek_window.start],
+        magnitudes=np.median(residuals, axis=1),
+        observation_count=(model_window.stop - model_window.start),
+        change_probability=change,
+        curve_qa=num_coefs
+    )
+    return result, processing_mask, model_window
+
+
+def standard_procedure_7band(dates, observations, fitter_fn, quality, prev_results, proc_params):
+    """Standard CCDC iterative procedure adapted for 7-band Landsat 8/9 surface reflectance."""
+    meow_size = proc_params.MEOW_SIZE
+    defpeek = proc_params.PEEK_SIZE
+    curve_qa = proc_params.CURVE_QA
+
+    clear = proc_params.QA_CLEAR
+    water = proc_params.QA_WATER
+    unsaturated = np.all((observations > 0) & (observations < 10000), axis=0)
+    processing_mask = ((quality == clear) | (quality == water)) & unsaturated
+    date_mask = ccd.qa.mask_duplicate_values(dates[processing_mask])
+    processing_mask[processing_mask] = date_mask
+
+    stat_mask = ccd.procedures.statmask(dates, processing_mask, proc_params.STAT_ORD)
+    if np.sum(stat_mask) < meow_size:
+        stat_mask = np.copy(processing_mask)
+
+    if prev_results:
+        results = ccd.procedures.results_fromprev(prev_results)
+        processing_mask = ccd.procedures.prevmask(processing_mask, dates, prev_results['processing_mask'], results)
+        js = ccd.procedures.jumpstart(results, dates[processing_mask], proc_params)
+        model_window, previous_end = js
+        start = (model_window.start == 0)
+    else:
+        results = []
+        model_window = slice(0, meow_size)
+        previous_end = 0
+        start = True
+
+    obs_count = np.sum(processing_mask)
+    if obs_count <= meow_size:
+        return results, processing_mask
+
+    peek_size = ccd.procedures.adjustpeek(dates[stat_mask], defpeek)
+    proc_params.PEEK_SIZE = peek_size
+    proc_params.CHANGE_THRESHOLD = ccd.procedures.adjustchgthresh(peek_size, defpeek, proc_params.CHANGE_THRESHOLD)
+
+    variogram = ccd.procedures.adjusted_variogram(dates[stat_mask], observations[:, stat_mask])
+    if not ccd.procedures.check_variogram(variogram):
+        return results, processing_mask
+
+    while model_window.stop <= dates[processing_mask].shape[0] - meow_size:
+        if len(results) > 0:
+            start = False
+        init = ccd.procedures.initialize(dates, observations, fitter_fn, model_window, processing_mask, variogram, proc_params)
+        model_window, init_models, processing_mask = init
+        if init_models is None:
+            break
+        if model_window.start > previous_end:
+            lb = ccd.procedures.lookback(dates, observations, model_window, init_models, previous_end, processing_mask, variogram, proc_params)
+            model_window, processing_mask = lb
+        if model_window.start - previous_end > peek_size and start is True:
+            results.append(catch_7band(dates, observations, fitter_fn, processing_mask, slice(previous_end, model_window.start), curve_qa['START'], proc_params))
+            start = False
+        if model_window.stop + peek_size > dates[processing_mask].shape[0]:
+            break
+        lf = lookforward_7band(dates, observations, model_window, fitter_fn, processing_mask, variogram, proc_params)
+        res, processing_mask, model_window = lf
+        results.append(res)
+        previous_end = model_window.stop
+        model_window = slice(model_window.stop, model_window.stop + meow_size)
+
+    if previous_end + peek_size < dates[processing_mask].shape[0]:
+        results.append(catch_7band(dates, observations, fitter_fn, processing_mask, slice(previous_end, dates[processing_mask].shape[0]), curve_qa['END'], proc_params))
+
+    return results, processing_mask
+
+
+def insufficient_clear_procedure_7band(dates, observations, fitter_fn, quality, prev_results, proc_params):
+    """Fallback procedure when insufficient clear observations are available for 7 bands."""
+    meow_size = proc_params.MEOW_SIZE
+    curve_qa = proc_params.CURVE_QA['INSUF_CLEAR']
+    avg_days_yr = proc_params.AVG_DAYS_YR
+    fit_max_iter = proc_params.LASSO_MAX_ITER
+    num_coef = proc_params.COEFFICIENT_MIN
+
+    green_idx = proc_params.GREEN_IDX
+    filter_range = proc_params.MEDIAN_GREEN_FILTER
+    max_ord = proc_params.STAT_ORD
+
+    clear = proc_params.QA_CLEAR
+    water = proc_params.QA_WATER
+    unsaturated = np.all((observations > 0) & (observations < 10000), axis=0)
+    standard_mask = ((quality == water) | (quality == clear)) & unsaturated
+
+    green_mask = ccd.qa.limited_grmedian_filter(
+        observations[:, standard_mask][green_idx],
+        dates[standard_mask],
+        filter_range,
+        max_ord
+    )
+    standard_mask[standard_mask][:green_mask.shape[0]] &= green_mask
+    date_mask = ccd.qa.mask_duplicate_values(dates[standard_mask])
+    standard_mask[standard_mask] = date_mask
+    processing_mask = standard_mask
+
+    period = dates[processing_mask]
+    spectral_obs = observations[:, processing_mask]
+
+    if np.sum(processing_mask) < meow_size:
+        return [], processing_mask
+
+    models = [fitter_fn(period, spectrum, fit_max_iter, avg_days_yr, num_coef)
+              for spectrum in spectral_obs]
+
+    magnitudes = np.zeros(shape=(observations.shape[0],))
+    result = results_to_changemodel_7band(
+        fitted_models=models,
+        start_day=dates[0],
+        end_day=dates[-1],
+        break_day=dates[-1],
+        magnitudes=magnitudes,
+        observation_count=np.sum(processing_mask),
+        change_probability=0,
+        curve_qa=curve_qa
+    )
+    return (result,), processing_mask
+
+
+def permanent_snow_procedure_7band(dates, observations, fitter_fn, quality, prev_results, proc_params):
+    """Procedure for areas with persistent snow cover across 7 bands."""
+    meow_size = proc_params.MEOW_SIZE
+    curve_qa = proc_params.CURVE_QA['PERSIST_SNOW']
+    avg_days_yr = proc_params.AVG_DAYS_YR
+    fit_max_iter = proc_params.LASSO_MAX_ITER
+    num_coef = proc_params.COEFFICIENT_MIN
+
+    clear = proc_params.QA_CLEAR
+    water = proc_params.QA_WATER
+    snow = proc_params.QA_SNOW
+    unsaturated = np.all((observations > 0) & (observations < 10000), axis=0)
+    mask = (((quality == water) | (quality == clear)) & unsaturated) | (quality == snow)
+    date_mask = ccd.qa.mask_duplicate_values(dates[mask])
+    mask[mask] = date_mask
+    processing_mask = mask
+
+    period = dates[processing_mask]
+    spectral_obs = observations[:, processing_mask]
+
+    if np.sum(processing_mask) < meow_size:
+        return [], processing_mask
+
+    models = [fitter_fn(period, spectrum, fit_max_iter, avg_days_yr, num_coef)
+              for spectrum in spectral_obs]
+
+    magnitudes = np.zeros(shape=(observations.shape[0],))
+    result = results_to_changemodel_7band(
+        fitted_models=models,
+        start_day=dates[0],
+        end_day=dates[-1],
+        break_day=dates[-1],
+        magnitudes=magnitudes,
+        observation_count=np.sum(processing_mask),
+        change_probability=0,
+        curve_qa=curve_qa
+    )
+    return (result,), processing_mask
+
+
+def detect_7band(
+    dates,
+    coastal_aerosols,
+    blues=None,
+    greens=None,
+    reds=None,
+    nirs=None,
+    swir1s=None,
+    swir2s=None,
+    qas=None,
+    prev_results=None,
+    params=None,
+):
+    """
+    Custom method of pyccd implementing all 7 spectral bands available in Landsat 8 and 9 (OLI):
+      0: Coastal Aerosol (0.443 um / 443 nm) - B01
+      1: Blue (0.482 um / 482 nm)            - B02
+      2: Green (0.561 um / 561 nm)           - B03
+      3: Red (0.655 um / 655 nm)             - B04
+      4: NIR (0.865 um / 865 nm)             - B05
+      5: SWIR 1 (1.609 um / 1609 nm)         - B06
+      6: SWIR 2 (2.201 um / 2201 nm)         - B07
+
+    Bypasses dummy thermal conversions and checks saturation across all 7 reflective bands.
+    """
+    proc_params = ccd.app.get_default_params()
+    proc_params.QA_BITPACKED = False
+    proc_params.QA_FILL = 0
+    proc_params.QA_CLEAR = 1
+    proc_params.QA_WATER = 2
+    proc_params.QA_SHADOW = 3
+    proc_params.QA_SNOW = 4
+    proc_params.QA_CLOUD = 5
+    proc_params.COASTAL_IDX = 0
+    proc_params.BLUE_IDX = 1
+    proc_params.GREEN_IDX = 2
+    proc_params.RED_IDX = 3
+    proc_params.NIR_IDX = 4
+    proc_params.SWIR1_IDX = 5
+    proc_params.SWIR2_IDX = 6
+    proc_params.THERMAL_IDX = -1
+    proc_params.TMASK_BANDS = [2, 5]  # Green (B03) and SWIR1 (B06) in 7-band indexing
+    proc_params.DETECTION_BANDS = [0, 1, 2, 3, 4, 5, 6]  # All 7 Landsat 8/9 bands
+    proc_params.CHANGE_THRESHOLD = float(scipy.stats.chi2.ppf(0.99, df=7))
+
+    if params:
+        proc_params.update(params)
+        if 'DETECTION_BANDS' in params and 'CHANGE_THRESHOLD' not in params:
+            proc_params.CHANGE_THRESHOLD = float(scipy.stats.chi2.ppf(0.99, df=len(proc_params.DETECTION_BANDS)))
+
+    if blues is None and hasattr(coastal_aerosols, 'shape') and coastal_aerosols.shape[0] == 7:
+        spectra = np.asarray(coastal_aerosols, dtype=np.float64)
+        if greens is not None and qas is None:
+            qas = greens
+    elif blues is not None and greens is not None and reds is not None and nirs is not None and swir1s is not None and swir2s is not None:
+        spectra = np.stack([coastal_aerosols, blues, greens, reds, nirs, swir1s, swir2s]).astype(np.float64)
+    else:
+        raise ValueError("detect_7band requires 7 band inputs or a (7, N) spectra array, plus QA array.")
+
+    dates = np.asarray(dates)
+    qas = np.asarray(qas)
+    indices = np.argsort(dates)
+    dates = dates[indices]
+    spectra = spectra[:, indices]
+    qas = qas[indices]
+
+    fitter_fn = ccd.models.lasso.fitted_model
+    if proc_params.QA_BITPACKED is True:
+        qas = ccd.qa.unpackqa(qas, proc_params)
+
+    probs = ccd.qa.quality_probabilities(qas, proc_params)
+
+    clear_count = np.sum((qas == proc_params.QA_CLEAR) | (qas == proc_params.QA_WATER))
+    clear_pct = clear_count / len(qas) if len(qas) > 0 else 0
+    snow_count = np.sum(qas == proc_params.QA_SNOW)
+    snow_pct = snow_count / len(qas) if len(qas) > 0 else 0
+
+    if clear_pct >= proc_params.CLEAR_PCT_THRESHOLD:
+        proc_fn = standard_procedure_7band
+    elif snow_pct >= proc_params.SNOW_PCT_THRESHOLD:
+        proc_fn = permanent_snow_procedure_7band
+    else:
+        proc_fn = insufficient_clear_procedure_7band
+
+    procedure_results = proc_fn(dates, spectra, fitter_fn, qas, prev_results, proc_params)
+    change_models, processing_mask = procedure_results
+
+    return {
+        'algorithm': 'pyccd-7band-landsat89',
+        'processing_mask': [int(_) for _ in processing_mask],
+        'change_models': change_models,
+        'cloud_prob': probs[0],
+        'snow_prob': probs[1],
+        'water_prob': probs[2],
+    }
+
+# Alias detect to custom 7-band method
+detect = detect_7band
+
+
 @contextlib.contextmanager
 def tqdm_joblib(tqdm_object):
     """Context manager to patch joblib to report into tqdm progress bar."""
@@ -125,8 +527,10 @@ H5_PATH = f"C:/satelliteImagery/HLST30/HLST_{LOCATION}.h5"
 OUTPUT_GROUP = "PYCCD_Results"
 INJECTED = False
 
-BAND_NAMES = ['blue', 'green', 'red', 'nir', 'swir1', 'swir2']
+BAND_NAMES = ['coastal_aerosol', 'blue', 'green', 'red', 'nir', 'swir1', 'swir2']
 BAND_INDICES = {
+    'coastal_aerosol': 0,
+    'coastal': 0,
     'blue': 1,
     'green': 2,
     'red': 3,
@@ -179,7 +583,7 @@ def build_harmonic_basis(ordinal_dates, avg_days_yr=365.2425):
     return np.column_stack(cols)
 
 
-def decode_categorical_qa(fmask_arr, common_mask_arr, sr_blue):
+def decode_categorical_qa(fmask_arr, common_mask_arr, sr_data, fill_val=None):
     """
     Decodes HLS Fmask bits and common_mask into pyccd categorical QA codes
     consistent with USGS LCMAP CCDC ADD (LSDS-1982 Section 2.6.1 & Appendix B):
@@ -193,7 +597,27 @@ def decode_categorical_qa(fmask_arr, common_mask_arr, sr_blue):
     Precedence hierarchy (following ccd.qa.qabitval / LSDS-1982 Section 2.6.1):
       Fill (0) > Cloud (5) > Shadow (3) > Snow (4) > Water (2) > Clear (1)
     """
-    is_fill = (fmask_arr == 255) | (sr_blue == -32768)
+    if sr_data is None:
+        sr_is_fill = False
+    elif sr_data.ndim == 1:
+        if fill_val is not None:
+            sr_is_fill = (sr_data == fill_val)
+        else:
+            sr_is_fill = (sr_data == -9999) | (sr_data == -32768) | (sr_data < -9000)
+    elif sr_data.ndim == 2:
+        axis = 1 if sr_data.shape[0] == fmask_arr.shape[0] else 0
+        if fill_val is not None:
+            sr_is_fill = np.any(sr_data == fill_val, axis=axis)
+        else:
+            sr_is_fill = np.any((sr_data == -9999) | (sr_data == -32768) | (sr_data < -9000), axis=axis)
+    else:
+        axis = tuple(range(1, sr_data.ndim))
+        if fill_val is not None:
+            sr_is_fill = np.any(sr_data == fill_val, axis=axis)
+        else:
+            sr_is_fill = np.any((sr_data == -9999) | (sr_data == -32768) | (sr_data < -9000), axis=axis)
+
+    is_fill = (fmask_arr == 255) | sr_is_fill
     is_cloud = (fmask_arr & ((1 << 1) | (1 << 0) | (1 << 2))) > 0
     is_shadow = (fmask_arr & (1 << 3)) > 0
     is_snow = (fmask_arr & (1 << 4)) > 0
@@ -221,11 +645,21 @@ def _process_row_subchunk(subchunk_args):
     """Worker function for processing a small row subchunk with pyccd."""
     patch_pyccd()
 
-    (sub_y0, sub_y1, width,
-     sr_sub, fm_sub, cm_sub,
-     ordinal_dates, acq_times, X_full,
-     target_band, save_coef, save_all_bands, save_ndvi,
-     min_clear_samples) = subchunk_args
+    if len(subchunk_args) >= 16:
+        (sub_y0, sub_y1, width,
+         sr_sub, fm_sub, cm_sub,
+         ordinal_dates, acq_times, X_full,
+         target_band, save_coef, save_all_bands, save_ndvi,
+         min_clear_samples,
+         fill_val, scale_factor) = subchunk_args[:16]
+    else:
+        (sub_y0, sub_y1, width,
+         sr_sub, fm_sub, cm_sub,
+         ordinal_dates, acq_times, X_full,
+         target_band, save_coef, save_all_bands, save_ndvi,
+         min_clear_samples) = subchunk_args[:14]
+        fill_val = None
+        scale_factor = 10000.0
 
     num_frames = sr_sub.shape[0]
     chunk_h = sub_y1 - sub_y0
@@ -247,7 +681,6 @@ def _process_row_subchunk(subchunk_args):
     if save_ndvi:
         sub_ndvi = np.full((num_frames, chunk_h, width), np.nan, dtype=np.float32)
 
-    nominal_thermals = np.full(num_frames, NOMINAL_THERMAL_KELVIN_SCALED, dtype=np.int16)
     proc_params = {
         'QA_BITPACKED': False,
         'QA_FILL': 0,
@@ -256,16 +689,17 @@ def _process_row_subchunk(subchunk_args):
         'QA_SHADOW': 3,
         'QA_SNOW': 4,
         'QA_CLOUD': 5,
-        'LASSO_MAX_ITER': 2000
+        'LASSO_MAX_ITER': 2000,
+        'DETECTION_BANDS': [0, 1, 2, 3, 4, 5, 6]
     }
 
     for y_local in range(chunk_h):
         for x in range(width):
             fm_pixel = fm_sub[:, y_local, x]
             cm_pixel = cm_sub[:, y_local, x]
-            sr_blue = sr_sub[:, 1, y_local, x]
+            sr_pixel_bands = sr_sub[:, 0:7, y_local, x]
 
-            qas_pixel = decode_categorical_qa(fm_pixel, cm_pixel, sr_blue)
+            qas_pixel = decode_categorical_qa(fm_pixel, cm_pixel, sr_pixel_bands, fill_val=fill_val)
 
             # LSDS-1982 Section 2.6.2.1 / 2.6.1: usable observations for model fitting are Clear (1) and Water (2),
             # with Snow (4) also valid under the permanent snow procedure.
@@ -273,6 +707,7 @@ def _process_row_subchunk(subchunk_args):
             if usable_count < min_clear_samples:
                 continue
 
+            coastal = sr_sub[:, 0, y_local, x]
             blues = sr_sub[:, 1, y_local, x]
             greens = sr_sub[:, 2, y_local, x]
             reds = sr_sub[:, 3, y_local, x]
@@ -281,10 +716,9 @@ def _process_row_subchunk(subchunk_args):
             swir2s = sr_sub[:, 6, y_local, x]
 
             try:
-                res = ccd.detect(
+                res = detect_7band(
                     ordinal_dates,
-                    blues, greens, reds, nirs, swir1s, swir2s,
-                    nominal_thermals,
+                    coastal, blues, greens, reds, nirs, swir1s, swir2s,
                     qas_pixel,
                     params=proc_params
                 )
@@ -338,13 +772,13 @@ def _process_row_subchunk(subchunk_args):
                 coefs_7 = list(b_info['coefficients'])
                 theta_8 = np.array([intercept] + coefs_7, dtype=np.float64)
 
-                pred_scaled = (X_full @ theta_8) / 10000.0
-                rmse_scaled = float(b_info['rmse']) / 10000.0
+                pred_scaled = (X_full @ theta_8) / scale_factor
+                rmse_scaled = float(b_info['rmse']) / scale_factor
 
                 target_preds.append(pred_scaled)
                 target_rmses.append(rmse_scaled)
                 if save_coef:
-                    target_coefs.append(theta_8 / 10000.0)
+                    target_coefs.append(theta_8 / scale_factor)
 
             for t_idx in range(num_frames):
                 m_active = active_model_indices[t_idx]
@@ -360,7 +794,7 @@ def _process_row_subchunk(subchunk_args):
                     for m in models:
                         b_info = m[b_name]
                         b_theta = np.array([float(b_info['intercept'])] + list(b_info['coefficients']), dtype=np.float64)
-                        b_preds.append((X_full @ b_theta) / 10000.0)
+                        b_preds.append((X_full @ b_theta) / scale_factor)
                     all_band_preds[b_name] = b_preds
 
                 if save_all_bands:
@@ -407,8 +841,8 @@ def main(
     row_end=None,
     col_start=None,
     col_end=None,
-    resume=True,
-    overwrite=False,
+    resume=False,
+    overwrite=True,
     **kwargs,
 ):
     """
@@ -450,6 +884,36 @@ def main(
         if sr_dataset_name not in hlsl30_grp:
             raise KeyError(f"Dataset '{sr_dataset_name}' not found in {hlsl30_grp.name}. Available datasets: {list(hlsl30_grp.keys())}")
         sr_ds = hlsl30_grp[sr_dataset_name]
+
+        # Datatype validation
+        if sr_ds.dtype != np.int16:
+            raise TypeError(
+                f"Dataset '{sr_dataset_name}' has datatype {sr_ds.dtype}; pyccd Landsat pipeline requires int16."
+            )
+
+        # Retrieve _FillValue attribute
+        if "_FillValue" in sr_ds.attrs:
+            fill_val = sr_ds.attrs["_FillValue"]
+        elif "fillvalue" in sr_ds.attrs:
+            fill_val = sr_ds.attrs["fillvalue"]
+        elif hasattr(sr_ds, "fillvalue") and sr_ds.fillvalue is not None and sr_ds.fillvalue != 0:
+            fill_val = sr_ds.fillvalue
+        else:
+            raise KeyError(
+                f"Dataset '{sr_dataset_name}' lacks mandatory '_FillValue' attribute."
+            )
+        fill_val = int(fill_val)
+
+        # Retrieve scale_factor attribute
+        if "scale_factor" in sr_ds.attrs:
+            scale_factor = float(sr_ds.attrs["scale_factor"])
+        elif "scale_to_float" in sr_ds.attrs:
+            sf = float(sr_ds.attrs["scale_to_float"])
+            scale_factor = (1.0 / sf) if sf < 1.0 else sf
+        else:
+            raise KeyError(
+                f"Dataset '{sr_dataset_name}' lacks mandatory 'scale_factor' or 'scale_to_float' attribute."
+            )
 
         acq_times = sr_ds.attrs.get('acquisition_time')
         if acq_times is None:
@@ -526,10 +990,10 @@ def main(
             if geo_transform is not None:
                 ccd_grp.attrs['GeoTransform'] = geo_transform
 
-            ccd_grp.attrs['ALGORITHM'] = 'lcmap-pyccd'
+            ccd_grp.attrs['ALGORITHM'] = 'lcmap-pyccd-7band-landsat89'
             ccd_grp.attrs['TARGET_BAND'] = target_band
             ccd_grp.attrs['TARGET_BANDS'] = BAND_NAMES
-            ccd_grp.attrs['DETECTION_BANDS'] = [1, 2, 3, 4, 5]
+            ccd_grp.attrs['DETECTION_BANDS'] = [0, 1, 2, 3, 4, 5, 6]
             ccd_grp.attrs['SOURCE_DATA'] = h5_path
             ccd_grp.attrs['SOURCE_GRID'] = '/HDFEOS/GRIDS/HLSL30'
             ccd_grp.attrs['SR_DATASET'] = sr_dataset_name
@@ -538,7 +1002,9 @@ def main(
             ccd_grp.attrs['MIN_CLEAR_SAMPLES'] = min_clear_samples
             ccd_grp.attrs['PEEK_SIZE'] = 6
             ccd_grp.attrs['MEOW_SIZE'] = 12
-            ccd_grp.attrs['CHANGE_THRESHOLD'] = 15.086272469388987
+            ccd_grp.attrs['CHANGE_THRESHOLD'] = 18.475306906582357
+            ccd_grp.attrs['SOURCE_FILL_VALUE'] = fill_val
+            ccd_grp.attrs['SOURCE_SCALE_FACTOR'] = scale_factor
 
             if (height, width) != (full_height, full_width):
                 ccd_grp.attrs['ROI_ROWS'] = [y0, y1]
@@ -632,7 +1098,8 @@ def main(
                     np.ascontiguousarray(cm_block[:, sub_y0:sub_y1, :]),
                     ordinal_dates, acq_times, X_full,
                     target_band, save_coef, save_all_bands, save_ndvi,
-                    min_clear_samples
+                    min_clear_samples,
+                    fill_val, scale_factor
                 )
                 subchunks.append(sub_args)
 
@@ -740,8 +1207,8 @@ if __name__ == "__main__":
     parser.add_argument('--row-end', type=int, default=None, help="Optional ending row")
     parser.add_argument('--col-start', type=int, default=None, help="Optional starting col")
     parser.add_argument('--col-end', type=int, default=None, help="Optional ending col")
-    parser.add_argument('--overwrite', action='store_true', help="Overwrite existing output group instead of resuming")
-    parser.add_argument('--no-resume', action='store_false', dest='resume', help="Disable automatic block resumption")
+    parser.add_argument('--overwrite', action='store_true', default=True, help="Overwrite existing output group instead of resuming")
+    parser.add_argument('--no-resume', action='store_false', dest='resume', default=True, help="Disable automatic block resumption")
     args = parser.parse_args()
 
     main(

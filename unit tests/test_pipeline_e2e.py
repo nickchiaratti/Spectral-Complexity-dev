@@ -2,7 +2,7 @@
 End-to-End and Integration Test Suite for HarmonizedSC_run_pipeline.py.
 
 Tests cover:
-- 11-step decoupled pipeline architecture (Baseline: 1-7, Injected: 8-11)
+- 8-step decoupled pipeline architecture (Baseline: 1-7, Injected: 8)
 - Command line interface argument parsing (steps, location, temporal bounds, config)
 - Flexible step range, preset ('injected', 'baseline'), and comma-separated parser logic
 - Dry-run validation modes across full chain, baseline-only, and injected-only sub-chains
@@ -38,9 +38,9 @@ import HarmonizedSC_run_pipeline as orchestrator
 # =====================================================================
 
 def test_pipeline_step_definitions():
-    """Verify that all 11 required steps are registered in exact order and partitioned correctly."""
+    """Verify that all 8 required steps are registered in exact order and partitioned correctly."""
     defs = orchestrator.STEP_DEFINITIONS
-    assert len(defs) == 11
+    assert len(defs) == 8
 
     # Baseline steps (1 - 7)
     assert defs[1]["name"] == "HLS30_earthAccess_to_hdf5"
@@ -58,38 +58,34 @@ def test_pipeline_step_definitions():
     assert defs[7]["name"] in ("SC_CCM_vis", "harmonized_CCD_vis")
     assert defs[7]["pipeline"] == "baseline"
 
-    # Injected steps (8 - 11)
-    assert defs[8]["name"] == "create_injected_dataset"
+    # Injected step (8)
+    assert defs[8]["name"] == "generate_stratified_patch_benchmark"
     assert defs[8]["pipeline"] == "injected"
-    assert defs[9]["name"] == "pyccd_landsat_main"
-    assert defs[9]["pipeline"] == "injected"
-    assert defs[10]["name"] in ("SC_CCM_main", "harmonized_CCD_main")
-    assert defs[10]["pipeline"] == "injected"
-    assert defs[11]["name"] in ("SC_CCM_vis", "harmonized_CCD_vis")
-    assert defs[11]["pipeline"] == "injected"
 
 
 def test_pipeline_steps_parser_valid_ranges():
     """Verify parse_steps parses range syntax, presets, and comma-separated lists correctly."""
     assert orchestrator.parse_steps("1-7") == [1, 2, 3, 4, 5, 6, 7]
-    assert orchestrator.parse_steps("8-11") == [8, 9, 10, 11]
-    assert orchestrator.parse_steps("injected") == [8, 9, 10, 11]
+    assert orchestrator.parse_steps("8") == [8]
+    assert orchestrator.parse_steps("injected") == [8]
     assert orchestrator.parse_steps("baseline") == [1, 2, 3, 4, 5, 6, 7]
-    assert orchestrator.parse_steps(injected_only=True) == [8, 9, 10, 11]
+    assert orchestrator.parse_steps(injected_only=True) == [8]
     assert orchestrator.parse_steps(baseline_only=True) == [1, 2, 3, 4, 5, 6, 7]
     assert orchestrator.parse_steps("1,2,3,4,5,6") == [1, 2, 3, 4, 5, 6]
     assert orchestrator.parse_steps("3-5") == [3, 4, 5]
     assert orchestrator.parse_steps("2,4,6") == [2, 4, 6]
     assert orchestrator.parse_steps("4") == [4]
-    assert orchestrator.parse_steps("1-2,8-11") == [1, 2, 8, 9, 10, 11]
+    assert orchestrator.parse_steps("1-2,8") == [1, 2, 8]
     assert orchestrator.parse_steps([1, 2, 3]) == [1, 2, 3]
-    assert orchestrator.parse_steps([8, 9, 10, 11]) == [8, 9, 10, 11]
+    assert orchestrator.parse_steps([8]) == [8]
 
 
 def test_pipeline_steps_parser_invalid_inputs():
     """Verify parse_steps rejects out-of-range, descending, or malformed inputs."""
     with pytest.raises(ValueError):
         orchestrator.parse_steps("0-6")
+    with pytest.raises(ValueError):
+        orchestrator.parse_steps("8-11")
     with pytest.raises(ValueError):
         orchestrator.parse_steps("1-15")
     with pytest.raises(ValueError):
@@ -125,7 +121,7 @@ def test_pipeline_cli_parser_custom_options():
     """Verify CLI parser custom arguments override defaults."""
     parser = orchestrator.build_arg_parser()
     args = parser.parse_args([
-        "--steps", "8-11",
+        "--steps", "8",
         "--injected-only",
         "--location", "Malibu",
         "--start-date", "2023-01-01",
@@ -136,7 +132,7 @@ def test_pipeline_cli_parser_custom_options():
         "--metric", "sliding_volume_map",
         "--skip-earthaccess",
     ])
-    assert args.steps == ["8-11"]
+    assert args.steps == ["8"]
     assert args.injected_only is True
     assert args.location == "Malibu"
     assert args.start_date == "2023-01-01"
@@ -182,19 +178,19 @@ def test_pipeline_config_loader_custom_file():
 # =====================================================================
 
 def test_pipeline_dry_run_all_steps():
-    """Verify dry-run mode executes all 11 steps without launching heavy compute."""
+    """Verify dry-run mode executes all 8 steps without launching heavy compute."""
     result = orchestrator.run_pipeline(
-        steps="1-11",
+        steps="1-8",
         location="Rochesterv2",
         dry_run=True,
     )
     assert result["status"] == "SUCCESS"
     assert result["dry_run"] is True
-    assert result["executed_steps"] == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+    assert result["executed_steps"] == [1, 2, 3, 4, 5, 6, 7, 8]
 
 
 def test_pipeline_dry_run_injected_only():
-    """Verify injected-only execution isolates steps 8 through 11."""
+    """Verify injected-only execution isolates step 8."""
     result = orchestrator.run_pipeline(
         injected_only=True,
         location="Rochesterv2",
@@ -202,7 +198,7 @@ def test_pipeline_dry_run_injected_only():
     )
     assert result["status"] == "SUCCESS"
     assert result["dry_run"] is True
-    assert result["executed_steps"] == [8, 9, 10, 11]
+    assert result["executed_steps"] == [8]
 
 
 def test_pipeline_dry_run_baseline_only():
@@ -228,10 +224,10 @@ def test_pipeline_dry_run_subsets_and_skip_flags():
     assert result["executed_steps"] == [3, 4, 5, 6]
 
     result2 = orchestrator.run_pipeline(
-        steps="9-11",
+        steps="7-8",
         dry_run=True,
     )
-    assert result2["executed_steps"] == [9, 10, 11]
+    assert result2["executed_steps"] == [7, 8]
 
 
 # =====================================================================
@@ -239,52 +235,31 @@ def test_pipeline_dry_run_subsets_and_skip_flags():
 # =====================================================================
 
 def test_pipeline_mocked_injected_execution_sequence():
-    """Verify mock functions are called in exact sequence for injected steps (8-11)."""
-    mock_inj = MagicMock()
-    mock_pyccd = MagicMock()
-    mock_pyccd.main.return_value = "mock_inj_pyccd.h5"
-    mock_ccd = MagicMock()
-    mock_ccd.main.return_value = "mock_master.h5"
-    mock_vis = MagicMock()
-    mock_vis.get_default_png_name.return_value = "mock_vis.png"
-    mock_pyccd_vis = MagicMock()
-    mock_pyccd_vis.get_default_png_name.return_value = "mock_pyccd_vis.png"
-
+    """Verify mock functions are called in exact sequence for injected step (8)."""
+    mock_bench = MagicMock()
     call_order = []
 
     def mock_import(name):
         call_order.append(name)
-        if name == "create_injected_dataset":
-            return mock_inj
-        elif name == "pyccd_landsat_main":
-            return mock_pyccd
-        elif name in ("harmonized_CCD_main", "SC_CCM_main"):
-            return mock_ccd
-        elif name in ("harmonized_CCD_vis", "SC_CCM_vis"):
-            return mock_vis
-        elif name == "pyccd_landsat_vis":
-            return mock_pyccd_vis
-        return MagicMock()
+        if name == "generate_stratified_patch_benchmark":
+            return mock_bench
+        raise AssertionError(f"Unexpected module import for injected pipeline: {name}")
 
     with patch("importlib.import_module", side_effect=mock_import):
         with patch.object(orchestrator.os.path, "exists", return_value=True):
             result = orchestrator.run_pipeline(
-                steps="8-11",
+                steps="8",
                 location="Rochesterv2",
                 h5_path="mock_master.h5",
                 dry_run=False,
             )
 
     assert result["status"] == "SUCCESS"
-    assert result["executed_steps"] == [8, 9, 10, 11]
-    mock_inj.inject_master_h5.assert_called_once()
-    mock_pyccd.main.assert_called_once_with(
-        location="Rochesterv2",
-        h5_path="mock_master.h5",
-        injected=True,
-    )
-    assert mock_ccd.main.call_count == 2
-    mock_vis.plot_spatial_anomaly_overlay.assert_called()
+    assert result["executed_steps"] == [8]
+    assert call_order == ["generate_stratified_patch_benchmark"]
+    assert mock_bench.MASTER_H5_PATH == "mock_master.h5"
+    mock_bench.main.assert_called_once_with()
+    assert result["artifacts"]["injected_h5"] == "mock_master.h5"
 
 
 def test_pipeline_error_propagation_halts_chain():
@@ -326,7 +301,7 @@ def test_pipeline_error_propagation_halts_chain():
 
 def test_pipeline_main_exit_code_success():
     """Verify main returns 0 on successful dry run."""
-    code = orchestrator.main(["--dry-run", "--steps", "8-11", "--location", "Rochesterv2"])
+    code = orchestrator.main(["--dry-run", "--steps", "8", "--location", "Rochesterv2"])
     assert code == 0
 
 
@@ -340,12 +315,12 @@ def test_pipeline_subprocess_cli_invocation():
     """Verify real subprocess CLI execution of the pipeline orchestrator."""
     script_path = REPO_ROOT / "HarmonizedSC_run_pipeline.py"
     proc = subprocess.run(
-        [sys.executable, str(script_path), "--dry-run", "--steps", "8-11", "--location", "Rochesterv2"],
+        [sys.executable, str(script_path), "--dry-run", "--steps", "8", "--location", "Rochesterv2"],
         capture_output=True,
         text=True,
     )
     assert proc.returncode == 0
-    assert "Active Steps:    [8, 9, 10, 11]" in proc.stdout
+    assert "Active Steps:    [8]" in proc.stdout
     assert "PIPELINE EXECUTION COMPLETED SUCCESSFULLY" in proc.stdout
 
 

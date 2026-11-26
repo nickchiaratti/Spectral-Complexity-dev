@@ -398,7 +398,73 @@ def calcGramLocalVolumes(endmembers, localization_vector=None, divide_by_factori
     else:
         raise ValueError(f"calcGramLocalVolumes expects 2D or 3D tensor, got shape {endmembers.shape}")
 
-def process_volume_sliding_tile_batch(batch_data, tile_size, stride, num_endmembers, device=None, return_neighborhood=False):
+def calculate_3d_equivalent_volume(heights, bands, separability_threshold=0.01):
+    """
+    Computes the threshold-truncated 3D-normalized equivalent volume (OSDprodnormalized)
+    from orthogonal heights extracted via maximumDistance_cholesky_torch.
+
+    Formula:
+        h_crit = separability_threshold * sqrt(bands)
+        V_3D = V_3 + sum_{j=4}^k* (prod_{m=1}^j h_m)^(3/j)
+        where k* is the last endmember index such that h_m >= h_crit for all m <= k*,
+        and V_3 = prod_{m=1}^3 h_m.
+
+    Args:
+        heights: Tensor or ndarray of orthogonal heights.
+                 If shape has last dim == num_endmembers (with heights[..., 0] == 0.0),
+                 heights[..., 1:] are used.
+        bands: int, number of spectral bands.
+        separability_threshold: float, reflectance fraction threshold (default 0.01 = 1%).
+
+    Returns:
+        v_3d: Tensor or ndarray matching heights device/type, shape matching heights.shape[:-1].
+    """
+    is_numpy = isinstance(heights, np.ndarray)
+    if is_numpy:
+        h_t = torch.from_numpy(heights)
+    else:
+        h_t = heights
+
+    device = h_t.device
+    dtype = h_t.dtype if h_t.dtype.is_floating_point else torch.float32
+
+    # Check if first element is zero (origin endmember)
+    if h_t.shape[-1] > 1 and torch.all(h_t[..., 0] == 0.0):
+        h_nz = h_t[..., 1:]
+    else:
+        h_nz = h_t
+
+    K = h_nz.shape[-1]
+    if K < 3:
+        out = torch.zeros(h_t.shape[:-1], dtype=dtype, device=device)
+        return out.cpu().numpy() if is_numpy else out
+
+    h_crit = float(separability_threshold) * math.sqrt(float(bands))
+    h_clamped = torch.clamp(h_nz.to(torch.float64), min=1e-12)
+    P = torch.cumprod(h_clamped, dim=-1)
+    k_steps = torch.arange(1, K + 1, device=device, dtype=torch.float64)
+    v_terms = P ** (3.0 / k_steps)
+
+    is_above = (h_nz >= h_crit)
+    valid_signal = torch.cumprod(is_above.to(torch.int32), dim=-1).bool()
+
+    if K >= 4:
+        term_mask = valid_signal[..., 3:]
+        v_sum = torch.sum(torch.where(term_mask, v_terms[..., 3:], torch.zeros_like(v_terms[..., 3:])), dim=-1)
+        v_3d = P[..., 2] + v_sum
+    else:
+        v_3d = P[..., 2]
+
+    # Zero out unformed / degenerate volumes
+    v_3d = torch.where(P[..., 2] > 1e-11, v_3d, torch.zeros_like(v_3d))
+    v_3d = v_3d.to(dtype)
+
+    if is_numpy:
+        return v_3d.detach().cpu().numpy()
+    return v_3d
+
+
+def process_volume_sliding_tile_batch(batch_data, tile_size, stride, num_endmembers, device=None, return_neighborhood=False, volume_method='maxVol', separability_threshold=0.01, apply_spatial_smoothing=True):
     """
     High-throughput batched GPU sliding window processing across multiple patch tiles.
     Bypasses whole-scene CPU memory spooling and chunking to execute direct batched unfolding,
@@ -411,11 +477,13 @@ def process_volume_sliding_tile_batch(batch_data, tile_size, stride, num_endmemb
         num_endmembers: int, maximum number of endmembers to extract per tile.
         device: torch.device, str, or None. Target device ('cuda' or 'cpu'). If None, uses CUDA if available.
         return_neighborhood: bool, default False. If True, returns (final_maps, neighborhood_maps).
+        volume_method: str, 'maxVol' (default) or '3D' (3D equivalent volume with stopping rule).
+        separability_threshold: float, reflectance fraction threshold (default 0.01 = 1%).
 
     Returns:
         final_maps: ndarray or Tensor of shape (B, height, width) or (height, width).
     """
-    if num_endmembers > tile_size * tile_size:
+    if volume_method.upper() != '3D' and num_endmembers > tile_size * tile_size:
         warnings.warn(f"Clamping num_endmembers ({num_endmembers}) to tile pixel count ({tile_size * tile_size})")
         num_endmembers = tile_size * tile_size
 
@@ -461,9 +529,13 @@ def process_volume_sliding_tile_batch(batch_data, tile_size, stride, num_endmemb
         v_out = torch.zeros(n_val, dtype=torch.float32, device=target_device)
         for s in range(0, n_val, chunk_size):
             e = min(s + chunk_size, n_val)
-            _, vol = maximumDistance_volumes(valid_data[s:e], num_endmembers)
-            if vol.shape[1] > 2:
-                v_out[s:e] = torch.max(vol[:, 2:], dim=1)[0]
+            if volume_method.upper() == '3D':
+                _, _, heights = maximumDistance_cholesky_torch(valid_data[s:e], num_endmembers, return_heights=True)
+                v_out[s:e] = calculate_3d_equivalent_volume(heights, bands, separability_threshold=separability_threshold)
+            else:
+                _, vol = maximumDistance_volumes(valid_data[s:e], num_endmembers)
+                if vol.shape[1] > 2:
+                    v_out[s:e] = torch.max(vol[:, 2:], dim=1)[0]
         flat_vols[flat_is_valid] = v_out
 
     grid_vols = flat_vols.view(B, out_h, out_w)
@@ -473,16 +545,19 @@ def process_volume_sliding_tile_batch(batch_data, tile_size, stride, num_endmemb
     neighborhood_map = torch.full((B, height, width), float('nan'), dtype=torch.float32, device=target_device)
     neighborhood_map[:, center_offset:center_offset + out_h, center_offset:center_offset + out_w] = torch.where(grid_valid, grid_vols, float('nan'))
 
-    clean_neighborhood = torch.nan_to_num(neighborhood_map, nan=0.0)
-    valid_binary = (~torch.isnan(neighborhood_map)).to(torch.float32)
+    if apply_spatial_smoothing:
+        clean_neighborhood = torch.nan_to_num(neighborhood_map, nan=0.0)
+        valid_binary = (~torch.isnan(neighborhood_map)).to(torch.float32)
 
-    pad = tile_size // 2
-    kernel = torch.ones((1, 1, tile_size, tile_size), dtype=torch.float32, device=target_device)
-    sum_map = torch.nn.functional.conv2d(clean_neighborhood.unsqueeze(1), kernel, padding=pad)
-    count_map = torch.nn.functional.conv2d(valid_binary.unsqueeze(1), kernel, padding=pad)
+        pad = tile_size // 2
+        kernel = torch.ones((1, 1, tile_size, tile_size), dtype=torch.float32, device=target_device)
+        sum_map = torch.nn.functional.conv2d(clean_neighborhood.unsqueeze(1), kernel, padding=pad)
+        count_map = torch.nn.functional.conv2d(valid_binary.unsqueeze(1), kernel, padding=pad)
 
-    nan_tensor = torch.tensor(float('nan'), dtype=torch.float32, device=target_device)
-    final_map = torch.where(count_map > 0, sum_map / count_map, nan_tensor).squeeze(1)
+        nan_tensor = torch.tensor(float('nan'), dtype=torch.float32, device=target_device)
+        final_map = torch.where(count_map > 0, sum_map / count_map, nan_tensor).squeeze(1)
+    else:
+        final_map = neighborhood_map
 
     if is_3d:
         final_map = final_map.squeeze(0)
@@ -494,7 +569,7 @@ def process_volume_sliding_tile_batch(batch_data, tile_size, stride, num_endmemb
     return final_map.detach().cpu().numpy()
 
 
-def process_volume_sliding_tile(frame_data, tile_size, stride, num_endmembers, device=None, return_neighborhood=False):
+def process_volume_sliding_tile(frame_data, tile_size, stride, num_endmembers, device=None, return_neighborhood=False, volume_method='maxVol', separability_threshold=0.01, compute_esd=False, compute_sii=False, global_sigma_n=0.0, esd_kappa=3.0, apply_spatial_smoothing=True):
     """
     GPU-accelerated sliding window processing with CPU-host memory spooling.
     Strict Validity: Window is only processed if ALL pixels are valid.
@@ -511,21 +586,34 @@ def process_volume_sliding_tile(frame_data, tile_size, stride, num_endmembers, d
         tile_size: int, spatial window size (e.g., 3 for 3x3).
         stride: int, sliding window stride.
         num_endmembers: int, maximum number of endmembers to extract per tile.
-        device: torch.device, str, or None. Device to use ('cuda' or 'cpu').
-                If None, uses CUDA if available, else CPU.
-        return_neighborhood: bool, default False. If True, returns (final_map, neighborhood_map).
-    
+        device: torch.device or None.
+        return_neighborhood: bool, if True returns (final_map, neighborhood_map).
+        volume_method: 'maxVol' or '3D'.
+        separability_threshold: float, reflectance stopping threshold for 3D method (default 0.01).
+        compute_esd: bool, if True delegates to process_cholesky_volume_sliding_tile with ESD.
+        compute_sii: bool, if True delegates to process_cholesky_volume_sliding_tile with SII.
+        global_sigma_n: float, noise standard deviation.
+        esd_kappa: float, ESD threshold parameter.
+        apply_spatial_smoothing: bool, default True. If False, returns raw neighborhood_map without spatial averaging.
     Returns:
-        final_map: ndarray (height, width), spatially averaged volume metric. 
+        final_map: ndarray (height, width), volume metric (spatially averaged if apply_spatial_smoothing=True). 
         neighborhood_map: (optional) ndarray (height, width) if return_neighborhood=True.
     """
+    if compute_esd or compute_sii:
+        return process_cholesky_volume_sliding_tile(
+            frame_data, tile_size, stride, num_endmembers,
+            compute_esd=compute_esd, compute_sii=compute_sii,
+            global_sigma_n=global_sigma_n, esd_kappa=esd_kappa,
+            volume_method=volume_method, separability_threshold=separability_threshold,
+            apply_spatial_smoothing=apply_spatial_smoothing
+        )
     # If 4D batch or Tensor of 4D, delegate directly to high-throughput batch function
     if hasattr(frame_data, "ndim") and frame_data.ndim == 4:
-        return process_volume_sliding_tile_batch(frame_data, tile_size, stride, num_endmembers, device=device, return_neighborhood=return_neighborhood)
+        return process_volume_sliding_tile_batch(frame_data, tile_size, stride, num_endmembers, device=device, return_neighborhood=return_neighborhood, volume_method=volume_method, separability_threshold=separability_threshold, apply_spatial_smoothing=apply_spatial_smoothing)
     if hasattr(frame_data, "dim") and frame_data.dim() == 4:
-        return process_volume_sliding_tile_batch(frame_data, tile_size, stride, num_endmembers, device=device, return_neighborhood=return_neighborhood)
+        return process_volume_sliding_tile_batch(frame_data, tile_size, stride, num_endmembers, device=device, return_neighborhood=return_neighborhood, volume_method=volume_method, separability_threshold=separability_threshold, apply_spatial_smoothing=apply_spatial_smoothing)
 
-    if num_endmembers > tile_size * tile_size:
+    if volume_method.upper() != '3D' and num_endmembers > tile_size * tile_size:
         warnings.warn(f"Clamping num_endmembers ({num_endmembers}) to tile pixel count ({tile_size * tile_size})")
         num_endmembers = tile_size * tile_size
 
@@ -620,12 +708,20 @@ def process_volume_sliding_tile(frame_data, tile_size, stride, num_endmembers, d
 
                     valid_data = chunk_windows[i:i + batch_size][batch_valid]
 
-                    _, volume = maximumDistance_volumes(valid_data, num_endmembers)
-
-                    if volume.shape[1] > 2:
-                        vol_val = torch.max(volume[:, 2:], dim=1)[0]
+                    if volume_method.upper() == '3D':
+                        _, _, heights = maximumDistance_cholesky_torch(
+                            valid_data, num_endmembers, return_heights=True
+                        )
+                        vol_val = calculate_3d_equivalent_volume(
+                            heights, bands=bands, separability_threshold=separability_threshold
+                        )
                     else:
-                        vol_val = torch.zeros(volume.shape[0], dtype=COMPUTE_DTYPE, device=target_device)
+                        _, volume = maximumDistance_volumes(valid_data, num_endmembers)
+
+                        if volume.shape[1] > 2:
+                            vol_val = torch.max(volume[:, 2:], dim=1)[0]
+                        else:
+                            vol_val = torch.zeros(volume.shape[0], dtype=COMPUTE_DTYPE, device=target_device)
 
                     chunk_vol_vals[i:i + batch_len][batch_valid] = vol_val
 
@@ -649,15 +745,18 @@ def process_volume_sliding_tile(frame_data, tile_size, stride, num_endmembers, d
                      center_offset:center_offset + out_w][~valid_grid] = np.nan
 
     # 5. Final Map — Fast Spatial Averaging via 2D Convolution (mean filter)
-    clean_neighborhood = np.nan_to_num(neighborhood_map, nan=0.0)
-    valid_binary = ~np.isnan(neighborhood_map)
+    if apply_spatial_smoothing:
+        clean_neighborhood = np.nan_to_num(neighborhood_map, nan=0.0)
+        valid_binary = ~np.isnan(neighborhood_map)
 
-    sum_map = uniform_filter(clean_neighborhood, size=tile_size, mode='constant', cval=0.0)
-    count_map = uniform_filter(valid_binary.astype(np.float32), size=tile_size, mode='constant', cval=0.0)
+        sum_map = uniform_filter(clean_neighborhood, size=tile_size, mode='constant', cval=0.0)
+        count_map = uniform_filter(valid_binary.astype(np.float32), size=tile_size, mode='constant', cval=0.0)
 
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", category=RuntimeWarning)
-        final_map = np.where(count_map > 0, sum_map / count_map, np.nan)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", category=RuntimeWarning)
+            final_map = np.where(count_map > 0, sum_map / count_map, np.nan)
+    else:
+        final_map = neighborhood_map
 
     if return_neighborhood:
         return final_map, neighborhood_map
@@ -1181,7 +1280,9 @@ def estimate_effective_dimensionality_torch(img_cube, k_max, sigma_n, kappa=3.0,
 
 def process_cholesky_volume_sliding_tile(frame_data, tile_size, stride, num_endmembers, 
                                           compute_esd=False, compute_sii=False, 
-                                          global_sigma_n=0.0, esd_kappa=3.0):
+                                          global_sigma_n=0.0, esd_kappa=3.0,
+                                          volume_method='maxVol', separability_threshold=0.01,
+                                          apply_spatial_smoothing=True):
     """
     GPU-accelerated Spectral Complexity calculation using Gram-space Pivoted Cholesky
     decomposition with CPU-host memory spooling.
@@ -1305,7 +1406,8 @@ def process_cholesky_volume_sliding_tile(frame_data, tile_size, stride, num_endm
                 valid_data[torch.isnan(valid_data)] = 0.0
             
                 # 4a. Combined extraction and volume calculation via Pivoted Cholesky
-                if compute_esd or compute_sii:
+                need_heights = compute_esd or compute_sii or (volume_method.upper() == '3D')
+                if need_heights:
                     endmembers, volume, heights = maximumDistance_cholesky_torch(
                         valid_data, num_endmembers, return_heights=True
                     )
@@ -1315,7 +1417,9 @@ def process_cholesky_volume_sliding_tile(frame_data, tile_size, stride, num_endm
                     )
                 
                 # 4b. Extract target metric and immediately move result to CPU
-                if volume.shape[1] > 2:
+                if volume_method.upper() == '3D':
+                    vol_val = calculate_3d_equivalent_volume(heights, bands, separability_threshold=separability_threshold)
+                elif volume.shape[1] > 2:
                     vol_val = torch.max(volume[:, 2:], dim=1)[0]
                 else:
                     vol_val = torch.zeros(volume.shape[0], dtype=COMPUTE_DTYPE, device=device)
@@ -1351,8 +1455,8 @@ def process_cholesky_volume_sliding_tile(frame_data, tile_size, stride, num_endm
                      center_offset:center_offset + out_w][~valid_grid] = np.nan
                      
     # 6. Final Map: Fast spatial averaging via 2D convolution (mean filter)
-    if tile_size > 3:
-        # Disable spatial averaging for 5x5, 7x7 etc to prevent excessive blurring
+    if tile_size > 3 or not apply_spatial_smoothing:
+        # Disable spatial averaging to prevent excessive blurring
         final_map = neighborhood_map.copy()
     else:
         clean_neighborhood = np.nan_to_num(neighborhood_map, nan=0.0)
@@ -1485,5 +1589,33 @@ def process_msd_sliding_tile(frame_data, tile_size, stride):
         output_map = np.where(count_map > 0, sum_map / count_map, np.nan)
         
     return output_map.astype(np.float32)
+
+
+def process_volume_3d_sliding_tile(frame_data, tile_size=3, stride=1, num_endmembers=20, separability_threshold=0.01, device=None, return_neighborhood=False, apply_spatial_smoothing=True):
+    """
+    Convenience wrapper to compute 3D-normalized equivalent volume (OSDprodnormalized)
+    using maximumDistance_cholesky_torch extracting 20 endmembers with 1% delta reflectance stopping rule.
+    """
+    return process_volume_sliding_tile(
+        frame_data, tile_size=tile_size, stride=stride, num_endmembers=num_endmembers,
+        device=device, return_neighborhood=return_neighborhood,
+        volume_method='3D', separability_threshold=separability_threshold,
+        apply_spatial_smoothing=apply_spatial_smoothing
+    )
+
+
+def process_volume_3d_sliding_tile_batch(batch_data, tile_size=3, stride=1, num_endmembers=20, separability_threshold=0.01, device=None, return_neighborhood=False, apply_spatial_smoothing=True):
+    """
+    Convenience wrapper to compute 3D-normalized equivalent volume (OSDprodnormalized)
+    in high-throughput batched mode using maximumDistance_cholesky_torch extracting 20 endmembers
+    with 1% delta reflectance stopping rule.
+    """
+    return process_volume_sliding_tile_batch(
+        batch_data, tile_size=tile_size, stride=stride, num_endmembers=num_endmembers,
+        device=device, return_neighborhood=return_neighborhood,
+        volume_method='3D', separability_threshold=separability_threshold,
+        apply_spatial_smoothing=apply_spatial_smoothing
+    )
+
 
 
