@@ -7,7 +7,7 @@ directly into the master HDF5 container under /STRATIFIED_CHIP_BENCHMARK/.
 
 Reuses core functions and standards from:
   - SpecComplexTorch.py: Sliding window MaxD Gramian volume unmixing on GPU.
-  - harmonized_CCD_main.py: Harmonized RLS-LASSO continuous change detection engine.
+  - SC_CCM_main_numba.py: Numba-accelerated Harmonized RLS-LASSO continuous change detection engine.
   - pyccd_landsat_main.py: USGS LCMAP Landsat PyCCD detection engine and QA decoding.
   - create_injected_dataset.py: USGS Splib07 multi-sensor resampled spectral library.
 
@@ -33,6 +33,7 @@ import datetime
 from pathlib import Path
 import h5py
 import numpy as np
+import scipy.interpolate
 import torch
 
 # Ensure single-threaded BLAS/OpenMP execution for workers
@@ -41,14 +42,20 @@ os.environ["OPENBLAS_NUM_THREADS"] = "1"
 os.environ["MKL_NUM_THREADS"] = "1"
 os.environ["HDF5_USE_FILE_LOCKING"] = "FALSE"
 
-# Ensure script directory and parent directory are on sys.path
+# Ensure repository root and core subdirectories are on sys.path
 script_dir = Path(__file__).resolve().parent
-if str(script_dir) not in sys.path:
-    sys.path.insert(0, str(script_dir))
+for _p in [
+    script_dir / "change_detection" / "pyccd",
+    script_dir / "change_detection" / "SC-CCM",
+    script_dir,
+]:
+    p_str = str(_p)
+    if _p.exists() and p_str not in sys.path:
+        sys.path.insert(0, p_str)
 
 # Import core modules
 import SpecComplexTorch as sc
-import harmonized_CCD_main as hccd
+import SC_CCM_main_numba as hccd
 import pyccd_landsat_main as pccd
 import ccd
 
@@ -66,6 +73,9 @@ SPLIB_BASE = "C:/satelliteImagery/ground_truth/splib07/ASCIIdata"
 TILE_SIZE = 3
 SLIDING_STRIDE = 1
 NUM_ENDMEMBERS = 7
+
+# Sentinel-2 band subset indices matching HLSS30 (10 bands from 13-band splib07 resampled S2)
+S2_SUB_INDICES = [0, 1, 2, 3, 4, 5, 6, 7, 11, 12]
 
 # Land-Cover Stratified Patches (100% clean baseline in both PYCCD and SC-CCD)
 LAND_COVER_PATCHES = [
