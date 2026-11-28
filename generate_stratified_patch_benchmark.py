@@ -6,10 +6,14 @@ and saves all chips, simulated complexity cubes, and algorithmic break detection
 directly into the master HDF5 container under /STRATIFIED_CHIP_BENCHMARK/.
 
 Reuses core functions and standards from:
-  - SpecComplexTorch.py: Sliding window MaxD Gramian volume unmixing on GPU.
+  - SpecComplexTorch.py: Sliding window MaxD Gramian volume (maxVol) and 3D summation equivalent volume (3D) unmixing on GPU.
   - SC_CCM_main_numba.py: Numba-accelerated Harmonized RLS-LASSO continuous change detection engine.
   - pyccd_landsat_main.py: USGS LCMAP Landsat PyCCD detection engine and QA decoding.
   - create_injected_dataset.py: USGS Splib07 multi-sensor resampled spectral library.
+
+Outputs saved to master HDF5 container:
+  - /STRATIFIED_CHIP_BENCHMARK/    (Maximum Volume, sliding_volume_z_score)
+  - /STRATIFIED_CHIP_BENCHMARK_3D/ (3D Summation Equivalent Volume, volume_map_3d_zscore)
 
 Experimental Structure:
   - 4 Land-Cover Strata (10x10 pixels, 300 m x 300 m, 9.0 ha each):
@@ -19,9 +23,9 @@ Experimental Structure:
       4. SYNTHETIC: Eastview Commercial Complex (r0=1154, c0=888)
   - 4 Decoupled Injected Pixels per patch (stride = 4, 3 baseline pixels separation):
       Offsets: [(2, 2), (2, 6), (6, 2), (6, 6)]
-  - 10 USGS Splib07 Target Materials x 5 Mixture Fractions [0.05, 0.15, 0.25, 0.35, 0.45]
-      = 50 Distinct Perturbation Conditions
-  - 50 conditions x 4 strata x 4 pixels = 800 test instances per algorithm.
+  - 10 USGS Splib07 Target Materials x 21 Mixture Fractions [0.00, 0.05, ..., 1.00]
+      = 210 Distinct Perturbation Conditions
+  - 210 conditions x 4 strata x 4 pixels = 3,360 test instances per algorithm.
 """
 
 import os
@@ -35,6 +39,8 @@ import h5py
 import numpy as np
 import scipy.interpolate
 import torch
+from joblib import Parallel, delayed
+from tqdm import tqdm
 
 # Ensure single-threaded BLAS/OpenMP execution for workers
 os.environ["OMP_NUM_THREADS"] = "1"
@@ -73,6 +79,24 @@ SPLIB_BASE = "C:/satelliteImagery/ground_truth/splib07/ASCIIdata"
 TILE_SIZE = 3
 SLIDING_STRIDE = 1
 NUM_ENDMEMBERS = 7
+NUM_ENDMEMBERS_3D = 20
+SEPARABILITY_THRESHOLD_3D = 0.01
+
+# Spectral complexity benchmark methods evaluated on every run
+BENCHMARK_METRICS = [
+    {
+        "key": "sliding_volume_z_score",
+        "label": "Maximum Volume (maxVol)",
+        "group_name": "/STRATIFIED_CHIP_BENCHMARK",
+        "description": "Simulated Gramian Spectral Complexity Z-scores across full mixture fraction range (0.00 to 1.00)",
+    },
+    {
+        "key": "volume_map_3d_zscore",
+        "label": "3D Summation Equivalent Volume (3D)",
+        "group_name": "/STRATIFIED_CHIP_BENCHMARK_3D",
+        "description": "Simulated 3D Equivalent Spectral Complexity Z-scores across full mixture fraction range (0.00 to 1.00)",
+    },
+]
 
 # Sentinel-2 band subset indices matching HLSS30 (10 bands from 13-band splib07 resampled S2)
 S2_SUB_INDICES = [0, 1, 2, 3, 4, 5, 6, 7, 11, 12]
@@ -219,15 +243,15 @@ INJ_OFFSETS = [
     (6, 6),  # P4
 ]
 
-# Fractional abundance levels
-MIXTURE_FRACTIONS = [0.05, 0.15, 0.25, 0.35, 0.45]
+# Fractional abundance levels (0% to 100% in 5% increments, matching generate_patch_benchmark.py)
+MIXTURE_FRACTIONS = np.round(np.arange(0.00, 1.05, step=0.05), 2)
 
 # Compound data type for tabular results
 BREAK_RECORD_DTYPE = np.dtype([
-    ("condition_idx", np.int16),        # 0 to 49
+    ("condition_idx", np.int16),        # 0 to num_conditions - 1
     ("material_id", "S32"),             # Target material identifier string
     ("material_name", "S48"),           # Material descriptive name
-    ("mixture_fraction", np.float32),   # 0.05, 0.15, 0.25, 0.35, 0.45
+    ("mixture_fraction", np.float32),   # 0.00 to 1.00 in 0.05 increments
     ("patch_id", "S16"),                # 'AGRI', 'FOREST', 'WETLAND', 'SYNTHETIC'
     ("patch_name", "S48"),              # Full stratum description
     ("pixel_num", np.int8),             # 1 to 4
@@ -244,46 +268,95 @@ BREAK_RECORD_DTYPE = np.dtype([
 # ==============================================================================
 # STEP 1: EXTRACTION OF BASELINE CHIPS & METADATA
 # ==============================================================================
-def extract_baseline_chips(h5_file):
+def extract_baseline_chips(h5_file, target_metrics=None):
     """
-    Extracts the unperturbed 10x10 time series for each of the 4 patches across sensors.
+    Extracts the unperturbed 10x10 time series for each of the 4 patches across sensors,
+    along with global normalization statistics for each requested spectral complexity metric.
     Dynamically identifies scale_factor and _FillValue attributes from each dataset.
     """
     print("\n[Step 1] Extracting unperturbed 10x10 baseline chips from master scene...")
+
+    if target_metrics is None:
+        target_metrics = [m["key"] for m in BENCHMARK_METRICS]
+    elif isinstance(target_metrics, str):
+        target_metrics = [target_metrics]
 
     harm_grp = h5_file["/HDFEOS/GRIDS/HARMONIZED/Data Fields"]
     l30_grp = h5_file["/HDFEOS/GRIDS/HLSL30/Data Fields"]
     s30_grp = h5_file["/HDFEOS/GRIDS/HLSS30/Data Fields"]
     tan_grp = h5_file.get("/HDFEOS/GRIDS/TANAGER/Data Fields")
 
-    harm_z_ds = harm_grp["sliding_volume_z_score"]
+    missing_metrics = [m for m in target_metrics if m not in harm_grp]
+    if missing_metrics:
+        raise RuntimeError(
+            f"Required Harmonized Spectral Complexity dataset(s) {missing_metrics} not found in "
+            f"'{harm_grp.name}'. Run HLST_SC_calculations.py with metric='all' first."
+        )
+
+    primary_metric = target_metrics[0]
+    harm_z_ds = harm_grp[primary_metric]
     harm_cm_ds = harm_grp["common_mask"]
     l30_sr_ds = l30_grp["surface_reflectance"]
     l30_fm_ds = l30_grp["Fmask"]
+    l30_cm_ds = l30_grp.get("common_mask")
     s30_sr_ds = s30_grp["surface_reflectance"]
     s30_fm_ds = s30_grp["Fmask"]
+    s30_cm_ds = s30_grp.get("common_mask")
 
     n_harm_frames = harm_z_ds.shape[0]
     n_l30_frames = l30_sr_ds.shape[0]
     n_s30_frames = s30_sr_ds.shape[0]
     n_patches = len(LAND_COVER_PATCHES)
 
+    l30_cm_dtype = l30_cm_ds.dtype if l30_cm_ds is not None else np.bool_
+    s30_cm_dtype = s30_cm_ds.dtype if s30_cm_ds is not None else np.bool_
+
     chips = {
         "HLSL30": np.zeros((n_patches, n_l30_frames, 7, 10, 10), dtype=np.int16),
         "HLSS30": np.zeros((n_patches, n_s30_frames, 10, 10, 10), dtype=np.int16),
         "HLSL30_Fmask": np.zeros((n_patches, n_l30_frames, 10, 10), dtype=np.uint8),
         "HLSS30_Fmask": np.zeros((n_patches, n_s30_frames, 10, 10), dtype=np.uint8),
+        "HLSL30_common_mask": np.zeros((n_patches, n_l30_frames, 10, 10), dtype=l30_cm_dtype),
+        "HLSS30_common_mask": np.zeros((n_patches, n_s30_frames, 10, 10), dtype=s30_cm_dtype),
         "HARMONIZED_z_score": np.zeros((n_patches, n_harm_frames, 10, 10), dtype=np.float32),
+        "HARMONIZED_z_scores": {
+            m: np.zeros((n_patches, n_harm_frames, 10, 10), dtype=np.float32)
+            for m in target_metrics
+        },
         "HARMONIZED_common_mask": np.zeros((n_patches, n_harm_frames, 10, 10), dtype=np.uint8),
     }
 
+    def _read_scale_and_fill(ds, default_fill=-32768):
+        if "_FillValue" in ds.attrs:
+            fv = int(ds.attrs["_FillValue"])
+        elif "fillvalue" in ds.attrs:
+            fv = int(ds.attrs["fillvalue"])
+        elif "fill_value" in ds.attrs:
+            fv = int(ds.attrs["fill_value"])
+        elif getattr(ds, "fillvalue", None) is not None and ds.fillvalue != 0:
+            fv = int(ds.fillvalue)
+        else:
+            fv = int(default_fill)
+
+        if "scale_factor" in ds.attrs:
+            sc_val = float(ds.attrs["scale_factor"])
+        elif "scale_to_float" in ds.attrs:
+            sf = float(ds.attrs["scale_to_float"])
+            sc_val = (1.0 / sf) if sf < 1.0 else sf
+        else:
+            sc_val = 10000.0
+        return fv, sc_val
+
+    l30_fill, l30_scale = _read_scale_and_fill(l30_sr_ds, default_fill=-32768)
+    s30_fill, s30_scale = _read_scale_and_fill(s30_sr_ds, default_fill=-32768)
+
     scale_factors = {
-        "HLSL30": float(l30_sr_ds.attrs.get("scale_factor", 10000.0)),
-        "HLSS30": float(s30_sr_ds.attrs.get("scale_factor", 10000.0)),
+        "HLSL30": l30_scale,
+        "HLSS30": s30_scale,
     }
     fill_values = {
-        "HLSL30": int(l30_sr_ds.attrs.get("_FillValue", -32768)),
-        "HLSS30": int(s30_sr_ds.attrs.get("_FillValue", -32768)),
+        "HLSL30": l30_fill,
+        "HLSS30": s30_fill,
     }
 
     tan_sr_ds = None
@@ -292,8 +365,9 @@ def extract_baseline_chips(h5_file):
         n_tan_frames = tan_sr_ds.shape[0]
         n_tan_bands = tan_sr_ds.shape[1]
         chips["TANAGER"] = np.zeros((n_patches, n_tan_frames, n_tan_bands, 10, 10), dtype=np.int16)
-        scale_factors["TANAGER"] = float(tan_sr_ds.attrs.get("scale_factor", 10000.0))
-        fill_values["TANAGER"] = int(tan_sr_ds.attrs.get("_FillValue", -9999))
+        tan_fill, tan_scale = _read_scale_and_fill(tan_sr_ds, default_fill=-9999)
+        scale_factors["TANAGER"] = tan_scale
+        fill_values["TANAGER"] = tan_fill
 
     for p_idx, p in enumerate(LAND_COVER_PATCHES):
         r0, c0 = p["r0"], p["c0"]
@@ -301,17 +375,48 @@ def extract_baseline_chips(h5_file):
         chips["HLSS30"][p_idx] = s30_sr_ds[:, :, r0:r0+10, c0:c0+10]
         chips["HLSL30_Fmask"][p_idx] = l30_fm_ds[:, r0:r0+10, c0:c0+10]
         chips["HLSS30_Fmask"][p_idx] = s30_fm_ds[:, r0:r0+10, c0:c0+10]
+        if l30_cm_ds is not None:
+            chips["HLSL30_common_mask"][p_idx] = l30_cm_ds[:, r0:r0+10, c0:c0+10]
+        if s30_cm_ds is not None:
+            chips["HLSS30_common_mask"][p_idx] = s30_cm_ds[:, r0:r0+10, c0:c0+10]
         chips["HARMONIZED_z_score"][p_idx] = harm_z_ds[:, r0:r0+10, c0:c0+10]
+        for m in target_metrics:
+            chips["HARMONIZED_z_scores"][m][p_idx] = harm_grp[m][:, r0:r0+10, c0:c0+10]
         chips["HARMONIZED_common_mask"][p_idx] = harm_cm_ds[:, r0:r0+10, c0:c0+10]
         if tan_sr_ds is not None:
             chips["TANAGER"][p_idx] = tan_sr_ds[:, :, r0:r0+10, c0:c0+10]
+
+    # Optionally extract baseline PyCCD results if present in master container
+    if "PYCCD_Results" in h5_file and "change_date_timestamp" in h5_file["PYCCD_Results"]:
+        py_date_ds = h5_file["PYCCD_Results/change_date_timestamp"]
+        py_count_ds = h5_file["PYCCD_Results/change_count"]
+        baseline_pyccd = {
+            "date": np.full((n_patches, 10, 10), np.nan, dtype=np.float64),
+            "count": np.zeros((n_patches, 10, 10), dtype=np.int32),
+        }
+        for p_idx, p in enumerate(LAND_COVER_PATCHES):
+            r0, c0 = p["r0"], p["c0"]
+            baseline_pyccd["date"][p_idx] = py_date_ds[r0:r0+10, c0:c0+10]
+            baseline_pyccd["count"][p_idx] = py_count_ds[r0:r0+10, c0:c0+10]
+        chips["BASELINE_PYCCD"] = baseline_pyccd
+
+    metrics_meta = {}
+    for m in target_metrics:
+        m_ds = harm_grp[m]
+        metrics_meta[m] = {
+            "frame_global_means": m_ds.attrs["frame_global_means"][:],
+            "frame_global_stds": m_ds.attrs["frame_global_stds"][:],
+            "spatial_smoothing": bool(m_ds.attrs.get("spatial_smoothing", False)),
+        }
 
     metadata = {
         "harm_acq_times": harm_z_ds.attrs["acquisition_time"][:],
         "harm_source_grid": np.array([g.decode() if isinstance(g, bytes) else str(g) for g in harm_z_ds.attrs["source_grid"]]),
         "harm_source_idx": harm_z_ds.attrs["source_frame_index"][:],
-        "frame_global_means": harm_z_ds.attrs["frame_global_means"][:],
-        "frame_global_stds": harm_z_ds.attrs["frame_global_stds"][:],
+        "frame_global_means": metrics_meta[primary_metric]["frame_global_means"],
+        "frame_global_stds": metrics_meta[primary_metric]["frame_global_stds"],
+        "spatial_smoothing": metrics_meta[primary_metric]["spatial_smoothing"],
+        "metrics": metrics_meta,
         "l30_acq_times": l30_sr_ds.attrs["acquisition_time"][:],
         "s30_acq_times": s30_sr_ds.attrs["acquisition_time"][:],
         "scale_factors": scale_factors,
@@ -392,37 +497,84 @@ def load_all_target_spectra(splib_base=SPLIB_BASE, tanager_wavelengths=None):
     return spectra_by_material
 
 # ==============================================================================
-# STEP 2 & 3: SIMULATE SPECTRAL COMPLEXITY CUBES (GPU MAXD SLIDING VOLUME)
+# STEP 2 & 3: SIMULATE SPECTRAL COMPLEXITY CUBES (GPU MAXVOL & 3D SUMMATION)
 # ==============================================================================
-def simulate_spectral_complexity_cubes(chips, metadata, target_spectra, onset_ts):
+def _compute_sliding_volumes_batch(eval_batch, target_metric, apply_spatial_smoothing):
+    """Dispatches batched GPU sliding-window complexity for maxVol or 3D summation."""
+    if target_metric == "volume_map_3d_zscore":
+        return sc.process_volume_3d_sliding_tile_batch(
+            eval_batch,
+            tile_size=TILE_SIZE,
+            stride=SLIDING_STRIDE,
+            num_endmembers=NUM_ENDMEMBERS_3D,
+            separability_threshold=SEPARABILITY_THRESHOLD_3D,
+            apply_spatial_smoothing=apply_spatial_smoothing,
+        )
+    return sc.process_volume_sliding_tile_batch(
+        eval_batch,
+        tile_size=TILE_SIZE,
+        stride=SLIDING_STRIDE,
+        num_endmembers=NUM_ENDMEMBERS,
+        apply_spatial_smoothing=apply_spatial_smoothing,
+    )
+
+
+def _extract_sensor_post_onset_sr(chips, grid_name, post_indices, source_idx, scale_factors, fill_values):
+    """Extracts float32 surface reflectance with NaN fill masking for post-onset frames of a sensor."""
+    if not post_indices or grid_name not in chips:
+        return None
+    local_indices = [source_idx[t] for t in post_indices]
+    raw_arr = chips[grid_name][:, local_indices]
+    scale = float(scale_factors.get(grid_name, 10000.0))
+    fill_val = fill_values.get(grid_name, -32768)
+    flt_arr = raw_arr.astype(np.float32) / scale
+    flt_arr[raw_arr == fill_val] = np.nan
+    return flt_arr
+
+
+def _normalize_volume_batch_to_z(vol_batch, valid_mask_batch, means_vec, stds_vec):
+    """Applies frame-specific log-normal global Z-score standardization to a (n_patches, n_frames, H, W) batch."""
+    m_exp = means_vec[np.newaxis, :, np.newaxis, np.newaxis]
+    s_exp = stds_vec[np.newaxis, :, np.newaxis, np.newaxis]
+    valid = (vol_batch > 0.0) & valid_mask_batch & (s_exp > 0) & (~np.isnan(m_exp))
+    with np.errstate(divide="ignore", invalid="ignore"):
+        z_out = np.where(valid, (np.log(vol_batch) - m_exp) / s_exp, np.nan)
+    return z_out.astype(np.float32)
+
+
+def simulate_spectral_complexity_cubes(chips, metadata, target_spectra, onset_ts, target_metric="sliding_volume_z_score"):
     """
-    Computes 10x10 sliding volume Gramian complexity on GPU across all 50 conditions.
-    Evaluates baseline frames and post-onset linear mixtures using SpecComplexTorch.process_volume_sliding_tile
-    and normalizes strictly via SpecComplexTorch.calculate_global_z_score with frame_global_means and frame_global_stds.
+    Computes 10x10 sliding volume complexity on GPU across all 50 conditions for either:
+      - 'sliding_volume_z_score': Maximum Volume (maxVol, 7 endmembers)
+      - 'volume_map_3d_zscore':   3D Summation Equivalent Volume (3D, 20 endmembers, 1% stopping threshold)
+    Normalizes via frame_global_means and frame_global_stds from the corresponding master HDF5 metric.
     """
-    print("\n[Step 2 & 3] Simulating Spectral Complexity Z-scores on GPU across 50 conditions...")
+    num_materials = len(target_spectra)
+    num_fractions = len(MIXTURE_FRACTIONS)
+    num_conditions = num_materials * num_fractions
+    print(f"\n[Step 2 & 3] Simulating Spectral Complexity Z-scores on GPU across {num_conditions} conditions (metric: {target_metric})...")
 
     harm_acq_times = metadata["harm_acq_times"]
     source_grid = metadata["harm_source_grid"]
     source_idx = metadata["harm_source_idx"]
-    means = metadata["frame_global_means"]
-    stds = metadata["frame_global_stds"]
+
+    metric_meta = metadata.get("metrics", {}).get(target_metric, {})
+    means = metric_meta.get("frame_global_means", metadata["frame_global_means"])
+    stds = metric_meta.get("frame_global_stds", metadata["frame_global_stds"])
+    apply_spatial_smoothing = bool(metric_meta.get("spatial_smoothing", metadata.get("spatial_smoothing", False)))
 
     n_frames = len(harm_acq_times)
     n_patches = len(LAND_COVER_PATCHES)
-    num_materials = len(target_spectra)
-    num_fractions = len(MIXTURE_FRACTIONS)
-    num_conditions = num_materials * num_fractions
 
     # 1. Identify pre-onset and post-onset frame indices
     pre_onset_mask = harm_acq_times < onset_ts
     post_onset_indices = np.where(~pre_onset_mask)[0]
     pre_onset_indices = np.where(pre_onset_mask)[0]
 
-    print(f"Timeline partitioning: {len(pre_onset_indices)} pre-onset frames, {len(post_onset_indices)} post-onset frames.")
+    print(f"Timeline partitioning: {len(pre_onset_indices)} pre-onset frames, {len(post_onset_indices)} post-onset frames (spatial_smoothing={apply_spatial_smoothing}).")
 
     # 2. Precompute unperturbed baseline Z-scores for all patches
-    print("Precomputing unperturbed baseline Z-score time series for all patches...")
+    print(f"Precomputing unperturbed baseline Z-score time series for '{target_metric}'...")
     unperturbed_z = np.full((n_patches, n_frames, 10, 10), np.nan, dtype=np.float32)
 
     scale_factors = metadata["scale_factors"]
@@ -439,120 +591,124 @@ def simulate_spectral_complexity_cubes(chips, metadata, target_spectra, onset_ts
 
         grid_name = source_grid[t]
         local_idx = source_idx[t]
-
         if grid_name not in chips:
             continue
 
         scale = scale_factors.get(grid_name, 10000.0)
         fill_val = fill_values.get(grid_name, -32768)
 
-        for p_idx in range(n_patches):
-            raw_int16 = chips[grid_name][p_idx, local_idx]
-            flt_sr = raw_int16.astype(np.float32) / float(scale)
-            flt_sr[raw_int16 == fill_val] = np.nan
+        raw_batch = chips[grid_name][:, local_idx]  # (n_patches, bands, 10, 10)
+        flt_batch = raw_batch.astype(np.float32) / float(scale)
+        flt_batch[raw_batch == fill_val] = np.nan
 
-            if grid_name == "TANAGER" and tan_gw is not None:
-                gw_mask = tan_gw[local_idx].astype(bool)
-                eval_sr = flt_sr[gw_mask, ...]
-            else:
-                eval_sr = flt_sr
+        if grid_name == "TANAGER" and tan_gw is not None:
+            gw_mask = tan_gw[local_idx].astype(bool)
+            eval_batch = flt_batch[:, gw_mask, ...]
+        else:
+            eval_batch = flt_batch
 
-            vol_map = sc.process_volume_sliding_tile(
-                eval_sr, tile_size=TILE_SIZE, stride=SLIDING_STRIDE, num_endmembers=NUM_ENDMEMBERS
-            )
-            valid_mask = (chips["HARMONIZED_common_mask"][p_idx, t] == 0)
-            z_map, _, _ = sc.calculate_global_z_score(
-                vol_map,
-                valid_pixel_mask=valid_mask,
-                array_mean=mu_t,
-                array_std=std_t,
-            )
-            if isinstance(z_map, torch.Tensor):
-                z_map = z_map.detach().cpu().numpy()
-            unperturbed_z[p_idx, t] = z_map
+        vol_batch = _compute_sliding_volumes_batch(eval_batch, target_metric, apply_spatial_smoothing)
+        valid_batch = (chips["HARMONIZED_common_mask"][:, t] == 0)
+        z_batch, _, _ = sc.calculate_global_z_score_batch(
+            vol_batch,
+            valid_pixel_mask=valid_batch,
+            array_mean=mu_t,
+            array_std=std_t,
+        )
+        if isinstance(z_batch, torch.Tensor):
+            z_batch = z_batch.detach().cpu().numpy()
+        unperturbed_z[:, t] = z_batch
 
-    # 3. Simulate post-onset linear mixture across 50 conditions
+    # 3. Simulate post-onset linear mixture across all conditions using batched GPU execution
     simulated_z_cubes = np.zeros((num_conditions, n_patches, n_frames, 10, 10), dtype=np.float32)
-
-    # Initialize all conditions with unperturbed baseline Z-scores
     for c_idx in range(num_conditions):
-        for p_idx in range(n_patches):
-            simulated_z_cubes[c_idx, p_idx] = unperturbed_z[p_idx].copy()
+        simulated_z_cubes[c_idx] = unperturbed_z.copy()
 
-    # Fast GPU simulation loop over post-onset frames
+    valid_stats = (~np.isnan(means)) & (~np.isnan(stds)) & (stds > 0)
+    l8_post = [t for t in post_onset_indices if source_grid[t] == "HLSL30" and valid_stats[t]]
+    s2_post = [t for t in post_onset_indices if source_grid[t] == "HLSS30" and valid_stats[t]]
+    tan_post = [t for t in post_onset_indices if source_grid[t] == "TANAGER" and valid_stats[t]]
+
+    flt_l8 = _extract_sensor_post_onset_sr(chips, "HLSL30", l8_post, source_idx, scale_factors, fill_values)
+    flt_s2 = _extract_sensor_post_onset_sr(chips, "HLSS30", s2_post, source_idx, scale_factors, fill_values)
+    flt_tan = _extract_sensor_post_onset_sr(chips, "TANAGER", tan_post, source_idx, scale_factors, fill_values)
+
+    mask_l8 = (chips["HARMONIZED_common_mask"][:, l8_post] == 0) if l8_post else None
+    mask_s2 = (chips["HARMONIZED_common_mask"][:, s2_post] == 0) if s2_post else None
+
     t_start_sim = time.perf_counter()
     cond_counter = 0
 
-    for m_idx, mat in enumerate(target_spectra):
+    for mat in target_spectra:
         spec_l8 = mat["spec_l8"]
         spec_s2 = mat["spec_s2"]
         spec_tanager = mat.get("spec_tanager")
 
-        for f_idx, f_weight in enumerate(MIXTURE_FRACTIONS):
-            for t in post_onset_indices:
-                mu_t = means[t]
-                std_t = stds[t]
+        for f_weight in MIXTURE_FRACTIONS:
+            # 1. HLSL30 Batched simulation
+            if flt_l8 is not None and spec_l8 is not None:
+                inj_l8 = flt_l8.copy()
+                for roff, coff in INJ_OFFSETS:
+                    bg = flt_l8[:, :, :, roff, coff]
+                    valid_bg = ~np.isnan(bg).any(axis=-1, keepdims=True)
+                    inj_l8[:, :, :, roff, coff] = np.where(valid_bg, (1.0 - f_weight) * bg + f_weight * spec_l8, bg)
 
-                if np.isnan(mu_t) or np.isnan(std_t) or std_t <= 0:
-                    continue
+                n_p, n_l8, n_b, h, w = inj_l8.shape
+                vols_l8 = _compute_sliding_volumes_batch(
+                    inj_l8.reshape(n_p * n_l8, n_b, h, w), target_metric, apply_spatial_smoothing
+                ).reshape(n_p, n_l8, h, w)
+                simulated_z_cubes[cond_counter][:, l8_post] = _normalize_volume_batch_to_z(
+                    vols_l8, mask_l8, means[l8_post], stds[l8_post]
+                )
 
-                grid_name = source_grid[t]
-                local_idx = source_idx[t]
+            # 2. HLSS30 Batched simulation
+            if flt_s2 is not None and spec_s2 is not None:
+                inj_s2 = flt_s2.copy()
+                for roff, coff in INJ_OFFSETS:
+                    bg = flt_s2[:, :, :, roff, coff]
+                    valid_bg = ~np.isnan(bg).any(axis=-1, keepdims=True)
+                    inj_s2[:, :, :, roff, coff] = np.where(valid_bg, (1.0 - f_weight) * bg + f_weight * spec_s2, bg)
 
-                if grid_name not in chips:
-                    continue
+                n_p, n_s2, n_b, h, w = inj_s2.shape
+                vols_s2 = _compute_sliding_volumes_batch(
+                    inj_s2.reshape(n_p * n_s2, n_b, h, w), target_metric, apply_spatial_smoothing
+                ).reshape(n_p, n_s2, h, w)
+                simulated_z_cubes[cond_counter][:, s2_post] = _normalize_volume_batch_to_z(
+                    vols_s2, mask_s2, means[s2_post], stds[s2_post]
+                )
 
-                scale = scale_factors.get(grid_name, 10000.0)
-                fill_val = fill_values.get(grid_name, -32768)
-
-                if grid_name == "HLSL30":
-                    target_spec = spec_l8
-                elif grid_name == "HLSS30":
-                    target_spec = spec_s2
-                elif grid_name == "TANAGER":
-                    target_spec = spec_tanager
-                else:
-                    continue
-
-                if target_spec is None:
-                    continue
-
-                for p_idx in range(n_patches):
-                    raw_int16 = chips[grid_name][p_idx, local_idx]
-                    flt_sr = raw_int16.astype(np.float32) / float(scale)
-                    flt_sr[raw_int16 == fill_val] = np.nan
-
-                    # Inject linear mixture into the 4 designated pixels
-                    injected_sr = flt_sr.copy()
+            # 3. TANAGER Batched simulation (per-frame good wavelength mask across all patches)
+            if flt_tan is not None and spec_tanager is not None:
+                for pos_i, t in enumerate(tan_post):
+                    local_idx = source_idx[t]
+                    flt_frame = flt_tan[:, pos_i].copy()
                     for roff, coff in INJ_OFFSETS:
-                        bg_pixel = flt_sr[:, roff, coff]
-                        if not np.isnan(bg_pixel).any():
-                            injected_sr[:, roff, coff] = (1.0 - f_weight) * bg_pixel + f_weight * target_spec
+                        bg = flt_frame[:, :, roff, coff]
+                        valid_bg = ~np.isnan(bg).any(axis=-1, keepdims=True)
+                        flt_frame[:, :, roff, coff] = np.where(valid_bg, (1.0 - f_weight) * bg + f_weight * spec_tanager, bg)
 
-                    if grid_name == "TANAGER" and tan_gw is not None:
+                    if tan_gw is not None:
                         gw_mask = tan_gw[local_idx].astype(bool)
-                        eval_injected = injected_sr[gw_mask, ...]
+                        eval_tan = flt_frame[:, gw_mask, ...]
                     else:
-                        eval_injected = injected_sr
+                        eval_tan = flt_frame
 
-                    vol_map = sc.process_volume_sliding_tile(
-                        eval_injected, tile_size=TILE_SIZE, stride=SLIDING_STRIDE, num_endmembers=NUM_ENDMEMBERS
+                    vols_tan = _compute_sliding_volumes_batch(eval_tan, target_metric, apply_spatial_smoothing)
+                    valid_tan = (chips["HARMONIZED_common_mask"][:, t] == 0)
+                    z_tan, _, _ = sc.calculate_global_z_score_batch(
+                        vols_tan,
+                        valid_pixel_mask=valid_tan,
+                        array_mean=means[t],
+                        array_std=stds[t],
                     )
-                    valid_mask = (chips["HARMONIZED_common_mask"][p_idx, t] == 0)
-                    z_map, _, _ = sc.calculate_global_z_score(
-                        vol_map,
-                        valid_pixel_mask=valid_mask,
-                        array_mean=mu_t,
-                        array_std=std_t,
-                    )
-                    if isinstance(z_map, torch.Tensor):
-                        z_map = z_map.detach().cpu().numpy()
-                    simulated_z_cubes[cond_counter, p_idx, t] = z_map
+                    if isinstance(z_tan, torch.Tensor):
+                        z_tan = z_tan.detach().cpu().numpy()
+                    simulated_z_cubes[cond_counter, :, t] = z_tan
 
             cond_counter += 1
 
     t_elapsed_sim = time.perf_counter() - t_start_sim
-    print(f"Completed GPU simulation of 50 conditions in {t_elapsed_sim:.2f} s ({t_elapsed_sim/num_conditions:.2f} s/condition).")
+    print(f"Completed GPU simulation of {num_conditions} conditions for '{target_metric}' in {t_elapsed_sim:.2f} s ({t_elapsed_sim/num_conditions:.3f} s/condition).")
 
     return simulated_z_cubes, unperturbed_z
 
@@ -560,7 +716,7 @@ def simulate_spectral_complexity_cubes(chips, metadata, target_spectra, onset_ts
 # ==============================================================================
 # STEP 4: RUN HARMONIZED SC-CCD BREAK DETECTION
 # ==============================================================================
-def run_scccd_benchmark(sim_z_cubes, chips, metadata, target_spectra, onset_ts):
+def run_scccd_benchmark(sim_z_cubes, chips, metadata, target_spectra, onset_ts, return_spatial=False):
     """
     Executes Harmonized SC-CCD break regression across all 800 test instances.
     """
@@ -575,9 +731,13 @@ def run_scccd_benchmark(sim_z_cubes, chips, metadata, target_spectra, onset_ts):
     num_materials = len(target_spectra)
     num_fractions = len(MIXTURE_FRACTIONS)
     n_patches = len(LAND_COVER_PATCHES)
-    total_records = num_materials * num_fractions * n_patches * len(INJ_OFFSETS)
+    num_conditions = num_materials * num_fractions
+    total_records = num_conditions * n_patches * len(INJ_OFFSETS)
 
     results_table = np.zeros(total_records, dtype=BREAK_RECORD_DTYPE)
+    scccd_change_dates = np.full((num_conditions, n_patches, 10, 10), np.nan, dtype=np.float64) if return_spatial else None
+    scccd_change_counts = np.zeros((num_conditions, n_patches, 10, 10), dtype=np.int32) if return_spatial else None
+
     rec_idx = 0
     cond_idx = 0
 
@@ -593,7 +753,7 @@ def run_scccd_benchmark(sim_z_cubes, chips, metadata, target_spectra, onset_ts):
 
                 # Run CCD row chunk across the 10x10 patch
                 y_data_patch = sim_z_cubes[cond_idx, p_idx]
-                valid_patch = valid_mask_all[p_idx]
+                valid_patch = valid_mask_all[p_idx] & (~np.isnan(y_data_patch))
 
                 chunk_args = (
                     0, 10, 10,
@@ -606,6 +766,10 @@ def run_scccd_benchmark(sim_z_cubes, chips, metadata, target_spectra, onset_ts):
                 chunk_pred = res[2]
                 chunk_date = res[6]
                 chunk_count = res[7]
+
+                if return_spatial:
+                    scccd_change_dates[cond_idx, p_idx] = chunk_date
+                    scccd_change_counts[cond_idx, p_idx] = chunk_count
 
                 for p_num, (roff, coff) in enumerate(INJ_OFFSETS, 1):
                     scene_r = r0 + roff
@@ -651,17 +815,42 @@ def run_scccd_benchmark(sim_z_cubes, chips, metadata, target_spectra, onset_ts):
 
     detected_count = np.sum(results_table["break_detected"])
     print(f"SC-CCD complete: {detected_count}/{total_records} breaks detected ({detected_count/total_records*100:.1f}%).")
+    if return_spatial:
+        return results_table, {"change_date": scccd_change_dates, "change_count": scccd_change_counts}
     return results_table
 
 
 # ==============================================================================
 # STEP 5: RUN LANDSAT PYCCD BREAK DETECTION
 # ==============================================================================
-def run_pyccd_benchmark(chips, metadata, target_spectra, onset_ts):
+def _eval_pyccd_pixel(ordinal_dates, blues, greens, reds, nirs, swir1s, swir2s, nominal_thermals, qas_pixel, proc_params):
     """
-    Executes USGS LCMAP Landsat PyCCD break detection across all 800 test instances.
+    Worker function to execute PyCCD detection on a single pixel time series in a parallel subprocess.
     """
-    print("\n[Step 5] Running USGS LCMAP Landsat PyCCD on 800 test instances...")
+    pccd.patch_pyccd()
+    usable_count = int(np.count_nonzero((qas_pixel == 1) | (qas_pixel == 2) | (qas_pixel == 4)))
+    if usable_count < pccd.MIN_CLEAR_SAMPLES:
+        return []
+    try:
+        res = ccd.detect(
+            ordinal_dates,
+            blues, greens, reds, nirs, swir1s, swir2s,
+            nominal_thermals,
+            qas_pixel,
+            params=proc_params,
+        )
+        return res.get("change_models", [])
+    except Exception:
+        return []
+
+
+def run_pyccd_benchmark(chips, metadata, target_spectra, onset_ts, baseline_pyccd=None, return_spatial=False):
+    """
+    Executes USGS LCMAP Landsat PyCCD break detection across all stratified target conditions
+    with full Fmask, HLSL30 common_mask, and 6-band fill-value decoding matching pyccd_landsat_main.py.
+    """
+    if baseline_pyccd is None and isinstance(chips, dict):
+        baseline_pyccd = chips.get("BASELINE_PYCCD")
 
     l30_acq_times = metadata["l30_acq_times"]
     l30_dates = [datetime.datetime.fromtimestamp(t, tz=datetime.timezone.utc).date() for t in l30_acq_times]
@@ -674,11 +863,18 @@ def run_pyccd_benchmark(chips, metadata, target_spectra, onset_ts):
     num_materials = len(target_spectra)
     num_fractions = len(MIXTURE_FRACTIONS)
     n_patches = len(LAND_COVER_PATCHES)
-    total_records = num_materials * num_fractions * n_patches * len(INJ_OFFSETS)
+    num_conditions = num_materials * num_fractions
+    total_records = num_conditions * n_patches * len(INJ_OFFSETS)
+    print(f"\n[Step 5] Running USGS LCMAP Landsat PyCCD across {total_records} test instances...")
 
     results_table = np.zeros(total_records, dtype=BREAK_RECORD_DTYPE)
-    rec_idx = 0
-    cond_idx = 0
+    pyccd_change_dates = np.full((num_conditions, n_patches, 10, 10), np.nan, dtype=np.float64) if return_spatial else None
+    pyccd_change_counts = np.zeros((num_conditions, n_patches, 10, 10), dtype=np.int32) if return_spatial else None
+
+    if return_spatial and baseline_pyccd is not None:
+        for p_idx in range(n_patches):
+            pyccd_change_dates[:, p_idx] = baseline_pyccd["date"][p_idx]
+            pyccd_change_counts[:, p_idx] = baseline_pyccd["count"][p_idx]
 
     proc_params = {
         "QA_BITPACKED": False,
@@ -696,6 +892,11 @@ def run_pyccd_benchmark(chips, metadata, target_spectra, onset_ts):
 
     l30_scale = metadata["scale_factors"].get("HLSL30", 10000.0)
     l30_fill = metadata["fill_values"].get("HLSL30", -32768)
+    has_l30_cm = "HLSL30_common_mask" in chips
+
+    pyccd_tasks = []
+    pyccd_meta = []
+    cond_idx = 0
 
     for m_idx, mat in enumerate(target_spectra):
         m_id = mat["id"].encode("utf-8")
@@ -708,14 +909,15 @@ def run_pyccd_benchmark(chips, metadata, target_spectra, onset_ts):
                 p_name = p["name"].encode("utf-8")
                 r0, c0 = p["r0"], p["c0"]
 
-                l30_patch = chips["HLSL30"][p_idx]       # shape: (n_frames, 7, 10, 10)
-                fmask_patch = chips["HLSL30_Fmask"][p_idx] # shape: (n_frames, 10, 10)
+                l30_patch = chips["HLSL30"][p_idx]          # shape: (n_frames, 7, 10, 10)
+                fmask_patch = chips["HLSL30_Fmask"][p_idx]  # shape: (n_frames, 10, 10)
+                cmask_patch = chips["HLSL30_common_mask"][p_idx] if has_l30_cm else np.zeros_like(fmask_patch, dtype=bool)
 
                 for p_num, (roff, coff) in enumerate(INJ_OFFSETS, 1):
                     scene_r = r0 + roff
                     scene_c = c0 + coff
 
-                    # Extract raw 6-band time series
+                    # Extract raw 6-band time series (B, G, R, NIR, SWIR1, SWIR2)
                     blues = l30_patch[:, 1, roff, coff].copy()
                     greens = l30_patch[:, 2, roff, coff].copy()
                     reds = l30_patch[:, 3, roff, coff].copy()
@@ -723,9 +925,10 @@ def run_pyccd_benchmark(chips, metadata, target_spectra, onset_ts):
                     swir1s = l30_patch[:, 5, roff, coff].copy()
                     swir2s = l30_patch[:, 6, roff, coff].copy()
 
-                    # Inject target mixture for post-onset acquisitions
+                    # Inject target mixture only where all 6 optical bands are valid (not fill)
                     for t in post_onset_l30:
-                        if blues[t] != l30_fill:
+                        obs_pixel = np.array([blues[t], greens[t], reds[t], nirs[t], swir1s[t], swir2s[t]])
+                        if not np.any(obs_pixel == l30_fill):
                             blues[t] = int(round((1.0 - f_weight) * blues[t] + f_weight * spec_l8_flt[1] * l30_scale))
                             greens[t] = int(round((1.0 - f_weight) * greens[t] + f_weight * spec_l8_flt[2] * l30_scale))
                             reds[t] = int(round((1.0 - f_weight) * reds[t] + f_weight * spec_l8_flt[3] * l30_scale))
@@ -734,84 +937,129 @@ def run_pyccd_benchmark(chips, metadata, target_spectra, onset_ts):
                             swir2s[t] = int(round((1.0 - f_weight) * swir2s[t] + f_weight * spec_l8_flt[6] * l30_scale))
 
                     fm_pixel = fmask_patch[:, roff, coff]
-                    cm_dummy = np.zeros_like(fm_pixel)
-                    qas_pixel = pccd.decode_categorical_qa(fm_pixel, cm_dummy, blues)
+                    cm_pixel = np.asarray(cmask_patch[:, roff, coff], dtype=bool)
+                    sr_pixel_bands = np.column_stack([blues, greens, reds, nirs, swir1s, swir2s])
+                    qas_pixel = pccd.decode_categorical_qa(fm_pixel, cm_pixel, sr_pixel_bands, fill_val=l30_fill)
 
-                    usable_count = int(np.count_nonzero((qas_pixel == 1) | (qas_pixel == 2) | (qas_pixel == 4)))
-
-                    detected = False
-                    break_ts = np.nan
-                    latency = np.nan
-                    mag = 0.0
-
-                    if usable_count >= pccd.MIN_CLEAR_SAMPLES:
-                        try:
-                            res = ccd.detect(
-                                ordinal_dates,
-                                blues, greens, reds, nirs, swir1s, swir2s,
-                                nominal_thermals,
-                                qas_pixel,
-                                params=proc_params
-                            )
-                            models = res.get("change_models", [])
-                            # Find first break on or after onset date
-                            for m in models:
-                                if m.get("change_probability", 0) > 0:
-                                    b_day = m.get("break_day")
-                                    if b_day is not None and b_day >= onset_ordinal:
-                                        detected = True
-                                        b_date_obj = datetime.date.fromordinal(b_day)
-                                        break_ts = datetime.datetime(
-                                            b_date_obj.year, b_date_obj.month, b_date_obj.day,
-                                            tzinfo=datetime.timezone.utc
-                                        ).timestamp()
-                                        latency = float((break_ts - onset_ts) / 86400.0)
-                                        mags = m.get("magnitudes", [0.0])
-                                        mag = float(np.linalg.norm(mags))
-                                        break
-                        except Exception:
-                            detected = False
-
-                    rec = results_table[rec_idx]
-                    rec["condition_idx"] = cond_idx
-                    rec["material_id"] = m_id
-                    rec["material_name"] = m_name
-                    rec["mixture_fraction"] = f_weight
-                    rec["patch_id"] = p_id
-                    rec["patch_name"] = p_name
-                    rec["pixel_num"] = p_num
-                    rec["scene_row"] = scene_r
-                    rec["scene_col"] = scene_c
-                    rec["break_detected"] = detected
-                    rec["break_timestamp"] = break_ts if detected else np.nan
-                    rec["latency_days"] = latency
-                    rec["break_magnitude"] = mag
-                    rec["p_value"] = 1.0 if detected else 0.0
-
-                    rec_idx += 1
+                    pyccd_tasks.append((
+                        ordinal_dates, blues, greens, reds, nirs, swir1s, swir2s,
+                        nominal_thermals, qas_pixel, proc_params
+                    ))
+                    pyccd_meta.append((
+                        cond_idx, p_idx, m_id, m_name, f_weight,
+                        p_id, p_name, p_num, roff, coff, scene_r, scene_c
+                    ))
 
             cond_idx += 1
 
+    print(f"Parallel dispatching {len(pyccd_tasks)} PyCCD pixel evaluations across CPU cores (batch_size=64)...")
+    results_gen = Parallel(n_jobs=-1, batch_size=64, return_as="generator")(
+        delayed(_eval_pyccd_pixel)(*task) for task in pyccd_tasks
+    )
+
+    for rec_idx, (meta, models) in enumerate(zip(pyccd_meta, tqdm(results_gen, total=len(pyccd_tasks), desc="PyCCD pixels"))):
+        cond_idx, p_idx, m_id, m_name, f_weight, p_id, p_name, p_num, roff, coff, scene_r, scene_c = meta
+
+        breaks = [m for m in models if m.get("change_probability", 0) > 0]
+        b_count = len(breaks)
+        post_onset_breaks = []
+        for m in breaks:
+            b_day = m.get("break_day")
+            if b_day is not None and b_day >= onset_ordinal:
+                b_date_obj = datetime.date.fromordinal(b_day)
+                b_ts = datetime.datetime(
+                    b_date_obj.year, b_date_obj.month, b_date_obj.day,
+                    tzinfo=datetime.timezone.utc
+                ).timestamp()
+                lat = float((b_ts - onset_ts) / 86400.0)
+                mags = m.get("magnitudes", [0.0])
+                mag_val = float(np.linalg.norm(mags))
+                post_onset_breaks.append((b_ts, lat, mag_val))
+
+        if post_onset_breaks:
+            pri_b_ts, pri_lat, pri_mag = post_onset_breaks[0]
+            if baseline_pyccd is not None:
+                base_count = int(baseline_pyccd["count"][p_idx, roff, coff])
+                base_date = float(baseline_pyccd["date"][p_idx, roff, coff])
+                detected = (
+                    (base_count == 0) or
+                    np.isnan(base_date) or
+                    (b_count > base_count) or
+                    (pri_b_ts < base_date)
+                )
+            else:
+                detected = True
+            break_ts = pri_b_ts if detected else np.nan
+            latency = pri_lat if detected else np.nan
+            mag = pri_mag if detected else 0.0
+        else:
+            detected = False
+            break_ts = np.nan
+            latency = np.nan
+            mag = 0.0
+
+        if return_spatial:
+            pyccd_change_dates[cond_idx, p_idx, roff, coff] = break_ts if detected else np.nan
+            pyccd_change_counts[cond_idx, p_idx, roff, coff] = b_count
+
+        rec = results_table[rec_idx]
+        rec["condition_idx"] = cond_idx
+        rec["material_id"] = m_id
+        rec["material_name"] = m_name
+        rec["mixture_fraction"] = f_weight
+        rec["patch_id"] = p_id
+        rec["patch_name"] = p_name
+        rec["pixel_num"] = p_num
+        rec["scene_row"] = scene_r
+        rec["scene_col"] = scene_c
+        rec["break_detected"] = detected
+        rec["break_timestamp"] = break_ts if detected else np.nan
+        rec["latency_days"] = latency
+        rec["break_magnitude"] = mag
+        rec["p_value"] = 1.0 if detected else 0.0
+
     detected_count = np.sum(results_table["break_detected"])
     print(f"PyCCD complete: {detected_count}/{total_records} breaks detected ({detected_count/total_records*100:.1f}%).")
+    if return_spatial:
+        return results_table, {"change_date": pyccd_change_dates, "change_count": pyccd_change_counts}
     return results_table
 
 
 # ==============================================================================
 # STEP 6: COMMIT BENCHMARK DATASET TO MASTER HDF5 FILE
 # ==============================================================================
-def save_benchmark_to_hdf5(h5_file, chips, metadata, target_spectra, sim_z_cubes, scccd_table, pyccd_table):
+def save_benchmark_to_hdf5(
+    h5_file,
+    chips,
+    metadata,
+    target_spectra,
+    sim_z_cubes,
+    scccd_table,
+    pyccd_table,
+    target_metric="sliding_volume_z_score",
+    group_name=None,
+    scccd_spatial=None,
+    description=None,
+):
     """
-    Writes the complete /STRATIFIED_CHIP_BENCHMARK/ hierarchy to the master HDF5 container.
+    Writes the complete stratified chip benchmark hierarchy to the master HDF5 container
+    for the specified spectral complexity method.
     """
-    print("\n[Step 6] Saving /STRATIFIED_CHIP_BENCHMARK/ group to master HDF5 file...")
+    if group_name is None:
+        group_name = "/STRATIFIED_CHIP_BENCHMARK_3D" if target_metric == "volume_map_3d_zscore" else "/STRATIFIED_CHIP_BENCHMARK"
 
-    group_name = "/STRATIFIED_CHIP_BENCHMARK"
+    print(f"\n[Step 6] Saving '{group_name}' group to master HDF5 file (metric: {target_metric})...")
+
     if group_name in h5_file:
         print(f"Overwriting existing '{group_name}' group...")
         del h5_file[group_name]
 
     base_grp = h5_file.create_group(group_name)
+    base_grp.attrs["target_metric"] = target_metric
+
+    metric_meta = metadata.get("metrics", {}).get(target_metric, {})
+    frame_means = metric_meta.get("frame_global_means", metadata["frame_global_means"])
+    frame_stds = metric_meta.get("frame_global_stds", metadata["frame_global_stds"])
 
     # 1. METADATA Subgroup
     meta_grp = base_grp.create_group("METADATA")
@@ -824,8 +1072,8 @@ def save_benchmark_to_hdf5(h5_file, chips, metadata, target_spectra, sim_z_cubes
     meta_grp.attrs["patch_bounds"] = np.array([[p["r0"], p["c0"], 10, 10] for p in LAND_COVER_PATCHES], dtype=np.int32)
     meta_grp.attrs["injected_offsets"] = np.array(INJ_OFFSETS, dtype=np.int32)
     meta_grp.attrs["mixture_fractions"] = np.array(MIXTURE_FRACTIONS, dtype=np.float32)
-    meta_grp.attrs["frame_global_means"] = metadata["frame_global_means"]
-    meta_grp.attrs["frame_global_stds"] = metadata["frame_global_stds"]
+    meta_grp.attrs["frame_global_means"] = frame_means
+    meta_grp.attrs["frame_global_stds"] = frame_stds
     meta_grp.attrs["harm_acq_times"] = metadata["harm_acq_times"]
 
     # Target spectra datasets
@@ -854,17 +1102,22 @@ def save_benchmark_to_hdf5(h5_file, chips, metadata, target_spectra, sim_z_cubes
         base_chips_grp["TANAGER"].attrs["_FillValue"] = metadata["fill_values"].get("TANAGER", -9999)
 
     base_chips_grp.create_dataset("HARMONIZED_common_mask", data=chips["HARMONIZED_common_mask"], compression="gzip", compression_opts=6)
+    for mask_key in ("HLSL30_Fmask", "HLSS30_Fmask", "HLSL30_common_mask", "HLSS30_common_mask"):
+        if mask_key in chips:
+            base_chips_grp.create_dataset(mask_key, data=chips[mask_key], compression="gzip", compression_opts=6)
 
     # Quantize baseline Z-score to int16 (scale = 10000)
-    base_z_int16 = sc.scale_to_int16(chips["HARMONIZED_z_score"])
+    base_z_arr = chips.get("HARMONIZED_z_scores", {}).get(target_metric, chips["HARMONIZED_z_score"])
+    base_z_int16 = sc.scale_to_int16(base_z_arr)
     base_chips_grp.create_dataset("HARMONIZED_z_score", data=base_z_int16, compression="gzip", compression_opts=6)
     base_chips_grp["HARMONIZED_z_score"].attrs["scale_factor"] = 10000.0
+    base_chips_grp["HARMONIZED_z_score"].attrs["_FillValue"] = -32768
 
     # 3. SIMULATED_CUBES Subgroup (Quantized to int16 with gzip level 6)
     sim_grp = base_grp.create_group("SIMULATED_CUBES")
     sim_z_int16 = sc.scale_to_int16(sim_z_cubes)
     sim_ds = sim_grp.create_dataset(
-        "sliding_volume_z_score",
+        target_metric,
         data=sim_z_int16,
         dtype=np.int16,
         compression="gzip",
@@ -872,25 +1125,41 @@ def save_benchmark_to_hdf5(h5_file, chips, metadata, target_spectra, sim_z_cubes
         chunks=(1, 1, min(sim_z_cubes.shape[2], 128), 10, 10),
     )
     sim_ds.attrs["scale_factor"] = 10000.0
-    sim_ds.attrs["description"] = "Simulated Gramian Spectral Complexity Z-scores under 50 perturbation conditions"
+    sim_ds.attrs["_FillValue"] = -32768
+    if description is None:
+        description = (
+            "Simulated 3D Equivalent Spectral Complexity Z-scores under 50 perturbation conditions"
+            if target_metric == "volume_map_3d_zscore"
+            else "Simulated Gramian Spectral Complexity Z-scores under 50 perturbation conditions"
+        )
+    sim_ds.attrs["description"] = description
 
     # 4. RESULTS Subgroup
     res_grp = base_grp.create_group("RESULTS")
     res_grp.create_dataset("scccd_break_table", data=scccd_table, compression="gzip")
     res_grp.create_dataset("pyccd_break_table", data=pyccd_table, compression="gzip")
+    if scccd_spatial is not None:
+        for k, arr in scccd_spatial.items():
+            res_grp.create_dataset(
+                f"scccd_{k}",
+                data=arr,
+                compression="gzip",
+                compression_opts=1,
+                chunks=(1, 1, 10, 10),
+            )
 
-    print(f"Successfully committed /STRATIFIED_CHIP_BENCHMARK/ to {MASTER_H5_PATH}.")
+    print(f"Successfully committed {group_name} to {getattr(h5_file, 'filename', MASTER_H5_PATH)}.")
 
 
 # ==============================================================================
 # STEP 7: PRINT QUANTITATIVE PERFORMANCE SUMMARY
 # ==============================================================================
-def print_performance_summary(scccd_table, pyccd_table):
+def print_performance_summary(scccd_table, pyccd_table, method_label="Maximum Volume (maxVol)"):
     """
     Prints comparative detection accuracy and latency tables stratified by land-cover class.
     """
     print("\n" + "=" * 90)
-    print("LAND-COVER STRATIFIED BENCHMARK PERFORMANCE SUMMARY: SC-CCD vs. USGS PYCCD")
+    print(f"LAND-COVER STRATIFIED BENCHMARK PERFORMANCE SUMMARY: SC-CCD [{method_label}] vs. USGS PYCCD")
     print("=" * 90)
 
     # 1. Performance Stratified by Land-Cover Class
@@ -941,16 +1210,20 @@ def print_performance_summary(scccd_table, pyccd_table):
               f"{py_rec:5.1f}% ({np.sum(py_sub['break_detected']):2d}/{len(py_sub):2d}) | {sc_med_lat:<12} / {py_med_lat}")
 
     # 3. Overall Aggregate Performance
+    n_total = len(scccd_table)
     total_sc_rec = np.mean(scccd_table["break_detected"]) * 100.0
     total_py_rec = np.mean(pyccd_table["break_detected"]) * 100.0
     all_sc_lat = scccd_table["latency_days"][scccd_table["break_detected"]]
     all_py_lat = pyccd_table["latency_days"][pyccd_table["break_detected"]]
+    all_sc_med = f"{np.median(all_sc_lat):.1f} d" if len(all_sc_lat) > 0 else "N/A"
+    all_py_med = f"{np.median(all_py_lat):.1f} d" if len(all_py_lat) > 0 else "N/A"
+    n_mats = len(mat_ids)
 
     print("-" * 105)
-    print(f"{'OVERALL AGGREGATE':<18} | {'All 4 Strata & 10 Materials (N=800)':<34} | "
-          f"{total_sc_rec:5.1f}% ({np.sum(scccd_table['break_detected']):3d}/800) | "
-          f"{total_py_rec:5.1f}% ({np.sum(pyccd_table['break_detected']):3d}/800) | "
-          f"{np.median(all_sc_lat):.1f} d        / {np.median(all_py_lat):.1f} d")
+    print(f"{'OVERALL AGGREGATE':<18} | {f'All {len(LAND_COVER_PATCHES)} Strata & {n_mats} Materials (N={n_total})':<34} | "
+          f"{total_sc_rec:5.1f}% ({np.sum(scccd_table['break_detected']):4d}/{n_total}) | "
+          f"{total_py_rec:5.1f}% ({np.sum(pyccd_table['break_detected']):4d}/{n_total}) | "
+          f"{all_sc_med:<12} / {all_py_med}")
     print("=" * 105 + "\n")
 
 
@@ -982,24 +1255,50 @@ def main():
         target_spectra = load_all_target_spectra(SPLIB_BASE, tanager_wl)
         print(f"Successfully prepared {len(target_spectra)} target spectra.")
 
-        # Step 1: Extract baseline chips and metadata
-        chips, metadata = extract_baseline_chips(h5_file)
+        # Step 1: Extract baseline chips and metadata for both maxVol and 3D summation metrics
+        target_metrics = [m["key"] for m in BENCHMARK_METRICS]
+        chips, metadata = extract_baseline_chips(h5_file, target_metrics=target_metrics)
 
-        # Step 2 & 3: Simulate Spectral Complexity Z-scores on GPU
-        sim_z_cubes, unperturbed_z = simulate_spectral_complexity_cubes(chips, metadata, target_spectra, onset_ts)
-        chips["HARMONIZED_z_score"] = unperturbed_z
-
-        # Step 4: Run Harmonized SC-CCD break detection
-        scccd_table = run_scccd_benchmark(sim_z_cubes, chips, metadata, target_spectra, onset_ts)
-
-        # Step 5: Run USGS LCMAP Landsat PyCCD break detection
+        # Step 5: Run USGS LCMAP Landsat PyCCD break detection once (shared reference across SC methods)
         pyccd_table = run_pyccd_benchmark(chips, metadata, target_spectra, onset_ts)
 
-        # Step 6: Commit complete benchmark group to master HDF5
-        save_benchmark_to_hdf5(h5_file, chips, metadata, target_spectra, sim_z_cubes, scccd_table, pyccd_table)
+        # Steps 2-4 & 6: Simulate and evaluate both maxVol and 3D summation spectral complexity methods
+        method_results = []
+        for method_cfg in BENCHMARK_METRICS:
+            metric_key = method_cfg["key"]
+            print("\n" + "-" * 80)
+            print(f"BENCHMARK METHOD: {method_cfg['label']} ({metric_key})")
+            print("-" * 80)
 
-    # Step 7: Print quantitative summary
-    print_performance_summary(scccd_table, pyccd_table)
+            sim_z_cubes, unperturbed_z = simulate_spectral_complexity_cubes(
+                chips, metadata, target_spectra, onset_ts, target_metric=metric_key
+            )
+            chips["HARMONIZED_z_scores"][metric_key] = unperturbed_z
+            if metric_key == BENCHMARK_METRICS[0]["key"]:
+                chips["HARMONIZED_z_score"] = unperturbed_z
+
+            scccd_table, scccd_spatial = run_scccd_benchmark(
+                sim_z_cubes, chips, metadata, target_spectra, onset_ts, return_spatial=True
+            )
+
+            save_benchmark_to_hdf5(
+                h5_file,
+                chips,
+                metadata,
+                target_spectra,
+                sim_z_cubes,
+                scccd_table,
+                pyccd_table,
+                target_metric=metric_key,
+                group_name=method_cfg["group_name"],
+                scccd_spatial=scccd_spatial,
+                description=method_cfg["description"],
+            )
+            method_results.append((method_cfg["label"], scccd_table))
+
+    # Step 7: Print quantitative summary for each method
+    for method_label, scccd_table in method_results:
+        print_performance_summary(scccd_table, pyccd_table, method_label=method_label)
 
     t_elapsed_total = (time.perf_counter() - t_start_total) / 60.0
     print(f"Stratified benchmark pipeline completed successfully in {t_elapsed_total:.2f} minutes.")

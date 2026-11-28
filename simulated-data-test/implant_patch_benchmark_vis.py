@@ -63,17 +63,10 @@ os.environ["OPENBLAS_NUM_THREADS"] = "1"
 os.environ["MKL_NUM_THREADS"] = "1"
 os.environ["HDF5_USE_FILE_LOCKING"] = "FALSE"
 
-# Ensure script directory and parent directory are on sys.path
+# Ensure script directory is on sys.path without overriding repository paths above
 script_dir = Path(__file__).resolve().parent
-candidates = [
-    script_dir,
-    script_dir.parent / "spectral-complexity-public",
-    script_dir.parent.parent / "spectral-complexity-public",
-    Path("F:/Resilio/IMGS 890 Research/spectral-complexity-public"),
-]
-for p in candidates:
-    if p.exists() and str(p) not in sys.path:
-        sys.path.insert(0, str(p))
+if str(script_dir) not in sys.path:
+    sys.path.insert(0, str(script_dir))
 
 # Import core modules
 try:

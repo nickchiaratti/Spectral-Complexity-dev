@@ -50,6 +50,7 @@ MCNEMAR_ALPHA = 0.01
 _script_dir = Path(__file__).resolve().parent
 _candidates = [
     _script_dir,
+    _script_dir.parent,
     _script_dir.parent / "spectral-complexity-public",
     _script_dir.parent.parent / "spectral-complexity-public",
     Path("F:/Resilio/IMGS 890 Research/spectral-complexity-public"),
@@ -70,8 +71,8 @@ H5_PATH = "C:/satelliteImagery/HLST30/HLST_Rochesterv2.h5"
 MEDIA_DIR = "C:/satelliteImagery/HLST30/SC-CCM"
 
 # Select comparison methods: "volume_map_3d_zscore", "sliding_volume_z_score", or "pyccd"
-METHOD_1 = "volume_map_3d_zscore"
-METHOD_2 = "sliding_volume_z_score"
+METHOD_1 = "sliding_volume_z_score"
+METHOD_2 = "pyccd"
 
 
 def normalize_method_name(name):
@@ -976,31 +977,23 @@ def plot_figure_composite_sensitivity(data, save_path):
     """
     Combines the Land-Cover Strata and Material Category sensitivity comparisons
     into a space-efficient 2-panel side-by-side publication figure for IEEE JSTARS.
-    Compares Method 1 vs. Method 2 (and optional Reference Method).
+    Shows Method 1 3x3 Neighborhood Cluster, Method 1 1x1 On-Target Center, and Method 2.
     """
     m1 = data.get("method_1")
     m2 = data.get("method_2")
-    m_ref = data.get("method_ref")
 
     sc_tab_pixel = m1["table"] if m1 else data["sc_table"]
+    sc_tab_clust = m1.get("cluster_table", data.get("sc_table_cluster", sc_tab_pixel)) if m1 else data.get("sc_table_cluster", sc_tab_pixel)
     py_tab = m2["table"] if m2 else data["py_table"]
-    ref_tab = m_ref["table"] if m_ref else None
 
     m1_lbl = m1.get("short_name", "SC-CCM 3D") if m1 else "SC-CCM 3D"
-    m2_lbl = m2.get("short_name", "SC-CCM maxVol") if m2 else "SC-CCM maxVol"
-    m_ref_lbl = m_ref.get("short_name", "Ref") if m_ref else "Ref"
+    m2_lbl = m2.get("short_name", "USGS PyCCD") if m2 else "USGS PyCCD"
 
-    m1_ls = m1.get("linestyle", "-") if m1 else "-"
     m2_ls = m2.get("linestyle", "--") if m2 else "--"
-    m_ref_ls = m_ref.get("linestyle", ":") if m_ref else ":"
-
-    m1_marker = m1.get("marker", "o") if m1 else "o"
     m2_marker = m2.get("marker", "s") if m2 else "s"
-    m_ref_marker = m_ref.get("marker", "^") if m_ref else "^"
 
     fractions = data["fractions"]
     patch_ids = data["patch_ids"]
-    patch_names = data["patch_names"]
     f_pcts = fractions * 100.0
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(7.16, 2.9), sharey=True)
     fig.patch.set_facecolor("white")
@@ -1014,11 +1007,17 @@ def plot_figure_composite_sensitivity(data, save_path):
         color = STRATA_PALETTE.get(pid, "#333333")
         display_name = STRATA_DISPLAY.get(pid, pid.title())
 
-        pix_recs, py_recs, ref_recs = [], [], []
+        clust_recs, pix_recs, py_recs = [], [], []
 
         for f in fractions:
+            sc_c_sub = sc_tab_clust[(np.isclose(sc_tab_clust["mixture_fraction"], f)) & (sc_tab_clust["patch_id"] == pid.encode())]
             sc_p_sub = sc_tab_pixel[(np.isclose(sc_tab_pixel["mixture_fraction"], f)) & (sc_tab_pixel["patch_id"] == pid.encode())]
             py_sub = py_tab[(np.isclose(py_tab["mixture_fraction"], f)) & (py_tab["patch_id"] == pid.encode())]
+
+            n_c = len(sc_c_sub)
+            k_c = int(np.sum(sc_c_sub["break_detected"])) if n_c > 0 else 0
+            p_c, _, _ = compute_binomial_ci(k_c, n_c, confidence=CONFIDENCE_INTERVAL, method="wilson")
+            clust_recs.append(p_c)
 
             n_p = len(sc_p_sub)
             k_p = int(np.sum(sc_p_sub["break_detected"])) if n_p > 0 else 0
@@ -1030,38 +1029,24 @@ def plot_figure_composite_sensitivity(data, save_path):
             p_py, _, _ = compute_binomial_ci(k_py, n_py, confidence=CONFIDENCE_INTERVAL, method="wilson")
             py_recs.append(p_py)
 
-            if ref_tab is not None:
-                r_sub = ref_tab[(np.isclose(ref_tab["mixture_fraction"], f)) & (ref_tab["patch_id"] == pid.encode())]
-                n_r = len(r_sub)
-                k_r = int(np.sum(r_sub["break_detected"])) if n_r > 0 else 0
-                p_r, _, _ = compute_binomial_ci(k_r, n_r, confidence=CONFIDENCE_INTERVAL, method="wilson")
-                ref_recs.append(p_r)
-
-        pix_recs = np.array(pix_recs)
-        py_recs = np.array(py_recs)
-
-        ax1.plot(f_pcts, pix_recs, color=color, marker=m1_marker, markersize=2.8, linewidth=1.2,
-                 linestyle=m1_ls, zorder=6)
-        ax1.plot(f_pcts, py_recs, color=color, marker=m2_marker, markersize=2.6, linewidth=1.1,
-                 linestyle=m2_ls, zorder=5)
-        if ref_tab is not None and len(ref_recs) > 0:
-            ax1.plot(f_pcts, np.array(ref_recs), color=color, marker=m_ref_marker, markersize=2.4, linewidth=0.9,
-                     linestyle=m_ref_ls, alpha=0.7, zorder=4)
+        ax1.plot(f_pcts, np.array(clust_recs), color=color, marker="o", markersize=2.8, linewidth=1.2,
+                 linestyle="-", zorder=6)
+        ax1.plot(f_pcts, np.array(pix_recs), color=color, marker="o", fillstyle="none", markersize=2.5, linewidth=1.0,
+                 linestyle=":", zorder=5)
+        ax1.plot(f_pcts, np.array(py_recs), color=color, marker=m2_marker, markersize=2.6, linewidth=1.1,
+                 linestyle=m2_ls, zorder=4)
 
         class_handles_a.append(mlines.Line2D([], [], color=color, marker="s", markersize=3.2,
                                              linewidth=0, label=display_name))
 
     method_handles = [
-        mlines.Line2D([], [], color="#222222", linestyle=m1_ls, marker=m1_marker, markersize=2.8,
-                      linewidth=1.2, label=m1_lbl),
+        mlines.Line2D([], [], color="#222222", linestyle="-", marker="o", markersize=2.8,
+                      linewidth=1.2, label=rf"{m1_lbl} $3\times 3$ Cluster"),
+        mlines.Line2D([], [], color="#222222", linestyle=":", marker="o", fillstyle="none",
+                      markersize=2.5, linewidth=1.0, label=rf"{m1_lbl} $1\times 1$ Center"),
         mlines.Line2D([], [], color="#222222", linestyle=m2_ls, marker=m2_marker, markersize=2.6,
-                      linewidth=1.1, label=m2_lbl)
+                      linewidth=1.1, label=rf"{m2_lbl}")
     ]
-    if m_ref:
-        method_handles.append(
-            mlines.Line2D([], [], color="#222222", linestyle=m_ref_ls, marker=m_ref_marker,
-                          markersize=2.4, linewidth=0.9, label=m_ref_lbl)
-        )
 
     ax1.set_title(r"(a) Land-Cover Strata Sensitivity", fontsize=8.0, fontweight="bold", pad=6)
     ax1.set_xlabel(r"Target Mixture Fraction $f$ (\%)", fontsize=7.5)
@@ -1075,9 +1060,8 @@ def plot_figure_composite_sensitivity(data, save_path):
     ax1.grid(True, linestyle="--", alpha=0.45, color=COLOR_GRID)
 
     all_h_a = class_handles_a + method_handles
-    ncols_a = 3 if len(method_handles) == 3 else 2
-    ax1.legend(handles=all_h_a, loc="lower right", fontsize=4.6 if ncols_a == 3 else 4.8, ncol=ncols_a,
-               framealpha=0.92, columnspacing=0.5, handlelength=1.0, handletextpad=0.25,
+    ax1.legend(handles=all_h_a, loc="lower right", fontsize=4.1, ncol=2,
+               framealpha=0.92, columnspacing=1.2, handlelength=1.1, handletextpad=0.30,
                borderpad=0.25, labelspacing=0.22)
 
     # --------------------------------------------------------------------------
@@ -1090,26 +1074,33 @@ def plot_figure_composite_sensitivity(data, save_path):
         grp_name = grp["group"]
         color = CATEGORY_PALETTE.get(grp_name, "#333333")
         mat_pairs = [(m[0].encode(), m[1].encode()) for m in grp["materials"]]
-        
+
+        sc_c_mask = np.zeros(len(sc_tab_clust), dtype=bool)
         sc_p_mask = np.zeros(len(sc_tab_pixel), dtype=bool)
         py_mask = np.zeros(len(py_tab), dtype=bool)
-        ref_mask = np.zeros(len(ref_tab), dtype=bool) if ref_tab is not None else None
-
         for mid_b, mname_b in mat_pairs:
+            sc_c_mask |= ((sc_tab_clust["material_id"] == mid_b) & (sc_tab_clust["material_name"] == mname_b))
             sc_p_mask |= ((sc_tab_pixel["material_id"] == mid_b) & (sc_tab_pixel["material_name"] == mname_b))
             py_mask |= ((py_tab["material_id"] == mid_b) & (py_tab["material_name"] == mname_b))
-            if ref_mask is not None:
-                ref_mask |= ((ref_tab["material_id"] == mid_b) & (ref_tab["material_name"] == mname_b))
 
+        sc_c_grp = sc_tab_clust[sc_c_mask]
         sc_p_grp = sc_tab_pixel[sc_p_mask]
         py_grp = py_tab[py_mask]
-        ref_grp = ref_tab[ref_mask] if ref_tab is not None else None
 
-        pix_recs, py_recs, ref_recs = [], [], []
+        clust_recs, clust_l, clust_h = [], [], []
+        pix_recs, py_recs, py_l, py_h = [], [], [], []
 
         for f in fractions:
+            sc_c_f = sc_c_grp[np.isclose(sc_c_grp["mixture_fraction"], f)]
             sc_p_f = sc_p_grp[np.isclose(sc_p_grp["mixture_fraction"], f)]
             py_f = py_grp[np.isclose(py_grp["mixture_fraction"], f)]
+
+            n_c = len(sc_c_f)
+            k_c = int(np.sum(sc_c_f["break_detected"])) if n_c > 0 else 0
+            p_c, cl_l, cl_h = compute_binomial_ci(k_c, n_c, confidence=CONFIDENCE_INTERVAL, method="wilson")
+            clust_recs.append(p_c)
+            clust_l.append(cl_l)
+            clust_h.append(cl_h)
 
             n_p = len(sc_p_f)
             k_p = int(np.sum(sc_p_f["break_detected"])) if n_p > 0 else 0
@@ -1118,26 +1109,28 @@ def plot_figure_composite_sensitivity(data, save_path):
 
             n_py = len(py_f)
             k_py = int(np.sum(py_f["break_detected"])) if n_py > 0 else 0
-            p_py, _, _ = compute_binomial_ci(k_py, n_py, confidence=CONFIDENCE_INTERVAL, method="wilson")
+            p_py, py_l_val, py_h_val = compute_binomial_ci(k_py, n_py, confidence=CONFIDENCE_INTERVAL, method="wilson")
             py_recs.append(p_py)
+            py_l.append(py_l_val)
+            py_h.append(py_h_val)
 
-            if ref_grp is not None:
-                rf_f = ref_grp[np.isclose(ref_grp["mixture_fraction"], f)]
-                n_rf = len(rf_f)
-                k_rf = int(np.sum(rf_f["break_detected"])) if n_rf > 0 else 0
-                p_rf, _, _ = compute_binomial_ci(k_rf, n_rf, confidence=CONFIDENCE_INTERVAL, method="wilson")
-                ref_recs.append(p_rf)
-
+        clust_recs = np.array(clust_recs)
+        clust_l = np.array(clust_l)
+        clust_h = np.array(clust_h)
         pix_recs = np.array(pix_recs)
         py_recs = np.array(py_recs)
+        py_l = np.array(py_l)
+        py_h = np.array(py_h)
 
-        ax2.plot(f_pcts, pix_recs, color=color, marker=m1_marker, markersize=2.8, linewidth=1.2,
-                 linestyle=m1_ls, zorder=6)
+        ax2.fill_between(f_pcts, clust_l, clust_h, color=color, alpha=0.10, zorder=3)
+        ax2.fill_between(f_pcts, py_l, py_h, color=color, alpha=0.06, zorder=2)
+
+        ax2.plot(f_pcts, clust_recs, color=color, marker="o", markersize=2.8, linewidth=1.2,
+                 linestyle="-", zorder=6)
+        ax2.plot(f_pcts, pix_recs, color=color, marker="o", fillstyle="none", markersize=2.5, linewidth=1.0,
+                 linestyle=":", zorder=5)
         ax2.plot(f_pcts, py_recs, color=color, marker=m2_marker, markersize=2.6, linewidth=1.1,
-                 linestyle=m2_ls, zorder=5)
-        if ref_tab is not None and len(ref_recs) > 0:
-            ax2.plot(f_pcts, np.array(ref_recs), color=color, marker=m_ref_marker, markersize=2.4, linewidth=0.9,
-                     linestyle=m_ref_ls, alpha=0.7, zorder=4)
+                 linestyle=m2_ls, zorder=4)
 
         class_handles_b.append(mlines.Line2D([], [], color=color, marker="s", markersize=3.2,
                                              linewidth=0, label=grp_name))
@@ -1151,8 +1144,8 @@ def plot_figure_composite_sensitivity(data, save_path):
     ax2.grid(True, linestyle="--", alpha=0.45, color=COLOR_GRID)
 
     all_h_b = class_handles_b + method_handles
-    ax2.legend(handles=all_h_b, loc="lower right", fontsize=4.6 if ncols_a == 3 else 4.8, ncol=ncols_a,
-               framealpha=0.92, columnspacing=0.6, handlelength=1.1, handletextpad=0.25,
+    ax2.legend(handles=all_h_b, loc="lower right", fontsize=4.1, ncol=2,
+               framealpha=0.92, columnspacing=1.2, handlelength=1.1, handletextpad=0.30,
                borderpad=0.25, labelspacing=0.22)
 
     plt.subplots_adjust(top=0.92, bottom=0.13, left=0.07, right=0.98, wspace=0.10)
@@ -1182,7 +1175,7 @@ def plot_figure2_roc_space(data, save_path):
     baseline_fps = data["baseline_fps"]
 
     m1_name = m1.get("short_name", "SC-CCM 3D") if m1 else "SC-CCM 3D"
-    m2_name = m2.get("short_name", "SC-CCM maxVol") if m2 else "SC-CCM maxVol"
+    m2_name = m2.get("short_name", "USGS PyCCD") if m2 else "USGS PyCCD"
     m1_color = m1.get("color", COLOR_SCCCD) if m1 else COLOR_SCCCD
     m2_color = m2.get("color", COLOR_PYCCD) if m2 else COLOR_PYCCD
     m1_ls = m1.get("linestyle", "-") if m1 else "-"
@@ -1196,7 +1189,7 @@ def plot_figure2_roc_space(data, save_path):
     m1_fp = m1.get("fp_count", baseline_fps.get(m1_fpr_key, 0)) if m1 else baseline_fps.get(m1_fpr_key, 0)
     m2_fp = m2.get("fp_count", baseline_fps.get(m2_fpr_key, 0)) if m2 else baseline_fps.get(m2_fpr_key, 0)
 
-    fig, ax = plt.subplots()
+    fig, ax = plt.subplots(figsize=(7.2, 4.8))
     fig.patch.set_facecolor("white")
 
     # Diagonal random classifier reference line
@@ -1207,78 +1200,91 @@ def plot_figure2_roc_space(data, save_path):
     py_tprs = []
 
     for f in fractions:
-        sc_sub = sc_tab[sc_tab["mixture_fraction"] == f]
-        py_sub = py_tab[py_tab["mixture_fraction"] == f]
-        sc_tprs.append(float(np.mean(sc_sub["break_detected"])))
-        py_tprs.append(float(np.mean(py_sub["break_detected"])))
+        sc_sub = sc_tab[np.isclose(sc_tab["mixture_fraction"], f)]
+        py_sub = py_tab[np.isclose(py_tab["mixture_fraction"], f)]
+        sc_tprs.append(float(np.mean(sc_sub["break_detected"])) if len(sc_sub) > 0 else 0.0)
+        py_tprs.append(float(np.mean(py_sub["break_detected"])) if len(py_sub) > 0 else 0.0)
+
+    annotate_milestones = [0.0, 0.10, 0.25, 0.50, 0.75, 1.00] if len(fractions) > 8 else fractions
+    # Place lower-FPR trajectory labels on the left (with margin) and higher-FPR labels on the right
+    m1_on_left = sc_fpr < py_fpr
+    x_min_lim = min(-0.011, min(sc_fpr, py_fpr) - 0.010)
+    x_max_lim = max(0.036, max(sc_fpr, py_fpr) + 0.022)
 
     # Plot Method 1 trajectory
     sc_fprs = [sc_fpr] * len(fractions)
     ax.plot(sc_fprs, sc_tprs, color=m1_color, linestyle=m1_ls, linewidth=2.0, zorder=3)
-    annotate_milestones = [0.0, 0.10, 0.25, 0.50, 0.75, 1.00] if len(fractions) > 8 else fractions
     for i, (fpr_val, tpr_val, f_val) in enumerate(zip(sc_fprs, sc_tprs, fractions)):
-        marker_size = 50 + (i / max(len(fractions)-1, 1)) * 120
-        ax.scatter(fpr_val, tpr_val, color=m1_color, s=marker_size, edgecolors="black", linewidths=1.0, zorder=5)
+        marker_size = 45 + (i / max(len(fractions) - 1, 1)) * 100
+        ax.scatter(fpr_val, tpr_val, color=m1_color, s=marker_size, edgecolors="black", linewidths=0.9, zorder=5)
         if any(np.isclose(f_val, m) for m in annotate_milestones):
-            ax.annotate(f"f={f_val:.2f} ({tpr_val*100:.1f}%)", (fpr_val, tpr_val),
-                        textcoords="offset points", xytext=(12, -4), fontsize=9, color=m1_color)
+            dx = -10 if m1_on_left else 10
+            ha = "right" if m1_on_left else "left"
+            ax.annotate(rf"$f={f_val:.2f}$ ({tpr_val*100:.1f}\%)", (fpr_val, tpr_val),
+                        textcoords="offset points", xytext=(dx, -3), ha=ha, fontsize=7.5, color=m1_color)
 
     # Plot Method 2 trajectory
     py_fprs = [py_fpr] * len(fractions)
     ax.plot(py_fprs, py_tprs, color=m2_color, linestyle=m2_ls, linewidth=2.0, zorder=3)
     for i, (fpr_val, tpr_val, f_val) in enumerate(zip(py_fprs, py_tprs, fractions)):
-        marker_size = 50 + (i / max(len(fractions)-1, 1)) * 120
-        ax.scatter(fpr_val, tpr_val, color=m2_color, s=marker_size, edgecolors="black", linewidths=1.0, zorder=5)
+        marker_size = 45 + (i / max(len(fractions) - 1, 1)) * 100
+        ax.scatter(fpr_val, tpr_val, color=m2_color, s=marker_size, edgecolors="black", linewidths=0.9, zorder=5)
         if any(np.isclose(f_val, m) for m in annotate_milestones):
-            ax.annotate(f"f={f_val:.2f} ({tpr_val*100:.1f}%)", (fpr_val, tpr_val),
-                        textcoords="offset points", xytext=(-12, -4), ha="right", fontsize=9, color=m2_color)
+            dx = 10 if m1_on_left else -10
+            ha = "left" if m1_on_left else "right"
+            ax.annotate(rf"$f={f_val:.2f}$ ({tpr_val*100:.1f}\%)", (fpr_val, tpr_val),
+                        textcoords="offset points", xytext=(dx, -3), ha=ha, fontsize=7.5, color=m2_color)
 
-    # Plot stratified markers at milestone fraction (f = 0.45)
+    # Plot stratified markers at milestone fraction (prefer f = 0.45 if available)
+    milestone_f = 0.45 if np.any(np.isclose(fractions, 0.45)) else (float(fractions[-1]) if len(fractions) > 0 else 0.45)
     for pid in patch_ids:
-        sc_sub = sc_tab[np.isclose(sc_tab["mixture_fraction"], 0.45) & (sc_tab["patch_id"] == pid.encode())]
-        py_sub = py_tab[np.isclose(py_tab["mixture_fraction"], 0.45) & (py_tab["patch_id"] == pid.encode())]
-        sc_strat_tpr = float(np.mean(sc_sub["break_detected"]))
-        py_strat_tpr = float(np.mean(py_sub["break_detected"]))
+        sc_sub = sc_tab[np.isclose(sc_tab["mixture_fraction"], milestone_f) & (sc_tab["patch_id"] == pid.encode())]
+        py_sub = py_tab[np.isclose(py_tab["mixture_fraction"], milestone_f) & (py_tab["patch_id"] == pid.encode())]
+        sc_strat_tpr = float(np.mean(sc_sub["break_detected"])) if len(sc_sub) > 0 else 0.0
+        py_strat_tpr = float(np.mean(py_sub["break_detected"])) if len(py_sub) > 0 else 0.0
         color = STRATA_PALETTE.get(pid, "black")
 
-        ax.scatter(sc_fpr, sc_strat_tpr, color=color, marker="^", s=90, edgecolors="blue", linewidths=1.2, zorder=6)
-        ax.scatter(py_fpr, py_strat_tpr, color=color, marker="v", s=90, edgecolors="red", linewidths=1.2, zorder=6)
+        ax.scatter(sc_fpr, sc_strat_tpr, color=color, marker="^", s=70, edgecolors="blue", linewidths=1.0, zorder=6)
+        ax.scatter(py_fpr, py_strat_tpr, color=color, marker="v", s=70, edgecolors="red", linewidths=1.0, zorder=6)
 
     # Styling and Limits (Zoomed Operational View)
-    ax.set_xlim(-0.002, 0.035)
-    ax.set_ylim(-0.02, 1.02)
-    ax.set_xlabel("False Positive Rate (FPR) on Un-Injected Control Pixels", fontsize=11)
-    ax.set_ylabel(r"True Positive Rate ($P_{CD}$ / Sensitivity) on Injected Disturbance", fontsize=11)
-    ax.set_title(f"Operational ROC Space: {m1_name} vs. {m2_name}", fontsize=13, pad=12)
+    ax.set_xlim(x_min_lim, x_max_lim)
+    ax.set_ylim(-0.04, 1.04)
+    ax.set_xlabel("False Positive Rate (FPR) on Un-Injected Control Pixels", fontsize=9.5)
+    ax.set_ylabel(r"True Positive Rate ($P_{\mathrm{CD}}$ / Sensitivity) on Injected Disturbance", fontsize=9.5)
+    ax.set_title(f"Operational ROC Space: {m1_name} vs. {m2_name}", fontsize=11.0, fontweight="bold", pad=10)
+    ax.tick_params(axis="both", labelsize=8.0)
     ax.grid(True, linestyle="--", alpha=0.5, color=COLOR_GRID)
 
     # Custom Legend
     legend_elements = [
-        mpatches.Patch(facecolor=m1_color, edgecolor="black", label=f"{m1_name} Trajectory (FPR = {sc_fpr*100:.2f}%, N={total_controls})"),
-        mpatches.Patch(facecolor=m2_color, edgecolor="black", label=f"{m2_name} Trajectory (FPR = {py_fpr*100:.2f}%, N={total_controls})"),
-        plt.Line2D([0], [0], marker="^", color="w", markeredgecolor="blue", markerfacecolor="gray", markersize=9, label=f"Stratified {m1_name} at f = 0.45"),
-        plt.Line2D([0], [0], marker="v", color="w", markeredgecolor="red", markerfacecolor="gray", markersize=9, label=f"Stratified {m2_name} at f = 0.45"),
+        mpatches.Patch(facecolor=m1_color, edgecolor="black", label=rf"{m1_name} Trajectory (FPR = {sc_fpr*100:.2f}\%, N={total_controls})"),
+        mpatches.Patch(facecolor=m2_color, edgecolor="black", label=rf"{m2_name} Trajectory (FPR = {py_fpr*100:.2f}\%, N={total_controls})"),
+        plt.Line2D([0], [0], marker="^", color="w", markeredgecolor="blue", markerfacecolor="gray", markersize=7.5, label=rf"Stratified {m1_name} at $f = {milestone_f:.2f}$"),
+        plt.Line2D([0], [0], marker="v", color="w", markeredgecolor="red", markerfacecolor="gray", markersize=7.5, label=rf"Stratified {m2_name} at $f = {milestone_f:.2f}$"),
     ]
-    ax.legend(handles=legend_elements, loc="center right", fontsize=9.5, framealpha=0.92)
+    ax.legend(handles=legend_elements, loc="upper right", fontsize=7.5, framealpha=0.92)
 
     # Context Text Box
+    max_f = float(fractions[-1]) if len(fractions) > 0 else 1.0
     stats_text = (
         f"Control Background Statistics:\n"
         f"  Total Un-Injected Pixels: {total_controls}\n"
-        f"  {m1_name} False Alarms:   {m1_fp} ({sc_fpr*100:.2f}%)\n"
-        f"  {m2_name} False Alarms:   {m2_fp} ({py_fpr*100:.2f}%)\n"
+        rf"  {m1_name} False Alarms:   {m1_fp} ({sc_fpr*100:.2f}\%)" + "\n"
+        rf"  {m2_name} False Alarms:   {m2_fp} ({py_fpr*100:.2f}\%)" + "\n"
         f"\nOperational Separation:\n"
-        f"  {m1_name} reaches TPR = {sc_tprs[-1]*100:.1f}% at f = 1.00.\n"
-        f"  {m2_name} reaches TPR = {py_tprs[-1]*100:.1f}% at f = 1.00.\n"
+        rf"  {m1_name} reaches TPR = {sc_tprs[-1]*100:.1f}\% at $f = {max_f:.2f}$." + "\n"
+        rf"  {m2_name} reaches TPR = {py_tprs[-1]*100:.1f}\% at $f = {max_f:.2f}$." + "\n"
         f"  Demonstrates subpixel recovery without\n"
         f"  background false alarm inflation."
     )
-    ax.text(0.55, 0.22, stats_text, transform=ax.transAxes, fontsize=8.5, family="monospace",
-            bbox=dict(boxstyle="round,pad=0.7", facecolor="#ffffff", edgecolor="#adb5bd", linewidth=1.1))
+    ax.text(0.98, 0.04, stats_text, transform=ax.transAxes, ha="right", va="bottom",
+            fontsize=7.2, family="monospace",
+            bbox=dict(boxstyle="round,pad=0.6", facecolor="#ffffff", edgecolor="#adb5bd", linewidth=1.0, alpha=0.94))
 
     save_base = str(Path(save_path).with_suffix(""))
-    plt.savefig(f"{save_base}.png", dpi=300, pad_inches=0, bbox_inches="tight")
-    plt.savefig(f"{save_base}.pdf", dpi=600, pad_inches=0, bbox_inches="tight")
+    plt.savefig(f"{save_base}.png", dpi=300, pad_inches=0.04, bbox_inches="tight")
+    plt.savefig(f"{save_base}.pdf", dpi=600, pad_inches=0.04, bbox_inches="tight")
     plt.close(fig)
     print(f"Saved Figure 2 to: {save_base}.png / .pdf")
 
@@ -1297,14 +1303,13 @@ def plot_figure3_latency_distributions(data, save_path):
     sc_tab = m1["cluster_table"] if m1 else data.get("sc_table_cluster", data["sc_table"])
     py_tab = m2["table"] if m2 else data["py_table"]
     patch_ids = data["patch_ids"]
-    patch_names = data["patch_names"]
 
     m1_name = m1.get("short_name", "SC-CCM 3D") if m1 else "SC-CCM 3D"
-    m2_name = m2.get("short_name", "SC-CCM maxVol") if m2 else "SC-CCM maxVol"
+    m2_name = m2.get("short_name", "USGS PyCCD") if m2 else "USGS PyCCD"
     m1_color = m1.get("color", COLOR_SCCCD) if m1 else COLOR_SCCCD
     m2_color = m2.get("color", COLOR_PYCCD) if m2 else COLOR_PYCCD
 
-    fig, ax = plt.subplots()
+    fig, ax = plt.subplots(figsize=(7.6, 4.5))
     fig.patch.set_facecolor("white")
 
     categories = patch_ids + ["OVERALL"]
@@ -1328,63 +1333,71 @@ def plot_figure3_latency_distributions(data, save_path):
         sc_counts.append(len(sc_lats))
         py_counts.append(len(py_lats))
 
-    positions_sc = np.arange(len(categories)) * 2.0 - 0.35
-    positions_py = np.arange(len(categories)) * 2.0 + 0.35
+    centers = np.arange(len(categories)) * 2.5
+    positions_sc = centers - 0.45
+    positions_py = centers + 0.45
 
     # Render Method 1 Boxplots
-    bp_sc = ax.boxplot(
-        sc_lat_data, positions=positions_sc, widths=0.55, patch_artist=True,
-        boxprops=dict(facecolor=m1_color, alpha=0.75, edgecolor="black", linewidth=1.2),
-        medianprops=dict(color="yellow", linewidth=2.0),
-        whiskerprops=dict(color="black", linewidth=1.2),
-        capprops=dict(color="black", linewidth=1.2),
-        flierprops=dict(marker="o", markerfacecolor=m1_color, markeredgecolor="none", markersize=4, alpha=0.5),
+    ax.boxplot(
+        sc_lat_data, positions=positions_sc, widths=0.65, patch_artist=True,
+        boxprops=dict(facecolor=m1_color, alpha=0.75, edgecolor="black", linewidth=1.0),
+        medianprops=dict(color="yellow", linewidth=1.8),
+        whiskerprops=dict(color="black", linewidth=1.0),
+        capprops=dict(color="black", linewidth=1.0),
+        flierprops=dict(marker="o", markerfacecolor=m1_color, markeredgecolor="none", markersize=3.5, alpha=0.5),
     )
 
     # Render Method 2 Boxplots
-    bp_py = ax.boxplot(
-        py_lat_data, positions=positions_py, widths=0.55, patch_artist=True,
-        boxprops=dict(facecolor=m2_color, alpha=0.75, edgecolor="black", linewidth=1.2),
-        medianprops=dict(color="yellow", linewidth=2.0),
-        whiskerprops=dict(color="black", linewidth=1.2),
-        capprops=dict(color="black", linewidth=1.2),
-        flierprops=dict(marker="s", markerfacecolor=m2_color, markeredgecolor="none", markersize=4, alpha=0.5),
+    ax.boxplot(
+        py_lat_data, positions=positions_py, widths=0.65, patch_artist=True,
+        boxprops=dict(facecolor=m2_color, alpha=0.75, edgecolor="black", linewidth=1.0),
+        medianprops=dict(color="yellow", linewidth=1.8),
+        whiskerprops=dict(color="black", linewidth=1.0),
+        capprops=dict(color="black", linewidth=1.0),
+        flierprops=dict(marker="s", markerfacecolor=m2_color, markeredgecolor="none", markersize=3.5, alpha=0.5),
     )
 
-    # Annotate medians and sample counts
+    max_vals = [float(np.max(x)) for x in (sc_lat_data + py_lat_data) if len(x) > 0]
+    y_data_max = max(max_vals) if max_vals else 120.0
+    y_ann_base = max(145.0, y_data_max + 12.0)
+    y_top_lim = y_ann_base + 52.0
+
+    # Annotate medians and sample counts cleanly above boxes without horizontal overlap
     for i, (sc_lats, py_lats, sc_n, py_n) in enumerate(zip(sc_lat_data, py_lat_data, sc_counts, py_counts)):
         sc_med = np.median(sc_lats) if len(sc_lats) > 0 else np.nan
         py_med = np.median(py_lats) if len(py_lats) > 0 else np.nan
 
-        # Method 1 annotations
         if not np.isnan(sc_med):
-            ax.annotate(f"Med: {sc_med:.1f}d\n(N={sc_n})", (positions_sc[i], 165),
-                        ha="center", fontsize=8, color=m1_color)
+            ax.annotate(f"Med: {sc_med:.1f}d\n(N={sc_n})", (positions_sc[i] - 0.08, y_ann_base),
+                        ha="center", va="bottom", fontsize=6.5, color=m1_color)
 
-        # Method 2 annotations
         if not np.isnan(py_med):
-            ax.annotate(f"Med: {py_med:.1f}d\n(N={py_n})", (positions_py[i], 165),
-                        ha="center", fontsize=8, color=m2_color)
+            ax.annotate(f"Med: {py_med:.1f}d\n(N={py_n})", (positions_py[i] + 0.08, y_ann_base),
+                        ha="center", va="bottom", fontsize=6.5, color=m2_color)
         else:
-            ax.annotate("N=0", (positions_py[i], 165), ha="center", fontsize=8, color="gray")
+            ax.annotate("N=0", (positions_py[i] + 0.08, y_ann_base),
+                        ha="center", va="bottom", fontsize=6.5, color="gray")
 
-    ax.set_xticks(np.arange(len(categories)) * 2.0)
-    ax.set_xticklabels(cat_labels, fontsize=10)
-    ax.set_ylabel("Detection Latency Delta t (Days Post-Onset)", fontsize=11)
-    ax.set_ylim(-5, 195)
-    ax.set_title(f"Detection Confirmation Latency: {m1_name} vs. {m2_name}", fontsize=13, pad=12)
+    ax.set_xticks(centers)
+    ax.set_xticklabels(cat_labels, fontsize=8.5)
+    ax.set_ylabel(r"Detection Latency $\Delta t$ (Days Post-Onset)", fontsize=9.5)
+    ax.set_ylim(-5, y_top_lim)
+    ax.set_xlim(centers[0] - 1.3, centers[-1] + 1.3)
+    ax.set_title(f"Detection Confirmation Latency: {m1_name} vs. {m2_name}", fontsize=11.0, fontweight="bold", pad=26)
+    ax.tick_params(axis="y", labelsize=8.0)
     ax.grid(True, linestyle="--", alpha=0.5, color=COLOR_GRID, axis="y")
 
-    # Legend
+    # Legend above plot area so it never overlaps median annotations
     legend_elements = [
         mpatches.Patch(facecolor=m1_color, edgecolor="black", label=f"{m1_name} [Total N = {sc_counts[-1]}]"),
         mpatches.Patch(facecolor=m2_color, edgecolor="black", label=f"{m2_name} [Total N = {py_counts[-1]}]"),
     ]
-    ax.legend(handles=legend_elements, loc="upper right", fontsize=9.5, framealpha=0.92)
+    ax.legend(handles=legend_elements, loc="lower center", bbox_to_anchor=(0.5, 1.01),
+              ncol=2, fontsize=8.5, framealpha=0.92)
 
     save_base = str(Path(save_path).with_suffix(""))
-    plt.savefig(f"{save_base}.png", dpi=300, pad_inches=0, bbox_inches="tight")
-    plt.savefig(f"{save_base}.pdf", dpi=600, pad_inches=0, bbox_inches="tight")
+    plt.savefig(f"{save_base}.png", dpi=300, pad_inches=0.04, bbox_inches="tight")
+    plt.savefig(f"{save_base}.pdf", dpi=600, pad_inches=0.04, bbox_inches="tight")
     plt.close(fig)
     print(f"Saved Figure 3 to: {save_base}.png / .pdf")
 
@@ -1517,7 +1530,7 @@ def plot_figure4_material_sensitivity_heatmap(data, save_path):
                     text_color = "black" if lum > 0.52 else "white"
                     font_weight = "bold"
                 else:
-                    txt = f">{f_max:.2f}" if f_max < 1.0 else "Undet."
+                    txt = rf"$>{f_max:.2f}$" if f_max < 1.0 else "Undet."
                     text_color = "black"
                     font_weight = "normal"
                 ax.text(c, r, txt, ha="center", va="center", fontsize=5.2, color=text_color, fontweight=font_weight)
@@ -1737,8 +1750,8 @@ def plot_land_class_mcnemar_paired_significance(data, save_path):
     ax2.axhline(0.0, color="black", linestyle="-", linewidth=0.8, zorder=2)
     ax2.axhspan(0.0, max(y_high, 35.0), color="#e6f2ff", alpha=0.45, zorder=0)
     ax2.axhspan(min(y_low, -35.0), 0.0, color="#fff0e6", alpha=0.45, zorder=0)
-    ax2.text(100, y_high * 0.75, rf"{m1_lbl} Advantage", fontsize=5.8, color="#004080", fontweight="bold", ha="right", va="center")
-    ax2.text(100, y_low * 0.70, rf"{m2_lbl} Advantage", fontsize=5.8, color="#993300", fontweight="bold", ha="right", va="center")
+    ax2.text(0.02, y_high * 0.80, rf"{m1_lbl} Advantage", transform=ax2.get_yaxis_transform(), fontsize=5.8, color="#004080", fontweight="bold", ha="left", va="center")
+    ax2.text(0.02, y_low * 0.75, rf"{m2_lbl} Advantage", transform=ax2.get_yaxis_transform(), fontsize=5.8, color="#993300", fontweight="bold", ha="left", va="center")
 
     ax2.set_xlabel(r"Target Mixture Fraction $f$ (\%)", fontsize=8.0)
     ax2.set_ylabel(r"$\Delta P_{\mathrm{CD, tgt}}$ (\%)", fontsize=8.0)
@@ -1883,8 +1896,8 @@ def plot_material_category_mcnemar_paired_significance(data, save_path):
     ax2.axhline(0.0, color="black", linestyle="-", linewidth=0.8, zorder=2)
     ax2.axhspan(0.0, max(y_high, 35.0), color="#e6f2ff", alpha=0.45, zorder=0)
     ax2.axhspan(min(y_low, -35.0), 0.0, color="#fff0e6", alpha=0.45, zorder=0)
-    ax2.text(99.0, y_high * 0.75, rf"{m1_lbl} Advantage ($\alpha = {alpha_sig:.2f}$)", fontsize=5.8, color="#004080", fontweight="bold", ha="right", va="center")
-    ax2.text(99.0, y_low * 0.70, rf"{m2_lbl} Advantage ($\alpha = {alpha_sig:.2f}$)", fontsize=5.8, color="#993300", fontweight="bold", ha="right", va="center")
+    ax2.text(0.02, y_high * 0.80, rf"{m1_lbl} Advantage ($\alpha = {alpha_sig:.2f}$)", transform=ax2.get_yaxis_transform(), fontsize=5.8, color="#004080", fontweight="bold", ha="left", va="center")
+    ax2.text(0.02, y_low * 0.75, rf"{m2_lbl} Advantage ($\alpha = {alpha_sig:.2f}$)", transform=ax2.get_yaxis_transform(), fontsize=5.8, color="#993300", fontweight="bold", ha="left", va="center")
 
     ax2.set_xlabel(r"Target Mixture Fraction $f$ (\%)", fontsize=8.0)
     ax2.set_ylabel(r"$\Delta P_{\mathrm{CD, tgt}}$ (\%)", fontsize=8.0)
@@ -1991,10 +2004,13 @@ def plot_strata_material_classes_mcnemar_2x2(data, save_path):
 
         ax.text(0.04, 0.91, panel_tags[idx], transform=ax.transAxes, fontsize=6.2, fontweight="bold",
                 zorder=5, bbox=dict(boxstyle="square,pad=0.15", facecolor="white", edgecolor="none", alpha=0.85))
-        ax.set_xlim(-2, 103)
+        max_f_pct = float(max(f_pcts)) if len(f_pcts) > 0 else 100.0
+        x_tick_step = 10 if max_f_pct <= 55 else 20
+        x_ticks = np.arange(0, int(max_f_pct) + 1, x_tick_step)
+        ax.set_xlim(-2, max_f_pct + 3)
         ax.set_ylim(-2, 115)
-        ax.set_xticks(np.arange(0, 101, 20))
-        ax.set_xticklabels([f"{x:.0f}\\%" for x in np.arange(0, 101, 20)], fontsize=5.5)
+        ax.set_xticks(x_ticks)
+        ax.set_xticklabels([f"{x:.0f}\\%" for x in x_ticks], fontsize=5.5)
         ax.set_yticks(np.arange(0, 101, 20))
         ax.set_yticklabels([f"{y:.0f}\\%" for y in np.arange(0, 101, 20)], fontsize=5.5)
         ax.grid(True, linestyle="--", alpha=0.45, color=COLOR_GRID, zorder=0)
@@ -2096,10 +2112,13 @@ def plot_sccm_spatial_support_facets(data, save_path):
         ax.text(0.04, 0.91, panel_tags[idx], transform=ax.transAxes, fontsize=6.2, fontweight="bold",
                 zorder=5, bbox=dict(boxstyle="square,pad=0.15", facecolor="white", edgecolor="none", alpha=0.85))
 
-        ax.set_xlim(-2, 103)
+        max_f_pct = float(max(f_pcts)) if len(f_pcts) > 0 else 100.0
+        x_tick_step = 10 if max_f_pct <= 55 else 20
+        x_ticks = np.arange(0, int(max_f_pct) + 1, x_tick_step)
+        ax.set_xlim(-2, max_f_pct + 3)
         ax.set_ylim(-2, 105)
-        ax.set_xticks(np.arange(0, 101, 20))
-        ax.set_xticklabels([f"{x:.0f}\\%" for x in np.arange(0, 101, 20)], fontsize=5.5)
+        ax.set_xticks(x_ticks)
+        ax.set_xticklabels([f"{x:.0f}\\%" for x in x_ticks], fontsize=5.5)
         ax.set_yticks(np.arange(0, 101, 20))
         ax.set_yticklabels([f"{y:.0f}\\%" for y in np.arange(0, 101, 20)], fontsize=5.5)
         ax.grid(True, linestyle="--", alpha=0.45, color=COLOR_GRID, zorder=0)
@@ -2152,14 +2171,18 @@ def plot_sccm_spatial_support_stacked(data, save_path):
     patch_ids = data["patch_ids"]
     f_pcts = fractions * 100.0
 
-    fig = plt.figure()
+    m1 = data.get("method_1")
+    m1_lbl = m1.get("short_name", "SC-CCM") if m1 else "SC-CCM"
+
+    fig = plt.figure(figsize=(7.16, 4.9))
     fig.patch.set_facecolor("white")
-    gs = fig.add_gridspec(2, 1, height_ratios=[2.2, 1.1], hspace=0.18)
+    gs = fig.add_gridspec(2, 1, height_ratios=[2.2, 1.15], hspace=0.16)
     ax1 = fig.add_subplot(gs[0])
     ax2 = fig.add_subplot(gs[1], sharex=ax1)
 
     handles_nbh = []
     handles_tgt = []
+    all_deltas = []
 
     n_strata = len(patch_ids)
     x_offsets = np.linspace(-0.6, 0.6, 2 * n_strata)
@@ -2192,6 +2215,7 @@ def plot_sccm_spatial_support_stacked(data, save_path):
             nbh_h.append(nh)
 
             deltas.append(p_n - p_t)
+            all_deltas.append(p_n - p_t)
 
         nbh_pts = np.array(nbh_pts)
         tgt_pts = np.array(tgt_pts)
@@ -2209,11 +2233,11 @@ def plot_sccm_spatial_support_stacked(data, save_path):
                      fmt="none", ecolor=color, elinewidth=1.0, capsize=2.0, capthick=0.8, alpha=0.75, zorder=2)
 
         # Sensitivity curves
-        h_n, = ax1.plot(x_nbh, nbh_pts, color=color, linestyle="-", linewidth=2.0,
-                        markersize=5.0, zorder=5, label=f"{display_name} ($3\\times 3$ Cluster)")
-        h_t, = ax1.plot(x_tgt, tgt_pts, color=color, linestyle="--", linewidth=1.6,
-                        markerfacecolor="white", markeredgecolor=color, markeredgewidth=1.2,
-                        markersize=4.5, zorder=4, label=f"{display_name} ($1\\times 1$ Center)")
+        h_n, = ax1.plot(x_nbh, nbh_pts, color=color, linestyle="-", linewidth=1.8,
+                        markersize=4.5, zorder=5, label=rf"{display_name} ({m1_lbl} $3\times 3$ Cluster)")
+        h_t, = ax1.plot(x_tgt, tgt_pts, color=color, linestyle="--", linewidth=1.5,
+                        markerfacecolor="white", markeredgecolor=color, markeredgewidth=1.1,
+                        markersize=4.0, zorder=4, label=rf"{display_name} ({m1_lbl} $1\times 1$ Center)")
         handles_nbh.append(h_n)
         handles_tgt.append(h_t)
 
@@ -2221,34 +2245,45 @@ def plot_sccm_spatial_support_stacked(data, save_path):
         ax2.plot(f_pcts, deltas, color=color, linestyle="-", linewidth=1.8, marker="o", markersize=4.0,
                  alpha=0.9, zorder=3, label=display_name)
 
+    max_f_pct = float(max(f_pcts)) if len(f_pcts) > 0 else 100.0
+    x_ticks = np.arange(0, int(max_f_pct) + 1, 10)
+
     # Upper plot styling
-    ax1.text(0.015, 0.93, "(a)", transform=ax1.transAxes, fontsize=11.0, fontweight="bold")
-    ax1.set_ylabel(r"Detection Sensitivity $P_{\mathrm{CD}}$ (%)", fontsize=10.5)
-    ax1.set_xlim(-2.0, 103.0)
+    ax1.text(0.015, 0.92, "(a)", transform=ax1.transAxes, fontsize=9.5, fontweight="bold")
+    ax1.set_ylabel(r"Detection Sensitivity $P_{\mathrm{CD}}$ (\%)", fontsize=9.0)
+    ax1.set_xlim(-2.0, max_f_pct + 3.0)
     ax1.set_ylim(-3.0, 105.0)
     ax1.set_yticks(np.arange(0, 101, 20))
-    ax1.set_yticklabels([f"{y:.0f}%" for y in np.arange(0, 101, 20)], fontsize=9)
+    ax1.set_yticklabels([f"{y:.0f}\\%" for y in np.arange(0, 101, 20)], fontsize=7.5)
+    ax1.tick_params(axis="x", labelbottom=False)
     ax1.grid(True, linestyle="--", alpha=0.5, color=COLOR_GRID)
 
     all_handles = handles_nbh + handles_tgt
     all_labels = [h.get_label() for h in all_handles]
-    ax1.legend(handles=all_handles, labels=all_labels, loc="lower right", fontsize=8.0, ncol=2, framealpha=0.92)
+    ax1.legend(handles=all_handles, labels=all_labels, loc="lower right", fontsize=6.5, ncol=2, framealpha=0.92)
 
     # Lower plot styling
-    ax2.text(0.015, 0.86, "(b)", transform=ax2.transAxes, fontsize=11.0, fontweight="bold")
-    ax2.axhline(0.0, color="black", linestyle="-", linewidth=1.1, zorder=2)
+    d_max = max(all_deltas) if all_deltas else 25.0
+    d_min = min(all_deltas) if all_deltas else 0.0
+    y2_top = max(25.0, float(np.ceil((d_max + 14.0) / 5.0) * 5.0))
+    y2_bot = min(0.0, float(np.floor((d_min - 2.0) / 5.0) * 5.0))
+    y2_step = 5 if (y2_top - y2_bot) <= 35 else 10
+    y2_ticks = np.arange(int(y2_bot), int(y2_top) + 1, y2_step)
 
-    ax2.set_xlabel(r"Target Mixture Fraction $f$ (%)", fontsize=10.0)
-    ax2.set_ylabel(r"$\Delta P_{\mathrm{spatial}}$ (%)", fontsize=10.5)
-    ax2.set_xlim(-2.0, 103.0)
-    ax2.set_ylim(0.0, 25.0)
-    ax2.set_xticks(np.arange(0, 101, 10))
-    ax2.set_xticklabels([f"{x:.0f}%" for x in np.arange(0, 101, 10)], fontsize=9)
-    ax2.set_yticks(np.arange(0, 26, 5))
-    ax2.set_yticklabels([f"{y:.0f}%" for y in np.arange(0, 26, 5)], fontsize=8.5)
+    ax2.text(0.015, 0.85, "(b)", transform=ax2.transAxes, fontsize=9.5, fontweight="bold")
+    ax2.axhline(0.0, color="black", linestyle="-", linewidth=1.0, zorder=2)
+
+    ax2.set_xlabel(r"Target Mixture Fraction $f$ (\%)", fontsize=9.0)
+    ax2.set_ylabel(r"$\Delta P_{\mathrm{spatial}}$ (\%)", fontsize=9.0)
+    ax2.set_xlim(-2.0, max_f_pct + 3.0)
+    ax2.set_ylim(y2_bot, y2_top)
+    ax2.set_xticks(x_ticks)
+    ax2.set_xticklabels([f"{x:.0f}\\%" for x in x_ticks], fontsize=7.5)
+    ax2.set_yticks(y2_ticks)
+    ax2.set_yticklabels([f"{y:.0f}\\%" for y in y2_ticks], fontsize=7.5)
     ax2.grid(True, linestyle="--", alpha=0.5, color=COLOR_GRID)
 
-    ax2.legend(loc="upper right", fontsize=8.0, ncol=2, framealpha=0.92)
+    ax2.legend(loc="upper right", fontsize=6.5, ncol=4, framealpha=0.92)
 
     plt.subplots_adjust(top=0.97, bottom=0.08, left=0.09, right=0.97)
 
@@ -2280,10 +2315,14 @@ def print_and_export_subpixel_sensitivity_tables(data, out_dir, alpha=(1-CONFIDE
     py_tab = m2["table"] if m2 else data["py_table"]
     patch_ids = data["patch_ids"]
     patch_names = data["patch_names"]
+    avail_fractions = list(data.get("fractions", []))
     if fractions is None:
         fractions = [0.2, 0.4, 0.6, 0.8]
     else:
         fractions = list(fractions)
+    if len(avail_fractions) > 0:
+        matched = [f for f in fractions if any(np.isclose(f, af) for af in avail_fractions)]
+        fractions = matched if len(matched) > 0 else avail_fractions
 
     def compute_reference_sensitivities(sc_c_sub, sc_p_sub, py_sub):
         res = {}

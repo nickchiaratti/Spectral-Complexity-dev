@@ -49,17 +49,20 @@ os.environ["OPENBLAS_NUM_THREADS"] = "1"
 os.environ["MKL_NUM_THREADS"] = "1"
 os.environ["HDF5_USE_FILE_LOCKING"] = "FALSE"
 
-# Ensure script directory and parent directory are on sys.path
+# Ensure repository root and core subdirectories are on sys.path (ahead of any external repos)
 script_dir = Path(__file__).resolve().parent
-candidates = [
+repo_root = script_dir.parent
+for p in [
+    repo_root / "change_detection" / "pyccd",
+    repo_root / "change_detection" / "SC-CCM",
+    repo_root,
     script_dir,
-    script_dir.parent / "spectral-complexity-public",
-    script_dir.parent.parent / "spectral-complexity-public",
-    Path("F:/Resilio/IMGS 890 Research/spectral-complexity-public"),
-]
-for p in candidates:
-    if p.exists() and str(p) not in sys.path:
-        sys.path.insert(0, str(p))
+]:
+    p_str = str(p)
+    if p.exists():
+        while p_str in sys.path:
+            sys.path.remove(p_str)
+        sys.path.insert(0, p_str)
 
 # Import core modules
 try:
@@ -126,6 +129,40 @@ LAND_COVER_PATCHES = [
 # ==============================================================================
 # DATA LOADING & PREPARATION
 # ==============================================================================
+def _unscale_z_array(arr, ds):
+    """Converts quantized int16 Z-score arrays back to float32 using dataset attributes."""
+    if np.issubdtype(arr.dtype, np.integer):
+        scale = float(ds.attrs.get("scale_factor", 10000.0))
+        fill_val = int(ds.attrs.get("_FillValue", -32768))
+        out = np.full(arr.shape, np.nan, dtype=np.float32)
+        valid = (arr != fill_val)
+        out[valid] = arr[valid].astype(np.float32) / scale
+        return out
+    return arr.astype(np.float32)
+
+
+def _extract_l30_mask_chips(h5_file, base_grp, dataset_name, patch_bounds, n_patches, n_frames, patch_h, patch_w, l30_chips, l30_fill):
+    """Loads HLSL30 mask chips from BASELINE_CHIPS or falls back to the master HLSL30 grid."""
+    if dataset_name in base_grp:
+        return base_grp[dataset_name][:]
+
+    master_ds_name = "Fmask" if dataset_name == "HLSL30_Fmask" else "common_mask"
+    master_path = f"/HDFEOS/GRIDS/HLSL30/Data Fields/{master_ds_name}"
+    if master_path in h5_file and patch_bounds is not None:
+        master_ds = h5_file[master_path]
+        out = np.zeros((n_patches, n_frames, patch_h, patch_w), dtype=np.uint8)
+        for p_idx, bounds in enumerate(patch_bounds):
+            r0, c0 = int(bounds[0]), int(bounds[1])
+            h = int(bounds[2]) if len(bounds) > 2 else patch_h
+            w = int(bounds[3]) if len(bounds) > 3 else patch_w
+            out[p_idx] = master_ds[:, r0:r0 + h, c0:c0 + w].astype(np.uint8)
+        return out
+
+    if dataset_name == "HLSL30_common_mask":
+        return (l30_chips[:, :, 1, :, :] == l30_fill).astype(np.uint8)
+    return np.zeros((n_patches, n_frames, patch_h, patch_w), dtype=np.uint8)
+
+
 def load_benchmark_container(h5_path=DEFAULT_H5_PATH):
     """
     Loads benchmark dataset hierarchy, preloads metadata, baseline chips,
@@ -139,7 +176,7 @@ def load_benchmark_container(h5_path=DEFAULT_H5_PATH):
     if bm_group not in f:
         f.close()
         raise KeyError(f"Benchmark group '{bm_group}' not found in container '{h5_path}'. "
-                       f"Please run generate_patch_benchmark.py first.")
+                       f"Please run generate_stratified_patch_benchmark.py first.")
 
     bm = f[bm_group]
     meta_grp = bm["METADATA"]
@@ -149,6 +186,7 @@ def load_benchmark_container(h5_path=DEFAULT_H5_PATH):
     mixture_fractions = meta_grp.attrs["mixture_fractions"][:].astype(np.float32)
 
     injected_offsets = meta_grp.attrs.get("injected_offsets", np.array(INJ_OFFSETS, dtype=np.int32))
+    patch_bounds = meta_grp.attrs.get("patch_bounds")
     onset_date_str = meta_grp.attrs.get("injection_onset_date", INJECTION_ONSET_DATE)
     if isinstance(onset_date_str, bytes):
         onset_date_str = onset_date_str.decode("utf-8")
@@ -162,18 +200,27 @@ def load_benchmark_container(h5_path=DEFAULT_H5_PATH):
 
     # Load baseline chips
     base_grp = bm["BASELINE_CHIPS"]
-    chips = {
-        "HARMONIZED_z_score": base_grp["HARMONIZED_z_score"][:],
-        "HARMONIZED_common_mask": base_grp["HARMONIZED_common_mask"][:],
-        "HLSL30": base_grp["HLSL30"][:],
-        "HLSL30_Fmask": base_grp["HLSL30_Fmask"][:],
-        "HLSL30_common_mask": base_grp["HLSL30_common_mask"][:],
-        "HLSS30": base_grp["HLSS30"][:] if "HLSS30" in base_grp else None,
-    }
-
-    # Extract scale factors and fill values
+    hlsl30_chips = base_grp["HLSL30"][:]
     l30_scale = float(base_grp["HLSL30"].attrs.get("scale_factor", 10000.0))
     l30_fill = int(base_grp["HLSL30"].attrs.get("_FillValue", -9999))
+
+    n_patches, n_l30_frames, _, patch_h, patch_w = hlsl30_chips.shape
+    patch_size = int(meta_grp.attrs.get("patch_size", patch_h))
+    border_margin = int(meta_grp.attrs.get("border_margin", 2 if patch_size == 13 else 0))
+
+    harm_z_ds = base_grp["HARMONIZED_z_score"]
+    chips = {
+        "HARMONIZED_z_score": _unscale_z_array(harm_z_ds[:], harm_z_ds),
+        "HARMONIZED_common_mask": base_grp["HARMONIZED_common_mask"][:],
+        "HLSL30": hlsl30_chips,
+        "HLSL30_Fmask": _extract_l30_mask_chips(
+            f, base_grp, "HLSL30_Fmask", patch_bounds, n_patches, n_l30_frames, patch_h, patch_w, hlsl30_chips, l30_fill
+        ),
+        "HLSL30_common_mask": _extract_l30_mask_chips(
+            f, base_grp, "HLSL30_common_mask", patch_bounds, n_patches, n_l30_frames, patch_h, patch_w, hlsl30_chips, l30_fill
+        ),
+        "HLSS30": base_grp["HLSS30"][:] if "HLSS30" in base_grp else None,
+    }
 
     # Resolve acquisition timestamps for Landsat-8/9 observations
     l30_times = None
@@ -249,12 +296,19 @@ def load_benchmark_container(h5_path=DEFAULT_H5_PATH):
     nominal_thermals = np.full(len(l30_times), pccd.NOMINAL_THERMAL_KELVIN_SCALED, dtype=np.int16)
 
     # Reference to simulated cubes dataset (lazily sliced on demand)
-    sim_z_cubes_ds = bm["SIMULATED_CUBES/sliding_volume_z_score"]
+    sim_grp = bm["SIMULATED_CUBES"]
+    if "sliding_volume_z_score" in sim_grp:
+        sim_z_cubes_ds = sim_grp["sliding_volume_z_score"]
+    else:
+        sim_key = next(iter(sim_grp.keys()))
+        sim_z_cubes_ds = sim_grp[sim_key]
 
     data_bundle = {
         "h5_file": f,
         "sim_z_cubes_ds": sim_z_cubes_ds,
         "chips": chips,
+        "patch_size": patch_size,
+        "border_margin": border_margin,
         "harm_acq_times": harm_acq_times,
         "l30_times": l30_times,
         "l30_scale": l30_scale,
@@ -323,17 +377,21 @@ class BenchmarkEngine:
         if cache_key in self.scccd_cache:
             return self.scccd_cache[cache_key]
 
-        z_patch = self.data["sim_z_cubes_ds"][cond_idx, p_idx]
+        sim_ds = self.data["sim_z_cubes_ds"]
+        z_patch = _unscale_z_array(sim_ds[cond_idx, p_idx], sim_ds)
         mask_patch = self.data["chips"]["HARMONIZED_common_mask"][p_idx]
-        valid_patch = (mask_patch == 0)
+        valid_patch = (mask_patch == 0) & ~np.isnan(z_patch)
 
-        # Only evaluate the inner 9x9 region (rows 2:11, cols 2:11)
-        # The outer 2-pixel margin is un-evaluated by SC-CCD
-        y_inner = z_patch[:, 2:11, 2:11]
-        valid_inner = valid_patch[:, 2:11, 2:11]
+        patch_size = self.data["patch_size"]
+        margin = self.data["border_margin"]
+        eval_size = patch_size - 2 * margin
+        eval_slice = slice(margin, margin + eval_size)
+
+        y_inner = z_patch[:, eval_slice, eval_slice]
+        valid_inner = valid_patch[:, eval_slice, eval_slice]
 
         chunk_args = (
-            0, 9, 9,
+            0, eval_size, eval_size,
             y_inner, valid_inner,
             self.data["frac_years_harm"],
             self.data["X_full_scccd"],
@@ -347,22 +405,22 @@ class BenchmarkEngine:
         pred_full = np.full(z_patch.shape, np.nan, dtype=np.float32)
         rmse_full = np.full(z_patch.shape, np.nan, dtype=np.float32)
         anom_full = np.zeros(z_patch.shape, dtype=np.uint8)
-        date_full = np.full((PATCH_SIZE, PATCH_SIZE), np.nan, dtype=np.float64)
-        count_full = np.zeros((PATCH_SIZE, PATCH_SIZE), dtype=np.int32)
+        date_full = np.full((patch_size, patch_size), np.nan, dtype=np.float64)
+        count_full = np.zeros((patch_size, patch_size), dtype=np.int32)
 
-        pred_full[:, 2:11, 2:11] = res[2]
-        rmse_full[:, 2:11, 2:11] = res[3]
-        anom_full[:, 2:11, 2:11] = res[5]
+        pred_full[:, eval_slice, eval_slice] = res[2]
+        rmse_full[:, eval_slice, eval_slice] = res[3]
+        anom_full[:, eval_slice, eval_slice] = res[5]
         chunk_segments = res[8] if len(res) > 8 else {}
 
-        # Parse spatial change dates and counts from chunk_segments (identically to generate_patch_benchmark.py)
+        # Parse spatial change dates and counts from chunk_segments
         onset_ts = self.data["onset_ts"]
         harm_acq_times = self.data["harm_acq_times"]
-        for r_in in range(9):
-            for c_in in range(9):
+        for r_in in range(eval_size):
+            for c_in in range(eval_size):
                 p_segs = chunk_segments.get((r_in, c_in), [])
                 p_cnt = len([s for s in p_segs if s.get("has_break", False)])
-                count_full[2 + r_in, 2 + c_in] = p_cnt
+                count_full[margin + r_in, margin + c_in] = p_cnt
 
                 eff_ts_p = np.nan
                 for s in p_segs:
@@ -377,7 +435,7 @@ class BenchmarkEngine:
                                        if valid_inner[k, r_in, c_in] and harm_acq_times[k] >= onset_ts]
                             eff_ts_p = float(harm_acq_times[run_idx[0]]) if run_idx else c_ts_cand
                             break
-                date_full[2 + r_in, 2 + c_in] = eff_ts_p
+                date_full[margin + r_in, margin + c_in] = eff_ts_p
 
         result = {
             "z_data": z_patch,
@@ -495,9 +553,13 @@ class PatchBenchmarkViewer:
       3. Bottom Right: USGS LCMAP Landsat NIR time series with all detected breaks.
       4. Keyboard & mouse event bindings for exploration.
     """
-    def __init__(self, data, initial_patch=0, initial_mat=0, initial_frac=0, initial_pixel=(4, 4)):
+    def __init__(self, data, initial_patch=0, initial_mat=0, initial_frac=0, initial_pixel=None):
         self.data = data
         self.engine = BenchmarkEngine(data)
+
+        self.patch_size = int(data.get("patch_size", PATCH_SIZE))
+        self.border_margin = int(data.get("border_margin", 0))
+        self.eval_size = self.patch_size - 2 * self.border_margin
 
         self.num_patches = len(LAND_COVER_PATCHES)
         self.num_materials = len(data["materials"])
@@ -506,6 +568,8 @@ class PatchBenchmarkViewer:
         self.p_idx = max(0, min(self.num_patches - 1, initial_patch))
         self.mat_idx = max(0, min(self.num_materials - 1, initial_mat))
         self.frac_idx = max(0, min(self.num_fractions - 1, initial_frac))
+        if initial_pixel is None:
+            initial_pixel = data["injected_offsets"][0]
         self.sel_r, self.sel_c = initial_pixel
         self.grid_mode = "date"  # 'date' or 'count'
         self.inject_probe = True  # Enable on-the-fly target injection simulation on selected pixel
@@ -633,7 +697,7 @@ class PatchBenchmarkViewer:
         self.select_pixel(targets[idx][0], targets[idx][1])
 
     def select_pixel(self, r, c):
-        if 0 <= r < PATCH_SIZE and 0 <= c < PATCH_SIZE:
+        if 0 <= r < self.patch_size and 0 <= c < self.patch_size:
             self.sel_r = r
             self.sel_c = c
             self.render(refresh_grid=False)
@@ -643,7 +707,7 @@ class PatchBenchmarkViewer:
             return
         c = int(round(event.xdata))
         r = int(round(event.ydata))
-        if 0 <= r < PATCH_SIZE and 0 <= c < PATCH_SIZE:
+        if 0 <= r < self.patch_size and 0 <= c < self.patch_size:
             self.select_pixel(r, c)
 
     def on_key_press(self, event):
@@ -712,8 +776,9 @@ class PatchBenchmarkViewer:
 
         # SC-CCD Segments
         scccd_res = self.engine.get_scccd_results(self.mat_idx, self.frac_idx, self.p_idx)
-        if 2 <= self.sel_r < 11 and 2 <= self.sel_c < 11:
-            sc_segs = scccd_res.get("segments", {}).get((self.sel_r - 2, self.sel_c - 2), [])
+        m, es = self.border_margin, self.eval_size
+        if m <= self.sel_r < m + es and m <= self.sel_c < m + es:
+            sc_segs = scccd_res.get("segments", {}).get((self.sel_r - m, self.sel_c - m), [])
         else:
             sc_segs = []
 
@@ -802,7 +867,8 @@ class PatchBenchmarkViewer:
 
             # Underlay clear-sky natural true-color RGB composite
             rgb_base = self.patch_rgbs[self.p_idx]
-            grid_extent = [-0.5, PATCH_SIZE - 0.5, PATCH_SIZE - 0.5, -0.5]
+            ps, margin, es = self.patch_size, self.border_margin, self.eval_size
+            grid_extent = [-0.5, ps - 0.5, ps - 0.5, -0.5]
             self.ax_grid.imshow(rgb_base, interpolation="nearest", extent=grid_extent)
 
             change_dates = scccd_res["change_date"].copy()
@@ -812,10 +878,11 @@ class PatchBenchmarkViewer:
                 # Render total break count overlay
                 self.ax_cbar.set_visible(True)
                 counts_eval = change_counts.astype(np.float32)
-                counts_eval[:2, :] = np.nan
-                counts_eval[11:, :] = np.nan
-                counts_eval[:, :2] = np.nan
-                counts_eval[:, 11:] = np.nan
+                if margin > 0:
+                    counts_eval[:margin, :] = np.nan
+                    counts_eval[margin + es:, :] = np.nan
+                    counts_eval[:, :margin] = np.nan
+                    counts_eval[:, margin + es:] = np.nan
                 masked_counts = np.ma.masked_invalid(counts_eval)
 
                 max_c = max(1, int(np.nanmax(counts_eval))) if not np.all(np.isnan(counts_eval)) else 1
@@ -859,9 +926,9 @@ class PatchBenchmarkViewer:
                     self.ax_cbar.set_visible(False)
 
             # Display badge on pixels with multiple breaks (> 1)
-            for r_in in range(9):
-                for c_in in range(9):
-                    r_p, c_p = 2 + r_in, 2 + c_in
+            for r_in in range(es):
+                for c_in in range(es):
+                    r_p, c_p = margin + r_in, margin + c_in
                     cnt = change_counts[r_p, c_p]
                     if cnt > 1:
                         self.ax_grid.text(
@@ -871,13 +938,14 @@ class PatchBenchmarkViewer:
                             bbox=dict(boxstyle="round,pad=0.1", facecolor="black", alpha=0.7, edgecolor="none")
                         )
 
-            # Mark inner 9x9 evaluated boundary with dashed yellow box
-            eval_box = mpatches.Rectangle(
-                (1.5, 1.5), 9, 9,
-                linewidth=1.8, edgecolor="yellow", facecolor="none", linestyle="--",
-                label="Evaluated Region (9x9)"
-            )
-            self.ax_grid.add_patch(eval_box)
+            # Mark inner evaluated boundary with dashed yellow box when outer margin exists
+            if margin > 0:
+                eval_box = mpatches.Rectangle(
+                    (margin - 0.5, margin - 0.5), es, es,
+                    linewidth=1.8, edgecolor="yellow", facecolor="none", linestyle="--",
+                    label=f"Evaluated Region ({es}x{es})"
+                )
+                self.ax_grid.add_patch(eval_box)
 
             # Mark 4 designated target injection pixels (P1-P4)
             for p_num, (roff, coff) in enumerate(self.data["injected_offsets"], 1):
@@ -892,22 +960,23 @@ class PatchBenchmarkViewer:
                 )
 
             # Grid coordinates & labels
-            self.ax_grid.set_xticks(np.arange(PATCH_SIZE))
-            self.ax_grid.set_yticks(np.arange(PATCH_SIZE))
-            self.ax_grid.set_xticks(np.arange(-0.5, PATCH_SIZE, 1.0), minor=True)
-            self.ax_grid.set_yticks(np.arange(-0.5, PATCH_SIZE, 1.0), minor=True)
+            self.ax_grid.set_xticks(np.arange(ps))
+            self.ax_grid.set_yticks(np.arange(ps))
+            self.ax_grid.set_xticks(np.arange(-0.5, ps, 1.0), minor=True)
+            self.ax_grid.set_yticks(np.arange(-0.5, ps, 1.0), minor=True)
             self.ax_grid.grid(False, which="major")
             self.ax_grid.grid(True, which="minor", color="white", linestyle=":", linewidth=0.8, alpha=0.6)
             self.ax_grid.tick_params(which="minor", length=0)
-            self.ax_grid.set_xlim(-0.5, PATCH_SIZE - 0.5)
-            self.ax_grid.set_ylim(PATCH_SIZE - 0.5, -0.5)
-            self.ax_grid.set_xlabel(f"Patch Column (0 to {PATCH_SIZE - 1})", fontsize=10, fontweight="bold")
-            self.ax_grid.set_ylabel(f"Patch Row (0 to {PATCH_SIZE - 1})", fontsize=10, fontweight="bold")
+            self.ax_grid.set_xlim(-0.5, ps - 0.5)
+            self.ax_grid.set_ylim(ps - 0.5, -0.5)
+            self.ax_grid.set_xlabel(f"Patch Column (0 to {ps - 1})", fontsize=10, fontweight="bold")
+            self.ax_grid.set_ylabel(f"Patch Row (0 to {ps - 1})", fontsize=10, fontweight="bold")
 
             frac_lbl = f"{fraction:.2f} (Unperturbed Patch)" if fraction == 0.0 else f"{fraction:.2f}"
+            eval_lbl = f"Inner {es}x{es}" if margin > 0 else f"Full {ps}x{ps}"
             grid_title = (
-                f"{PATCH_SIZE}x{PATCH_SIZE} Spatial Grid: {patch_info['class']} ({patch_info['name']})\n"
-                f"Target: {mat_info['name']} (Fraction: {frac_lbl}) | Evaluated: Inner 9x9"
+                f"{ps}x{ps} Spatial Grid: {patch_info['class']} ({patch_info['name']})\n"
+                f"Target: {mat_info['name']} (Fraction: {frac_lbl}) | Evaluated: {eval_lbl}"
             )
             self.ax_grid.set_title(grid_title, fontsize=11, fontweight="bold", pad=8)
 
@@ -995,6 +1064,13 @@ class PatchBenchmarkViewer:
                     markerfacecolor="none", alpha=0.35, label="Masked (Other)"
                 )
 
+        # Extract SC-CCD segments for this pixel
+        m, es = self.border_margin, self.eval_size
+        if m <= self.sel_r < m + es and m <= self.sel_c < m + es:
+            pixel_segs = scccd_res.get("segments", {}).get((self.sel_r - m, self.sel_c - m), [])
+        else:
+            pixel_segs = []
+
         # Plot SC-CCD Harmonic Regression Segments with confidence bands
         p_val = scccm.CHANGE_PROBABILITY
         df = 3
@@ -1003,16 +1079,25 @@ class PatchBenchmarkViewer:
 
         pred_mask = ~np.isnan(pred_z)
         if np.any(pred_mask):
-            pred_dates = harm_dates[pred_mask]
-            preds = pred_z[pred_mask]
-            rmses = rmse_z[pred_mask]
-
-            rmse_diff = np.diff(rmses)
-            break_indices = np.where(rmse_diff != 0)[0] + 1
-
-            date_segs = np.split(pred_dates, break_indices)
-            pred_segs = np.split(preds, break_indices)
-            rmse_segs = np.split(rmses, break_indices)
+            if pixel_segs:
+                frame_idx = np.arange(len(harm_dates))
+                date_segs, pred_segs, rmse_segs = [], [], []
+                for s in pixel_segs:
+                    s_start = int(s["start_idx"])
+                    s_end = int(s["break_idx"]) if (s.get("has_break") and s.get("break_idx", -1) >= s_start) else int(s["end_idx"])
+                    seg_mask = pred_mask & (frame_idx >= s_start) & (frame_idx <= s_end)
+                    if np.any(seg_mask):
+                        date_segs.append(harm_dates[seg_mask])
+                        pred_segs.append(pred_z[seg_mask])
+                        rmse_segs.append(rmse_z[seg_mask])
+            else:
+                pred_dates = harm_dates[pred_mask]
+                preds = pred_z[pred_mask]
+                rmses = rmse_z[pred_mask]
+                break_indices = np.where(~np.isclose(rmses[1:], rmses[:-1], equal_nan=True))[0] + 1
+                date_segs = np.split(pred_dates, break_indices)
+                pred_segs = np.split(preds, break_indices)
+                rmse_segs = np.split(rmses, break_indices)
 
             seg_colors = ["#1f77b4", "#2ca02c", "#9467bd", "#ff7f0e", "#17becf"]
             for i, (s_dates, s_preds, s_rmses) in enumerate(zip(date_segs, pred_segs, rmse_segs)):
@@ -1035,11 +1120,7 @@ class PatchBenchmarkViewer:
             label=f"Onset ({self.data['onset_date_str']})"
         )
 
-        # Extract and mark ALL SC-CCD breaks for this pixel
-        if 2 <= self.sel_r < 11 and 2 <= self.sel_c < 11:
-            pixel_segs = scccd_res.get("segments", {}).get((self.sel_r - 2, self.sel_c - 2), [])
-        else:
-            pixel_segs = []
+        # Mark ALL SC-CCD breaks for this pixel
 
         break_segs = [s for s in pixel_segs if s.get("has_break", False)]
         tot_sc_breaks = len(break_segs)
@@ -1238,16 +1319,19 @@ class PatchBenchmarkViewer:
             ]
             if len(sc_match) > 0:
                 row = sc_match[0]
+                fields = row.dtype.names or ()
                 det = bool(row["break_detected"])
                 lat = float(row["latency_days"])
-                c_lat = float(row["confirmation_latency_days"])
                 mag = float(row["break_magnitude"])
-                n_tot = int(row["total_breaks"])
-                n_post = int(row["post_onset_breaks"])
-                has_mult = bool(row["has_multiple_post_breaks"])
+                n_tot = int(row["total_breaks"]) if "total_breaks" in fields else tot_sc_breaks
+                n_post = int(row["post_onset_breaks"]) if "post_onset_breaks" in fields else post_sc_breaks
+                has_mult = bool(row["has_multiple_post_breaks"]) if "has_multiple_post_breaks" in fields else (n_post > 1)
                 mult_tag = " [Multiple]" if has_mult else ""
                 if det:
-                    bench_sc_info = f"Detected: True (+{lat:.1f}d, conf=+{c_lat:.1f}d, mag={mag:.2f}) | Breaks: {n_tot} (Post: {n_post}){mult_tag}"
+                    conf_part = ""
+                    if "confirmation_latency_days" in fields and not np.isnan(row["confirmation_latency_days"]):
+                        conf_part = f", conf=+{float(row['confirmation_latency_days']):.1f}d"
+                    bench_sc_info = f"Detected: True (+{lat:.1f}d{conf_part}, mag={mag:.2f}) | Breaks: {n_tot} (Post: {n_post}){mult_tag}"
                 else:
                     bench_sc_info = f"Detected: False | Breaks: {n_tot} (Post: {n_post})"
             else:
@@ -1260,12 +1344,13 @@ class PatchBenchmarkViewer:
             ]
             if len(py_match) > 0:
                 row = py_match[0]
+                fields = row.dtype.names or ()
                 det = bool(row["break_detected"])
                 lat = float(row["latency_days"])
                 mag = float(row["break_magnitude"])
-                n_tot = int(row["total_breaks"])
-                n_post = int(row["post_onset_breaks"])
-                has_mult = bool(row["has_multiple_post_breaks"])
+                n_tot = int(row["total_breaks"]) if "total_breaks" in fields else tot_py_breaks
+                n_post = int(row["post_onset_breaks"]) if "post_onset_breaks" in fields else post_py_breaks
+                has_mult = bool(row["has_multiple_post_breaks"]) if "has_multiple_post_breaks" in fields else (n_post > 1)
                 mult_tag = " [Multiple]" if has_mult else ""
                 if det:
                     bench_py_info = f"Detected: True (+{lat:.1f}d, mag={mag:.2f}) | Breaks: {n_tot} (Post: {n_post}){mult_tag}"
@@ -1317,8 +1402,8 @@ def parse_arguments():
         help="Initial mixture fill fraction (default: 0.0 for unperturbed patch)"
     )
     parser.add_argument(
-        "--pixel", type=int, nargs=2, default=[4, 4],
-        help="Initial pixel row and col (default: 4 4 for target P1)"
+        "--pixel", type=int, nargs=2, default=None,
+        help="Initial pixel row and col (default: first injected target offset, e.g. 2 2 or 4 4)"
     )
     parser.add_argument(
         "--save-png", type=str, default=None,
@@ -1361,7 +1446,10 @@ def resolve_indices(args, data):
     frac_idx = int(np.argmin(np.abs(fractions - frac_val)))
 
     # Resolve pixel coordinates
-    sel_r, sel_c = args.pixel[0], args.pixel[1]
+    if args.pixel is None:
+        sel_r, sel_c = data["injected_offsets"][0]
+    else:
+        sel_r, sel_c = args.pixel[0], args.pixel[1]
     return patch_idx, mat_idx, frac_idx, (sel_r, sel_c)
 
 

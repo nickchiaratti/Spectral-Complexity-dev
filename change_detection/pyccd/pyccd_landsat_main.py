@@ -32,6 +32,7 @@ import datetime
 import warnings
 import h5py
 import numpy as np
+import scipy.stats
 import multiprocessing
 import joblib
 import contextlib
@@ -634,7 +635,8 @@ def decode_categorical_qa(fmask_arr, common_mask_arr, sr_data, fill_val=None):
     qas[is_shadow] = 3
     # 5. Cloud = 5 (Cloud > Shadow > Snow > Water)
     # Includes Fmask cloud/cirrus/adj_cloud, plus any residual common_mask invalidity
-    qas[is_cloud | (common_mask_arr & ~is_shadow & ~is_snow & ~is_fill)] = 5
+    common_mask_bool = np.asarray(common_mask_arr, dtype=bool)
+    qas[is_cloud | (common_mask_bool & ~is_shadow & ~is_snow & ~is_fill)] = 5
     # 6. Fill = 0 (Fill beats all)
     qas[is_fill] = 0
 
